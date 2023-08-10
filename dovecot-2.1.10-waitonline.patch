@@ -1,10 +1,10 @@
-diff -up dovecot-2.3.19.1/dovecot.service.in.waitonline dovecot-2.3.19.1/dovecot.service.in
---- dovecot-2.3.19.1/dovecot.service.in.waitonline	2022-06-14 08:55:03.000000000 +0200
-+++ dovecot-2.3.19.1/dovecot.service.in	2022-11-08 20:28:37.550081709 +0100
+diff -up dovecot-2.4.0/dovecot.service.in.waitonline dovecot-2.4.0/dovecot.service.in
+--- dovecot-2.4.0/dovecot.service.in.waitonline	2023-08-10 23:02:34.820934239 +0200
++++ dovecot-2.4.0/dovecot.service.in	2023-08-10 23:02:58.269487182 +0200
 @@ -12,6 +12,7 @@ Description=Dovecot IMAP/POP3 email serv
  Documentation=man:dovecot(1)
  Documentation=https://doc.dovecot.org/
- After=local-fs.target network-online.target
+ After=local-fs.target network-online.target remote-fs.target
 +Wants=network-online.target
  
  [Service]

@@ -1,14 +1,14 @@
 %global __provides_exclude_from %{_docdir}
 %global __requires_exclude_from %{_docdir}
 %global with_pigeonhole 1
-%global with_check 0
+%global with_check 1
 
 Summary: Secure imap and pop3 server
 Name: dovecot
 Epoch: 1
 Version: 2.4.0
 %global prever %{nil}
-Release: 4.20230810213831572145.main.12677.g9ef94bbbfb%{?dist}
+Release: 4.20230810231621841643.main.12679.gf3d4f2471b%{?dist}
 #dovecot itself is MIT, a few sources are PD, pigeonhole is LGPLv2
 License: MIT AND LGPL-2.1-only
 
@@ -148,13 +148,13 @@ This package provides the development files for dovecot.
 %setup -q -n dovecot-2.4.0
 ./autogen.sh
 #-a 8
-#%patch -P1 -p1 -b .default-settings
+%patch -P1 -p1 -b .default-settings
 %patch -P2 -p1 -b .mkcert-permissions
 %patch -P3 -p1 -b .mkcert-paths
-#%patch -P6 -p1 -b .waitonline
-#%patch -P8 -p1 -b .initbysystemd
-#%patch -P9 -p1 -b .systemd_w_protectsystem
-#%patch -P15 -p1 -b .bigkey
+%patch -P6 -p1 -b .waitonline
+%patch -P8 -p1 -b .initbysystemd
+%patch -P9 -p1 -b .systemd_w_protectsystem
+%patch -P15 -p1 -b .bigkey
 #%patch -P16 -p1 -b .opensslhmac
 #%patch -P17 -p1 -b .fixvalcond
 #%patch -P18 -p1 -b .valbasherr
@@ -526,8 +526,8 @@ make check
 %{_libdir}/%{name}/dict/libdriver_pgsql.so
 
 %changelog
-* Thu Aug 10 2023 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20230810213831572145.main.12677.g9ef94bbbfb
-New release ${PACKIT_PROJECT_VERSION}
+* Thu Aug 10 2023 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20230810231621841643.main.12679.gf3d4f2471b
+- New release ${PACKIT_PROJECT_VERSION}
 
 * Mon Jul 31 2023 Michal Hlavinka <mhlavink@redhat.com> - 1:2.2.20-4.20230731233539804152.main.12671.g34a18f5a79
 - dict-redis: Fix error handling for failed synchronous commits (Timo Sirainen)
