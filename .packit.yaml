@@ -37,4 +37,5 @@ jobs:
   owner: mhlavink
   project: dovecotci
   targets: [fedora-latest-stable]
+  enable_net: true
 
