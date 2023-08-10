@@ -1,0 +1,40 @@
+downstream_package_name: dovecot
+upstream_package_name: dovecot
+specfile_path: dovecot.spec
+files_to_sync: 
+  - dovecot.spec
+  - .packit.yaml
+actions:
+  #changelog-entry:
+  post-upstream-clone:
+  - bash -c "rm -rf ./dovecot-pigeonhole"
+  - git clone --branch main --depth 1 https://github.com/dovecot/pigeonhole.git dovecot-pigeonhole
+  create-archive:
+  - bash -c 'rm -rf dovecot-2.4.0; mkdir dovecot-2.4.0'
+  - git clone . dovecot-2.4.0
+  - mv dovecot-pigeonhole dovecot-2.4.0/dovecot-pigeonhole
+  - bash -c 'sed -i -e "s|build-aux/git-version-gen|echo 2.4.0|" -e "s|build-aux/git-abi-version-gen|echo \\\"\\\\\"2.4.ABIv0\\\\\"\\\"|" dovecot-2.4.0/configure.ac'
+  - bash -c 'cd dovecot-2.4.0/dovecot-pigeonhole; sed -i -e "s|build-aux/git-version-gen|echo $(git describe --always)|" -e "s|build-aux/git-abi-version-gen|echo \\\"\\\\\"0.50.ABIv0\\\\\"\\\"|" configure.ac'
+  - tar czf dovecot-2.4.0.tar.gz dovecot-2.4.0/
+  - bash -c 'echo dovecot-2.4.0.tar.gz'
+  changelog-entry:
+  - echo "New release ${PACKIT_PROJECT_VERSION}"
+  get-current-version:
+  - echo "2.4.0"
+srpm_build_deps:
+- autoconf
+- automake
+- gettext-devel
+- libtool
+- bison
+- flex
+- openssl-devel
+- zlib-devel
+- wget
+jobs:
+- job: copr_build
+  trigger: commit
+  owner: mhlavink
+  project: dovecotci
+  targets: [fedora-latest-stable]
+
