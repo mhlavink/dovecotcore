@@ -8,7 +8,7 @@ Name: dovecot
 Epoch: 1
 Version: 2.4.0
 %global prever %{nil}
-Release: 4.20230810231621841643.main.12679.gf3d4f2471b%{?dist}
+Release: 4.20230811101200064191.main.12680.g00ade36432%{?dist}
 #dovecot itself is MIT, a few sources are PD, pigeonhole is LGPLv2
 License: MIT AND LGPL-2.1-only
 
@@ -53,6 +53,7 @@ Patch22: dovecot-configure-c99.patch
 
 # Fedora/RHEL specific, drop OTP which uses SHA1 so we dont use SHA1 for crypto purposes
 Patch23: dovecot-2.3.20-nolibotp.patch
+Patch24: dovecot-2.4.0-openssl308.patch
 
 Source15: prestartscript
 
@@ -163,6 +164,7 @@ This package provides the development files for dovecot.
 #%patch -P21 -p1 -b .7bad6a24
 #%patch -P22 -p1 -b .c99
 #%patch -P23 -p1 -b .nolibotp
+%patch -P 24 -p1 -b .openssl308
 
 %if 0%{?with_pigeonhole}
 cp run-test-valgrind.supp dovecot-pigeonhole/
@@ -383,7 +385,7 @@ make check
 
 %_tmpfilesdir/dovecot.conf
 %{_unitdir}/dovecot.service
-#%{_unitdir}/dovecot-init.service
+%{_unitdir}/dovecot-init.service
 %{_unitdir}/dovecot.socket
 
 %dir %{_sysconfdir}/dovecot

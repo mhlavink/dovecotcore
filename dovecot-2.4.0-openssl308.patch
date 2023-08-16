@@ -1,0 +1,54 @@
+diff --git a/src/lib-dcrypt/dcrypt-openssl3.c b/src/lib-dcrypt/dcrypt-openssl3.c
+index 6b5f26428a..97da3f0b54 100644
+--- a/src/lib-dcrypt/dcrypt-openssl3.c
++++ b/src/lib-dcrypt/dcrypt-openssl3.c
+@@ -662,13 +662,37 @@ dcrypt_openssl_ctx_hmac_final(struct dcrypt_context_hmac *ctx, buffer_t *result,
+  */
+ static const char *ec_key_get_pub_point_hex(const EVP_PKEY *pkey)
+ {
+-	/* get the public key */
+-	unsigned char buf[EVP_PKEY_size(pkey)*2];
++	if (!EVP_PKEY_is_a(pkey, "EC"))
++		return NULL;
+ 	size_t len;
+-	EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, buf, sizeof(buf), &len);
+-	return binary_to_hex_ucase(buf, len);
++
++	EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0, &len);
++	buffer_t *parambuf = t_buffer_create(len+1);
++	EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME, (char *)parambuf->data, len+1, &len);
++	int nid = OBJ_txt2nid(parambuf->data);
++
++	EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, NULL, 0, &len);
++	parambuf = t_buffer_create(len+1);
++	EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, (unsigned char *)parambuf->data, len+1, &len);
++
++	EC_GROUP *ec_grp = EC_GROUP_new_by_curve_name(nid);
++	if (ec_grp == NULL)
++		return NULL;
++	EC_POINT *point = EC_POINT_new(ec_grp);
++	if (point == NULL) {
++		EC_GROUP_free(ec_grp);
++		return NULL;
++	}
++
++	if (!EC_POINT_oct2point(ec_grp, point, parambuf->data, len, NULL))
++		return NULL;
++	char *ret = EC_POINT_point2hex(ec_grp, point, POINT_CONVERSION_COMPRESSED, NULL);
++	EC_GROUP_free(ec_grp);
++	EC_POINT_free(point);
++	return ret;
+ }
+ 
++
+ static int dcrypt_EVP_PKEY_get_nid(const EVP_PKEY *pkey)
+ {
+ 	char buf[128];
+@@ -770,6 +794,7 @@ dcrypt_evp_pkey_from_point(int nid, EC_POINT *point, EVP_PKEY **pkey_r, const ch
+ 	params[0] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, group, 0);
+ 	params[1] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_EC_ENCODING, "named_curve", 0);
+ 	params[2] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT, "uncompressed", 0);
++	//params[2] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT, "compressed", 0);
+ 	params[3] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY, pptr, plen);
+ 	params[4] = OSSL_PARAM_construct_end();
+ 
