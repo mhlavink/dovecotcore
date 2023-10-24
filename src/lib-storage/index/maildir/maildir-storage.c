@@ -106,7 +106,7 @@ maildir_storage_find_root_dir(const struct mail_namespace *ns)
 	if (ns->owner != NULL &&
 	    mail_user_get_home(ns->owner, &home) > 0) {
 		path = t_strconcat(home, "/Maildir", NULL);
-		if (access(path, R_OK|W_OK|X_OK) == 0) {
+		if (i_faccessat2(AT_FDCWD, path, R_OK | W_OK | X_OK, AT_EACCESS) == 0) {
 			e_debug(event,
 				"maildir autodetect: root exists (%s)", path);
 			return path;
@@ -115,7 +115,7 @@ maildir_storage_find_root_dir(const struct mail_namespace *ns)
 			"maildir autodetect: access(%s, rwx): failed: %m", path);
 	} else {
 		e_debug(event, "maildir autodetect: Home directory not set");
-		if (access("/cur", R_OK|W_OK|X_OK) == 0) {
+		if (i_faccessat2(AT_FDCWD, "/cur", R_OK | W_OK | X_OK, AT_EACCESS) == 0) {
 			e_debug(event,
 				"maildir autodetect: /cur exists, assuming chroot");
 			return "/";
@@ -187,7 +187,7 @@ mkdir_verify(struct mailbox *box, const char *dir, bool verify)
 	} else if (errno == ENOENT) {
 		mail_storage_set_error(box->storage, MAIL_ERROR_NOTFOUND,
 			"Mailbox was deleted while it was being created");
-	} else if (errno == EACCES) {
+	} else if (ENOACCESS(errno)) {
 		if (box->list->ns->type == MAIL_NAMESPACE_TYPE_SHARED) {
 			/* shared namespace, don't log permission errors */
 			mail_storage_set_error(box->storage, MAIL_ERROR_PERM,
@@ -213,7 +213,7 @@ static int maildir_check_tmp(struct mail_storage *storage, const char *dir)
 	if (stat(path, &st) < 0) {
 		if (errno == ENOENT || errno == ENAMETOOLONG)
 			return 0;
-		if (errno == EACCES) {
+		if (ENOACCESS(errno)) {
 			mail_storage_set_critical(storage, "%s",
 				mail_error_eacces_msg("stat", path));
 			return -1;
@@ -712,8 +712,8 @@ bool maildir_is_backend_readonly(struct maildir_mailbox *mbox)
 		const char *box_path = mailbox_get_path(&mbox->box);
 
 		mbox->backend_readonly_set = TRUE;
-		if (access(t_strconcat(box_path, "/cur", NULL), W_OK) < 0 &&
-		    errno == EACCES)
+		if (i_faccessat2(AT_FDCWD, t_strconcat(box_path, "/cur", NULL), W_OK, AT_EACCESS) < 0 &&
+		    ENOACCESS(errno))
 			mbox->backend_readonly = TRUE;
 	}
 	return mbox->backend_readonly;

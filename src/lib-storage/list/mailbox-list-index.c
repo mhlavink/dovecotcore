@@ -28,6 +28,7 @@ void mailbox_list_index_set_index_error(struct mailbox_list *list)
 	struct mailbox_list_index *ilist = INDEX_LIST_CONTEXT_REQUIRE(list);
 
 	mailbox_list_set_internal_error(list);
+	mail_index_get_last_error(ilist->index, &ilist->index_error_code);
 	mail_index_reset_error(ilist->index);
 }
 
@@ -646,6 +647,10 @@ int mailbox_list_index_refresh_force(struct mailbox_list *list)
 			/* I/O failure - don't try to handle corruption,
 			   since we don't have the latest state. */
 			handle_corruption = FALSE;
+			if (ilist->index_error_code == MAIL_INDEX_ERROR_CODE_NO_ACCESS)
+				ret = mail_index_refresh(ilist->index);
+			if (ret >= 0)
+				ret = mailbox_list_index_parse(list, view, FALSE);
 		}
 	} else {
 		ret = mailbox_list_index_parse(list, view, FALSE);

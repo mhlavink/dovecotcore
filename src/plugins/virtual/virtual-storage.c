@@ -634,21 +634,9 @@ virtual_storage_get_status(struct mailbox *box,
 	struct virtual_mailbox *mbox =
 		container_of(box, struct virtual_mailbox, box);
 
-	if ((items & STATUS_LAST_CACHED_SEQ) != 0)
-		items |= STATUS_MESSAGES;
-
 	if (index_storage_get_status(box, items, status_r) < 0)
 		return -1;
 
-	if ((items & STATUS_LAST_CACHED_SEQ) != 0) {
-		/* Virtual mailboxes have no cached data of their own, so the
-		   current value is always 0. The most important use for this
-		   functionality is for "doveadm index" to do FTS indexing and
-		   it doesn't really matter there if we set this value
-		   correctly or not. So for now just assume that everything is
-		   indexed. */
-		status_r->last_cached_seq = status_r->messages;
-	}
 	if (!mbox->have_guid_flags_set) {
 		if (virtual_storage_set_have_guid_flags(mbox) < 0)
 			return -1;
@@ -861,6 +849,48 @@ virtual_get_virtual_backend_boxes(struct mailbox *box,
 	}
 }
 
+/* This function is meant to be called only with mailboxes retrieved from
+   virtual_get_virtual_backend_boxes() and to be invoked with the same box
+   argument as used in that function. */
+static uint32_t
+virtual_get_virtual_backend_last_uid(struct mailbox *box, struct mailbox *bbox)
+{
+	struct virtual_mailbox *mbox =
+		container_of(box, struct virtual_mailbox, box);
+
+	struct virtual_backend_box *vbox;
+	array_foreach_elem(&mbox->backend_boxes, vbox) {
+		if (vbox->box == bbox) {
+			i_assert(vbox->sync_next_uid > 0);
+			return vbox->sync_next_uid - 1;
+		}
+	}
+
+	i_panic("Backend box '%s' unexpectedly not found in virtual box '%s's backends",
+		bbox->name, box->name);
+}
+
+static void
+virtual_get_virtual_backend_mail_uid(struct mailbox *box, uint32_t seq,
+				     struct mailbox **backend_box_r,
+				     uint32_t *backend_uid_r)
+{
+	struct virtual_mailbox *mbox =
+		container_of(box, struct virtual_mailbox, box);
+
+	const void *data;
+	mail_index_lookup_ext(box->view, seq, mbox->virtual_ext_id, &data, NULL);
+	i_assert(data != NULL);
+
+	const struct virtual_mail_index_record *vrec = data;
+	struct virtual_backend_box *vbbox;
+	bool found = virtual_backend_box_lookup(mbox, vrec->mailbox_id, &vbbox);
+	i_assert(found);
+
+	*backend_box_r = vbbox->box;
+	*backend_uid_r = vrec->real_uid;
+}
+
 static bool virtual_is_inconsistent(struct mailbox *box)
 {
 	struct virtual_mailbox *mbox =
@@ -962,7 +992,9 @@ struct mailbox virtual_mailbox = {
 };
 
 struct virtual_mailbox_vfuncs virtual_mailbox_vfuncs = {
-	virtual_get_virtual_uids,
-	virtual_get_virtual_uid_map,
-	virtual_get_virtual_backend_boxes
+	.get_virtual_uids = virtual_get_virtual_uids,
+	.get_virtual_uid_map = virtual_get_virtual_uid_map,
+	.get_virtual_backend_boxes = virtual_get_virtual_backend_boxes,
+	.get_virtual_backend_last_uid = virtual_get_virtual_backend_last_uid,
+	.get_virtual_backend_mail_uid = virtual_get_virtual_backend_mail_uid,
 };

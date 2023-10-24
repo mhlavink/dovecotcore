@@ -195,10 +195,7 @@ struct mail_index_settings {
 struct mail_index_error {
 	/* Human-readable error text */
 	char *text;
-
-	/* Error happened because there's no disk space, i.e. syscall failed
-	   with ENOSPC or EDQUOT. */
-	bool nodiskspace:1;
+	enum mail_index_error_code code;
 };
 
 struct mail_index {
@@ -273,7 +270,7 @@ struct mail_index {
 	/* Module-specific contexts. */
 	ARRAY(union mail_index_module_context *) module_contexts;
 
-	/* Last error returned by mail_index_get_error_message().
+	/* Last error returned by mail_index_get_last_error().
 	   Cleared by mail_index_reset_error(). */
 	struct mail_index_error last_error;
 	/* Timestamp when mmap() failure was logged the last time. This is used
@@ -420,9 +417,13 @@ unsigned int mail_index_map_ext_hdr_offset(unsigned int name_len);
 void mail_index_fsck_locked(struct mail_index *index);
 
 /* Log an error and set it as the index's current error that is available
-   with mail_index_get_error_message(). */
+   with mail_index_get_last_error(). */
 void mail_index_set_error(struct mail_index *index, const char *fmt, ...)
 	ATTR_FORMAT(2, 3) ATTR_COLD;
+void mail_index_set_error_code(struct mail_index *index,
+			       enum mail_index_error_code code,
+			       const char *fmt, ...)
+	ATTR_FORMAT(3, 4) ATTR_COLD;
 /* Same as mail_index_set_error(), but don't log the error. */
 void mail_index_set_error_nolog(struct mail_index *index, const char *str)
 	ATTR_COLD;

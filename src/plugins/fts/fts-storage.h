@@ -51,6 +51,7 @@ struct fts_search_context {
 	bool fts_lookup_success:1;
 	bool indexing_timed_out:1;
 	bool virtual_seen_unindexed_gaps:1;
+	bool mailbox_failed:1;
 };
 
 /* Figure out if we want to use full text search indexes and update
@@ -71,4 +72,7 @@ void fts_mail_allocated(struct mail *mail);
 void fts_mail_namespaces_added(struct mail_namespace *ns);
 void fts_mailbox_allocated(struct mailbox *box);
 void fts_mailbox_list_created(struct mailbox_list *list);
+int fts_mailbox_get_status(struct mailbox *box, enum mailbox_status_items items,
+			   struct mailbox_status *status_r);
+
 #endif

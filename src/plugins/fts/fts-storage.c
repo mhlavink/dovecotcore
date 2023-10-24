@@ -54,7 +54,6 @@ struct fts_transaction_context {
 	union mailbox_transaction_module_context module_ctx;
 
 	struct fts_scores *scores;
-	uint32_t next_index_seq;
 	uint32_t highest_virtual_uid;
 	unsigned int precache_extra_count;
 
@@ -77,54 +76,33 @@ static MODULE_CONTEXT_DEFINE_INIT(fts_mail_module, &mail_module_register);
 static MODULE_CONTEXT_DEFINE_INIT(fts_mailbox_list_module,
 				  &mailbox_list_module_register);
 
-static int fts_mailbox_get_last_cached_seq(struct mailbox *box, uint32_t *seq_r)
+static int fts_mailbox_get_last_indexed_uid(struct mailbox *box, uint32_t *uid_r)
 {
 	struct fts_mailbox_list *flist = FTS_LIST_CONTEXT_REQUIRE(box->list);
-	uint32_t seq1, seq2, last_uid;
-	int ret;
-
-	ret = fts_search_get_first_missing_uid(flist->backend, box, &last_uid);
+	int ret = fts_search_get_first_missing_uid(flist->backend, box, uid_r);
 	if (ret < 0) {
 		mail_storage_set_internal_error(box->storage);
 		return -1;
 	}
-
-	if (ret == 0 && last_uid == 0) {
-		/* nothing is indexed. */
-		*seq_r = 0;
-	} else {
-		if (ret > 0) {
-			/* everything is indexed */
-			last_uid = (uint32_t)-1;
-		}
-		mailbox_get_seq_range(box, 1, last_uid, &seq1, &seq2);
-		*seq_r = seq2;
-	}
 	return 0;
 }
 
-static int
-fts_mailbox_get_status(struct mailbox *box, enum mailbox_status_items items,
-		       struct mailbox_status *status_r)
+int fts_mailbox_get_status(struct mailbox *box, enum mailbox_status_items items,
+			   struct mailbox_status *status_r)
 {
 	struct fts_mailbox *fbox = FTS_CONTEXT_REQUIRE(box);
-	uint32_t seq;
-
-	if (fbox->module_ctx.super.get_status(box, items, status_r) < 0)
+	if (fbox->module_ctx.super.get_status(
+			box, items & ENUM_NEGATE(STATUS_FTS_LAST_INDEXED_UID),
+			status_r) < 0)
 		return -1;
 
-	if ((items & STATUS_LAST_CACHED_SEQ) != 0) {
-		if (fts_mailbox_get_last_cached_seq(box, &seq) < 0)
-			return -1;
+	if ((items & STATUS_FTS_LAST_INDEXED_UID) != 0 &&
+	    fts_mailbox_get_last_indexed_uid(
+			box, &status_r->fts_last_indexed_uid) < 0)
+		return -1;
 
-		/* Always use the FTS's last_cached_seq. This is because we
-		   don't want to reindex all mails to FTS if .cache file is
-		   deleted. */
-		status_r->last_cached_seq = seq;
-	}
 	return 0;
 }
-
 
 static void fts_scores_unref(struct fts_scores **_scores)
 {
@@ -315,7 +293,7 @@ fts_mailbox_search_next_nonblock(struct mail_search_context *ctx,
 			*tryagain_r = TRUE;
 			return FALSE;
 		}
-		if (fctx->indexing_timed_out) {
+		if (fctx->indexing_timed_out || fctx->mailbox_failed) {
 			*tryagain_r = FALSE;
 			return FALSE;
 		}
@@ -353,6 +331,78 @@ fts_search_apply_results_level(struct mail_search_context *ctx,
 	}
 }
 
+/* Returns 1 if already indexed,
+   Returns 0 if not yet indexed,
+   Returns -1 if not cached at all. */
+static int
+fts_search_virtual_uid_is_indexed(struct fts_search_context *fctx,
+				  const char *backend_vname, uint32_t backend_uid)
+{
+	HASH_TABLE_TYPE(virtual_last_indexed) *table =
+		&fctx->last_indexed_virtual_uids;
+
+	const char *vname;
+	void *prev_value;
+	if (!hash_table_lookup_full(*table, backend_vname, &vname, &prev_value))
+		return -1;
+
+	uint32_t prev_uid = POINTER_CAST_TO(prev_value, uint32_t);
+	return backend_uid <= prev_uid ? 1 : 0;
+}
+
+static void
+fts_search_virtual_uid_set_indexed(struct fts_search_context *fctx,
+				   const char *backend_vname, uint32_t backend_uid)
+{
+	HASH_TABLE_TYPE(virtual_last_indexed) *table =
+		&fctx->last_indexed_virtual_uids;
+
+	const char *vname;
+	void *prev_value;
+	if (!hash_table_lookup_full(*table, backend_vname, &vname, &prev_value)) {
+  		vname = p_strdup(fctx->result_pool, backend_vname);
+		prev_value = NULL;
+	}
+
+	uint32_t prev_uid = POINTER_CAST_TO(prev_value, uint32_t);
+  	if (backend_uid > prev_uid)
+		hash_table_update(*table, backend_vname, POINTER_CAST(backend_uid));
+}
+
+static int
+fts_mailbox_search_is_virtual_seq_indexed(struct fts_search_context *fctx,
+					  uint32_t seq)
+{
+	const struct virtual_mailbox_vfuncs *v = fctx->box->virtual_vfuncs;
+	struct mailbox *backend_box;
+	uint32_t backend_uid;
+	v->get_virtual_backend_mail_uid(fctx->box, seq, &backend_box, &backend_uid);
+
+	const char *backend_vname = backend_box->vname;
+	int ret = fts_search_virtual_uid_is_indexed(fctx, backend_vname, backend_uid);
+	if (ret >= 0)
+		return ret;
+
+	struct mailbox_status status;
+	if (mailbox_get_status(backend_box, STATUS_FTS_LAST_INDEXED_UID,
+			       &status) < 0)
+		return -1;
+
+	fts_search_virtual_uid_set_indexed(fctx, backend_vname,
+					   status.fts_last_indexed_uid);
+
+	return backend_uid <= status.fts_last_indexed_uid ? 1 : 0;
+}
+
+static int
+fts_mailbox_search_is_seq_indexed(struct fts_search_context *fctx, uint32_t seq)
+{
+	const struct virtual_mailbox_vfuncs *v = fctx->box->virtual_vfuncs;
+	if (v == NULL)
+		return seq < fctx->first_unindexed_seq ? 1 : 0;
+	return fts_mailbox_search_is_virtual_seq_indexed(fctx, seq);
+}
+
 static bool fts_mailbox_search_next_update_seq(struct mail_search_context *ctx)
 {
 	struct fts_mailbox *fbox = FTS_CONTEXT_REQUIRE(ctx->transaction->box);
@@ -361,7 +411,8 @@ static bool fts_mailbox_search_next_update_seq(struct mail_search_context *ctx)
 
 	if (fctx == NULL || !fctx->fts_lookup_success) {
 		/* fts lookup not done for this search */
-		if (fctx != NULL && fctx->indexing_timed_out)
+		if (fctx != NULL &&
+		    (fctx->indexing_timed_out || fctx->mailbox_failed))
 			return FALSE;
 		return fbox->module_ctx.super.search_next_update_seq(ctx);
 	}
@@ -372,10 +423,13 @@ static bool fts_mailbox_search_next_update_seq(struct mail_search_context *ctx)
 	if (!fbox->module_ctx.super.search_next_update_seq(ctx))
 		return FALSE;
 
-	if (ctx->seq >= fctx->first_unindexed_seq) {
-		/* we've not indexed this far */
-		return TRUE;
+	int ret = fts_mailbox_search_is_seq_indexed(fctx, ctx->seq);
+	if (ret < 0) {
+		fctx->mailbox_failed = TRUE;
+		return FALSE;
 	}
+	if (ret == 0)
+		return TRUE;
 
 	/* apply [non]matches based on the FTS lookup results */
 	idx = 0;
@@ -397,8 +451,12 @@ static int fts_mailbox_search_deinit(struct mail_search_context *ctx)
 			if (fts_indexer_deinit(&fctx->indexer_ctx) < 0)
 				ft->failure_reason = "FTS indexing failed";
 		}
-		if (fctx->indexing_timed_out)
+		if (fctx->indexing_timed_out || fctx->mailbox_failed)
 			ret = -1;
+		else if (fctx->mailbox_failed) {
+			mail_storage_set_internal_error(ctx->transaction->box->storage);
+			ret = -1;
+		}
 		else if (!fctx->fts_lookup_success &&
 			 fctx->enforced != FTS_ENFORCED_NO) {
 			/* FTS lookup failed and we didn't want to fallback to
@@ -450,52 +508,22 @@ static int fts_mail_get_special(struct mail *_mail, enum mail_fetch_field field,
 	return fmail->module_ctx.super.get_special(_mail, field, value_r);
 }
 
-static int
-fts_mail_precache_range(struct mailbox_transaction_context *trans,
-			struct fts_backend_update_context *update_ctx,
-			uint32_t seq1, uint32_t seq2, unsigned int *extra_count)
-{
-	struct mail_search_args *search_args;
-	struct mail_search_context *ctx;
-	struct mail *mail;
-	int ret = 0;
-
-	search_args = mail_search_build_init();
-	mail_search_build_add_seqset(search_args, seq1, seq2);
-	ctx = mailbox_search_init(trans, search_args, NULL,
-				  MAIL_FETCH_STREAM_HEADER |
-				  MAIL_FETCH_STREAM_BODY, NULL);
-	mail_search_args_unref(&search_args);
-
-	while (mailbox_search_next(ctx, &mail)) {
-		if (fts_build_mail(update_ctx, mail) < 0) {
-			ret = -1;
-			break;
-		}
-		if (mail_precache(mail) < 0) {
-			ret = -1;
-			break;
-		}
-		*extra_count += 1;
-	}
-	if (mailbox_search_deinit(&ctx) < 0)
-		ret = -1;
-	return ret;
-}
-
 static int fts_mail_precache_init(struct mail *_mail)
 {
 	struct fts_transaction_context *ft = FTS_CONTEXT_REQUIRE(_mail->transaction);
 	struct fts_mailbox_list *flist = FTS_LIST_CONTEXT_REQUIRE(_mail->box->list);
-	uint32_t last_seq;
 
-	if (fts_mailbox_get_last_cached_seq(_mail->box, &last_seq) < 0) {
+	uint32_t last_uid;
+	if (fts_mailbox_get_last_indexed_uid(_mail->box,&last_uid) < 0) {
 		ft->failure_reason = "Failed to lookup last indexed FTS mail";
 		return -1;
 	}
 
+	uint32_t last_seq = 0, unused ATTR_UNUSED;
+	if (last_uid > 0)
+		mailbox_get_seq_range(_mail->box, 1, last_uid, &unused, &last_seq);
+
 	ft->precached = TRUE;
-	ft->next_index_seq = last_seq + 1;
 	if (flist->update_ctx == NULL)
 		flist->update_ctx = fts_backend_update_init(flist->backend);
 	flist->update_ctx_refcount++;
@@ -508,6 +536,7 @@ static int fts_mail_index(struct mail *_mail)
 	struct fts_mailbox_list *flist = FTS_LIST_CONTEXT_REQUIRE(_mail->box->list);
 	struct mail_private *pmail = (struct mail_private *)_mail;
 
+	i_assert(pmail->vmail == NULL);
 	if (ft->failure_reason != NULL)
 		return -1;
 
@@ -515,48 +544,9 @@ static int fts_mail_index(struct mail *_mail)
 		if (fts_mail_precache_init(_mail) < 0)
 			return -1;
 	}
-	if (pmail->vmail != NULL) {
-		/* Indexing via virtual mailbox: Index all the mails in this
-		   same real mailbox. */
-		uint32_t msgs_count =
-			mail_index_view_get_messages_count(_mail->box->view);
 
-		fts_backend_update_set_mailbox(flist->update_ctx, _mail->box);
-		if (ft->next_index_seq > msgs_count) {
-			/* everything indexed already */
-			return 0;
-		} else if (fts_mail_precache_range(_mail->transaction,
-						   flist->update_ctx,
-						   ft->next_index_seq,
-						   msgs_count,
-						   &ft->precache_extra_count) < 0) {
-			return -1;
-		} else {
-			ft->next_index_seq = msgs_count+1;
-			return 0;
-		}
-	}
-
-	if (ft->next_index_seq < _mail->seq) {
-		/* we'll first need to index all the missing mails up to the
-		   current one. */
-		fts_backend_update_set_mailbox(flist->update_ctx, _mail->box);
-		if (fts_mail_precache_range(_mail->transaction,
-					    flist->update_ctx,
-					    ft->next_index_seq,
-					    _mail->seq-1,
-					    &ft->precache_extra_count) < 0)
-			return -1;
-		ft->next_index_seq = _mail->seq;
-	}
-
-	if (ft->next_index_seq == _mail->seq) {
-		fts_backend_update_set_mailbox(flist->update_ctx, _mail->box);
-		if (fts_build_mail(flist->update_ctx, _mail) < 0)
-			return -1;
-		ft->next_index_seq = _mail->seq + 1;
-	}
-	return 0;
+	fts_backend_update_set_mailbox(flist->update_ctx, _mail->box);
+	return fts_build_mail(flist->update_ctx, _mail) < 0 ? -1 : 0;
 }
 
 static int fts_mail_precache(struct mail *_mail)
@@ -564,14 +554,13 @@ static int fts_mail_precache(struct mail *_mail)
 	struct mail_private *mail = (struct mail_private *)_mail;
 	struct fts_mail *fmail = FTS_MAIL_CONTEXT(mail);
 	struct fts_transaction_context *ft = FTS_CONTEXT_REQUIRE(_mail->transaction);
-	int ret = 0;
+	int ret;
 
+	i_assert(!fmail->virtual_mail);
 	fmail->module_ctx.super.precache(_mail);
-	if (fmail->virtual_mail) {
-		if (ft->highest_virtual_uid < _mail->uid)
-			ft->highest_virtual_uid = _mail->uid;
-	} else if (!ft->indexing) T_BEGIN {
-		/* avoid recursing here from fts_mail_precache_range() */
+
+	i_assert(!ft->indexing);
+	T_BEGIN {
 		struct event_reason *reason =
 			event_reason_begin("fts:index");
 		ft->indexing = TRUE;
@@ -818,41 +807,16 @@ static void fts_mailbox_virtual_match_mail(struct mail_search_context *ctx,
 					   struct mail *mail)
 {
 	struct fts_search_context *fctx = FTS_CONTEXT(ctx);
-	unsigned int idx, be_last_uid;
-
 	if (fctx == NULL || !fctx->fts_lookup_success || !fctx->virtual_mailbox ||
 	    ctx->seq < fctx->first_unindexed_seq)
 		return;
-	/* Table of last indexed UID per backend mailbox */
-	HASH_TABLE_TYPE(virtual_last_indexed) hash_tbl =
-		fctx->last_indexed_virtual_uids;
 
 	struct mail *backend_mail;
 	if (mail->box->mail_vfuncs->get_backend_mail(mail, &backend_mail) < 0)
 		return;
-	const char *box_name = backend_mail->box->vname;
-	/* Get the last indexed UID in the backend mailbox */
-	void *uid_value =
-		hash_table_lookup(fctx->last_indexed_virtual_uids, box_name);
-	if (uid_value == NULL) {
-		/* This backend's last indexed uid is not yet inserted to the table */
-		struct fts_mailbox_list *flist =
-			FTS_LIST_CONTEXT(backend_mail->box->list);
-		if (flist == NULL || flist->failed ||
-		    mailbox_open(backend_mail->box) < 0 ||
-		    fts_backend_get_last_uid(flist->backend, backend_mail->box,
-					     &be_last_uid) < 0) {
-			be_last_uid = 0;
-		} else {
-			const char *vname_copy =
-				p_strdup(fctx->result_pool, backend_mail->box->vname);
-			hash_table_insert(hash_tbl, vname_copy,
-					  POINTER_CAST(be_last_uid + 1));
-		}
-	} else {
-		be_last_uid = POINTER_CAST_TO(uid_value, uint32_t) - 1;
-	}
-	if (backend_mail->uid <= be_last_uid) {
+
+	if (fts_search_virtual_uid_is_indexed(fctx, backend_mail->box->vname,
+					      backend_mail->uid) > 0) {
 		/* Mail was already indexed in the backend mailbox.
 		   Apply [non]matches based on the FTS lookup results */
 		struct fts_transaction_context *ft = FTS_CONTEXT_REQUIRE(ctx->transaction);
@@ -861,7 +825,8 @@ static void fts_mailbox_virtual_match_mail(struct mail_search_context *ctx,
 			fctx->next_unindexed_seq++;
 			ft->highest_virtual_uid = mail->uid;
 		}
-		idx = 0;
+
+		unsigned int idx = 0;
 		fts_search_apply_results_level(ctx, ctx->args->args, &idx);
 	} else {
 		fctx->virtual_seen_unindexed_gaps = TRUE;

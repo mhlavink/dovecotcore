@@ -197,6 +197,18 @@ static void auth_client_connection_handshake_ready(struct connection *_conn)
 	struct auth_client_connection *conn =
 		container_of(_conn, struct auth_client_connection, conn);
 
+	struct auth_mech_desc *mech_desc;
+	array_foreach_modifiable(&conn->client->available_auth_mechs, mech_desc) {
+		i_free(mech_desc->name);
+	}
+	array_clear(&conn->client->available_auth_mechs);
+	array_foreach_modifiable(&conn->available_auth_mechs, mech_desc) {
+		struct auth_mech_desc *dup_desc =
+			array_append_space(&conn->client->available_auth_mechs);
+		*dup_desc = *mech_desc;
+		dup_desc->name = i_strdup(mech_desc->name);
+	}
+
 	timeout_remove(&conn->to);
 	if (conn->client->connect_notify_callback != NULL) {
 		conn->client->connect_notify_callback(conn->client, TRUE,
@@ -435,7 +447,7 @@ static void auth_client_connection_destroy(struct connection *_conn)
 	}
 }
 
-static void auth_server_reconnect_timeout(struct auth_client_connection *conn)
+void auth_server_reconnect_timeout(struct auth_client_connection *conn)
 {
 	(void)auth_client_connection_connect(conn);
 }
@@ -458,6 +470,8 @@ void auth_client_connection_deinit(struct auth_client_connection **_conn)
 {
         struct auth_client_connection *conn = *_conn;
 
+	if (conn == NULL)
+		return;
 	*_conn = NULL;
 
 	auth_client_connection_disconnect(conn, "deinitializing");
