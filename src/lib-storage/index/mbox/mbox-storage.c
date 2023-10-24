@@ -232,7 +232,7 @@ static bool mbox_is_file(const char *path, const char *name, struct event *event
 			name, path);
 		return FALSE;
 	}
-	if (access(path, R_OK|W_OK) < 0) {
+	if (i_faccessat2(AT_FDCWD, path, R_OK | W_OK, AT_EACCESS) < 0) {
 		e_debug(event, "mbox autodetect: %s: no R/W access (%s)",
 			name, path);
 		return FALSE;
@@ -256,7 +256,7 @@ static bool mbox_is_dir(const char *path, const char *name, struct event *event)
 			name, path);
 		return FALSE;
 	}
-	if (access(path, R_OK|W_OK|X_OK) < 0) {
+	if (i_faccessat2(AT_FDCWD, path, R_OK | W_OK | X_OK, AT_EACCESS) < 0) {
 		e_debug(event, "mbox autodetect: %s: no R/W/X access (%s)",
 			name, path);
 		return FALSE;
@@ -305,14 +305,14 @@ mbox_storage_find_inbox_file(struct mail_user *user, struct event *event)
 	const char *path;
 
 	path = t_strconcat("/var/mail/", user->username, NULL);
-	if (access(path, R_OK|W_OK) == 0) {
+	if (i_faccessat2(AT_FDCWD, path, R_OK | W_OK, AT_EACCESS) == 0) {
 		e_debug(event, "mbox autodetect: INBOX exists (%s)", path);
 		return path;
 	}
 	e_debug(event, "mbox autodetect: INBOX: access(%s, rw) failed: %m", path);
 
 	path = t_strconcat("/var/spool/mail/", user, NULL);
-	if (access(path, R_OK|W_OK) == 0) {
+	if (i_faccessat2(AT_FDCWD, path, R_OK | W_OK, AT_EACCESS) == 0) {
 		e_debug(event, "INBOX exists (%s)", path);
 		return path;
 	}
@@ -542,7 +542,7 @@ static int create_inbox(struct mailbox *box)
 	inbox_path = mailbox_get_path(box);
 
 	fd = open(inbox_path, O_RDWR | O_CREAT | O_EXCL, 0660);
-	if (fd == -1 && errno == EACCES) {
+	if (fd == -1 && ENOACCESS(errno)) {
 		/* try again with increased privileges */
 		(void)restrict_access_use_priv_gid();
 		fd = open(inbox_path, O_RDWR | O_CREAT | O_EXCL, 0660);
@@ -551,7 +551,7 @@ static int create_inbox(struct mailbox *box)
 	if (fd != -1) {
 		i_close_fd(&fd);
 		return 0;
-	} else if (errno == EACCES) {
+	} else if (ENOACCESS(errno)) {
 		mailbox_set_critical(box, "%s",
 			mail_error_create_eacces_msg("open", inbox_path));
 		return -1;
@@ -811,8 +811,8 @@ bool mbox_is_backend_readonly(struct mbox_mailbox *mbox)
 {
 	if (!mbox->backend_readonly_set) {
 		mbox->backend_readonly_set = TRUE;
-		if (access(mailbox_get_path(&mbox->box), R_OK|W_OK) < 0 &&
-		    errno == EACCES)
+		if (i_faccessat2(AT_FDCWD, mailbox_get_path(&mbox->box), R_OK | W_OK, AT_EACCESS) < 0 &&
+		    ENOACCESS(errno))
 			mbox->backend_readonly = TRUE;
 	}
 	return mbox->backend_readonly;

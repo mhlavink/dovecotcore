@@ -255,7 +255,7 @@ mail_storage_verify_root(const char *root_dir, const char *dir_type,
 		*error_r = t_strdup_printf(
 			"Root mail directory is a file: %s", root_dir);
 		return -1;
-	} else if (errno == EACCES) {
+	} else if (ENOACCESS(errno)) {
 		*error_r = mail_error_eacces_msg("stat", root_dir);
 		return -1;
 	} else if (errno != ENOENT) {
@@ -794,7 +794,7 @@ void mail_storage_set_index_error(struct mail_storage *storage,
 
 	mail_storage_set_internal_error(storage);
 	/* use the lib-index's error as our internal error string */
-	index_error = mail_index_get_error_message(index);
+	index_error = mail_index_get_last_error(index, NULL);
 	if (index_error == NULL)
 		index_error = "BUG: Unknown internal index error";
 	storage->last_internal_error = i_strdup(index_error);

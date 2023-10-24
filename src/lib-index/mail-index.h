@@ -77,6 +77,12 @@ enum mail_index_mail_flags {
 	MAIL_INDEX_MAIL_FLAG_UPDATE_MODSEQ	= 0x100
 };
 
+enum mail_index_error_code {
+	MAIL_INDEX_ERROR_CODE_NONE,
+	MAIL_INDEX_ERROR_CODE_NO_SPACE,
+	MAIL_INDEX_ERROR_CODE_NO_ACCESS,
+};
+
 #define MAIL_INDEX_FLAGS_MASK \
 	(MAIL_ANSWERED | MAIL_FLAGGED | MAIL_DELETED | MAIL_SEEN | MAIL_DRAFT)
 
@@ -725,7 +731,8 @@ void mail_index_update_header(struct mail_index_transaction *t,
 
 /* Returns the full error message for last error. This message may
    contain paths etc. so it shouldn't be shown to users. */
-const char *mail_index_get_error_message(struct mail_index *index);
+const char *mail_index_get_last_error(struct mail_index *index,
+				      enum mail_index_error_code *error_r);
 /* Reset the error message. */
 void mail_index_reset_error(struct mail_index *index);
 

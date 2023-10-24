@@ -7,11 +7,14 @@
 #include "oauth2-private.h"
 #include "test-common.h"
 
+static bool cb_got_called = FALSE;
+
 static void
 test_oauth_json_valid_parsed(struct oauth2_request *req ATTR_UNUSED,
 			     const char *error)
 {
 	test_assert(error == NULL);
+	cb_got_called = TRUE;
 }
 
 static void test_oauth2_json_valid(void)
@@ -69,15 +72,17 @@ static void test_oauth2_json_valid(void)
 	req->is = test_istream_create_data(test_input, strlen(test_input));
 	req->parser = json_parser_init(req->is);
 	req->json_parsed_cb = test_oauth_json_valid_parsed;
+	cb_got_called = FALSE;
 
 	/* Parse the JSON response */
-	for (pos = 0; pos <= strlen(test_input); pos +=2) {
+	for (pos = 0;; pos += 2) {
 		test_istream_set_size(req->is, pos);
 		oauth2_request_parse_json(req);
-		if (req->is == NULL)
+		if (pos >= strlen(test_input))
 			break;
 	}
 
+	test_assert(cb_got_called);
 	/* Verify the parsed fields */
 	pfields = array_get(&req->fields, &count);
 	test_assert(count == fields_count);
@@ -101,6 +106,7 @@ test_oauth_json_has_error(struct oauth2_request *req,
 	const char *expected_error = req->req_context;
 	test_assert(error != NULL);
 	test_assert_strcmp(expected_error, error);
+	cb_got_called = TRUE;
 }
 
 static void test_oauth2_json_error(void)
@@ -121,16 +127,17 @@ static void test_oauth2_json_error(void)
 	req->parser = json_parser_init(req->is);
 	req->req_context = "invalid_request";
 	req->json_parsed_cb = test_oauth_json_has_error;
+	cb_got_called = FALSE;
 
 	/* Parse the JSON response */
-	for (size_t pos = 0; pos <= strlen(test_input_1); pos +=2) {
+	for (size_t pos = 0;; pos += 2) {
 		test_istream_set_size(req->is, pos);
 		oauth2_request_parse_json(req);
-		if (req->is == NULL)
+		if (pos >= strlen(test_input_1))
 			break;
 	}
 
-			
+	test_assert(cb_got_called);
 	pool_unref(&pool);
 
 	pool = pool_alloconly_create_clean("oauth2 json test", 1024);
@@ -141,15 +148,17 @@ static void test_oauth2_json_error(void)
 	req->parser = json_parser_init(req->is);
 	req->req_context = "Access denied";
 	req->json_parsed_cb = test_oauth_json_has_error;
+	cb_got_called = FALSE;
 
 	/* Parse the JSON response */
-	for (size_t pos = 0; pos <= strlen(test_input_2); pos +=2) {
+	for (size_t pos = 0;; pos += 2) {
 		test_istream_set_size(req->is, pos);
 		oauth2_request_parse_json(req);
-		if (req->is == NULL)
+		if (pos >= strlen(test_input_2))
 			break;
 	}
 
+	test_assert(cb_got_called);
 	pool_unref(&pool);
 
 	test_end();

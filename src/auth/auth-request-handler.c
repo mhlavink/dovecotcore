@@ -103,6 +103,8 @@ void auth_request_handler_unref(struct auth_request_handler **_handler)
 {
         struct auth_request_handler *handler = *_handler;
 
+	if (handler == NULL)
+		return;
 	*_handler = NULL;
 
 	i_assert(handler->refcount > 0);
@@ -231,7 +233,9 @@ auth_request_handle_failure(struct auth_request *request, const char *reply)
 	if (request->set->policy_report_after_auth)
 		auth_policy_report(request);
 
-	if (auth_fields_exists(request->fields.extra_fields, "nodelay")) {
+	e_debug(request->event, "handling failure, nodelay=%d",
+		(int) request->failure_nodelay);
+	if (request->failure_nodelay) {
 		/* passdb specifically requested not to delay the reply. */
 		handler->callback(reply, handler->conn);
 		auth_request_unref(&request);

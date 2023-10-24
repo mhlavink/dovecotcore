@@ -12,6 +12,7 @@ struct auth_client_request {
 	struct event *event;
 
 	struct auth_client_connection *conn;
+	struct timeout *to_fail;
 	unsigned int id;
 	time_t created;
 
@@ -48,6 +49,7 @@ struct auth_client {
 
 	struct connection_list *clist;
 	struct auth_client_connection *conn;
+	ARRAY(struct auth_mech_desc) available_auth_mechs;
 
 	auth_connect_notify_callback_t *connect_notify_callback;
 	void *connect_notify_context;
@@ -77,6 +79,7 @@ void auth_client_connection_deinit(struct auth_client_connection **conn);
 int auth_client_connection_connect(struct auth_client_connection *conn);
 void auth_client_connection_disconnect(struct auth_client_connection *conn,
 				       const char *reason);
+void auth_server_reconnect_timeout(struct auth_client_connection *conn);
 
 /* Queues a new request. Must not be called if connection is not connected. */
 unsigned int
