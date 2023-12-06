@@ -2,8 +2,8 @@
 
 #include "auth-common.h"
 #include "array.h"
+#include "settings.h"
 #include "settings-parser.h"
-#include "master-service-settings.h"
 #include "mech.h"
 #include "userdb.h"
 #include "passdb.h"
@@ -256,22 +256,24 @@ static void auth_mech_list_verify_passdb(const struct auth *auth)
 }
 
 static struct auth * ATTR_NULL(2)
-auth_preinit(const struct auth_settings *set, const char *service, pool_t pool,
+auth_preinit(const struct auth_settings *set, const char *service,
 	     const struct mechanisms_register *reg)
 {
-	struct auth_passdb_settings *const *passdbs;
-	struct auth_userdb_settings *const *userdbs;
+	const struct auth_passdb_settings *const *passdbs;
+	const struct auth_userdb_settings *const *userdbs;
 	struct auth *auth;
 	unsigned int i, count, db_count, passdb_count, last_passdb = 0;
 
+	pool_t pool = pool_alloconly_create("auth", 128);
 	auth = p_new(pool, struct auth, 1);
 	auth->pool = pool;
 	auth->service = p_strdup(pool, service);
 	auth->set = set;
+	pool_ref(set->pool);
 	auth->reg = reg;
 
-	if (array_is_created(&set->passdbs))
-		passdbs = array_get(&set->passdbs, &db_count);
+	if (array_is_created(&set->parsed_passdbs))
+		passdbs = array_get(&set->parsed_passdbs, &db_count);
 	else {
 		passdbs = NULL;
 		db_count = 0;
@@ -314,8 +316,8 @@ auth_preinit(const struct auth_settings *set, const char *service, pool_t pool,
 		auth_passdb_preinit(auth, passdbs[i], &auth->masterdbs);
 	}
 
-	if (array_is_created(&set->userdbs)) {
-		userdbs = array_get(&set->userdbs, &count);
+	if (array_is_created(&set->parsed_userdbs)) {
+		userdbs = array_get(&set->parsed_userdbs, &count);
 		for (i = 0; i < count; i++)
 			auth_userdb_preinit(auth, userdbs[i]);
 	}
@@ -402,11 +404,10 @@ struct auth *auth_default_service(void)
 	return a[0];
 }
 
-void auths_preinit(const struct auth_settings *set, pool_t pool,
+void auths_preinit(const struct auth_settings *set,
 		   const struct mechanisms_register *reg,
 		   const char *const *services)
 {
-	struct master_service_settings_output set_output;
 	const struct auth_settings *service_set;
 	struct auth *auth;
 	unsigned int i;
@@ -418,7 +419,7 @@ void auths_preinit(const struct auth_settings *set, pool_t pool,
 	event_add_category(auth_event, &event_category_auth);
 	i_array_init(&auths, 8);
 
-	auth = auth_preinit(set, NULL, pool, reg);
+	auth = auth_preinit(set, NULL, reg);
 	array_push_back(&auths, &auth);
 
 	for (i = 0; services[i] != NULL; i++) {
@@ -430,10 +431,10 @@ void auths_preinit(const struct auth_settings *set, pool_t pool,
 			}
 			not_service = services[i];
 		}
-		service_set = auth_settings_read(services[i], pool,
-						 &set_output);
-		auth = auth_preinit(service_set, services[i], pool, reg);
+		service_set = auth_settings_get(services[i]);
+		auth = auth_preinit(service_set, services[i], reg);
 		array_push_back(&auths, &auth);
+		settings_free(service_set);
 	}
 
 	if (not_service != NULL && str_array_find(services, not_service+1))
@@ -473,13 +474,11 @@ void auths_deinit(void)
 
 void auths_free(void)
 {
-	struct auth **auth;
-	unsigned int i, count;
+	struct auth *auth;
 
-	/* deinit in reverse order, because modules have been allocated by
-	   the first auth pool that used them */
-	auth = array_get_modifiable(&auths, &count);
-	for (i = count; i > 0; i--)
-		pool_unref(&auth[i-1]->pool);
+	array_foreach_elem(&auths, auth) {
+		settings_free(auth->set);
+		pool_unref(&auth->pool);
+	}
 	array_free(&auths);
 }

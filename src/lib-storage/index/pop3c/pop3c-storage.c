@@ -3,6 +3,7 @@
 #include "lib.h"
 #include "ioloop.h"
 #include "str.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "mail-copy.h"
 #include "mail-user.h"
@@ -41,8 +42,10 @@ pop3c_storage_create(struct mail_storage *_storage,
 {
 	struct pop3c_storage *storage = POP3C_STORAGE(_storage);
 
-	storage->set = settings_parser_get_root_set(_storage->user->set_parser,
-		pop3c_get_setting_parser_info());
+	if (settings_get(_storage->event, &pop3c_setting_parser_info, 0,
+			 &storage->set, error_r) < 0)
+		return -1;
+
 	if (storage->set->pop3c_host[0] == '\0') {
 		*error_r = "missing pop3c_host";
 		return -1;
@@ -56,6 +59,14 @@ pop3c_storage_create(struct mail_storage *_storage,
 		storage->set->pop3c_host, storage->set->pop3c_port));
 
 	return 0;
+}
+
+static void pop3c_storage_destroy(struct mail_storage *_storage)
+{
+	struct pop3c_storage *storage = POP3C_STORAGE(_storage);
+
+	settings_free(storage->set);
+	index_storage_destroy(_storage);
 }
 
 static struct pop3c_client *
@@ -79,11 +90,11 @@ pop3c_client_create_from_set(struct mail_storage *storage,
 	mail_user_set_get_temp_prefix(str, storage->user->set);
 	client_set.temp_path_prefix = str_c(str);
 
-	client_set.debug = storage->user->mail_debug;
+	client_set.debug = event_want_debug(storage->event);
 	client_set.rawlog_dir =
 		mail_user_home_expand(storage->user, set->pop3c_rawlog_dir);
 
-	mail_user_init_ssl_client_settings(storage->user, &client_set.ssl_set);
+	client_set.ssl_set = *storage->user->ssl_set;
 
 	if (!set->pop3c_ssl_verify)
 		client_set.ssl_set.allow_invalid_cert = TRUE;
@@ -310,10 +321,9 @@ struct mail_storage pop3c_storage = {
 	.event_category = &event_category_pop3c,
 
 	.v = {
-		pop3c_get_setting_parser_info,
 		pop3c_storage_alloc,
 		pop3c_storage_create,
-		index_storage_destroy,
+		pop3c_storage_destroy,
 		NULL,
 		pop3c_storage_get_list_settings,
 		NULL,

@@ -17,11 +17,11 @@
 #include "env-util.h"
 #include "var-expand.h"
 #include "process-title.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "imap-util.h"
 #include "master-interface.h"
 #include "master-service.h"
-#include "master-service-settings.h"
 #include "master-service-ssl-settings.h"
 #include "mail-storage.h"
 #include "mail-storage-service.h"
@@ -448,7 +448,6 @@ cmd_dsync_run_local(struct dsync_cmd_context *ctx, struct mail_user *user,
 	struct dsync_brain *brain2;
 	struct mail_user *user2;
 	struct mail_namespace *ns, *ns2;
-	struct setting_parser_context *set_parser;
 	const char *location, *error;
 	bool brain1_running, brain2_running, changed1, changed2;
 	bool remote_only_changes;
@@ -467,9 +466,10 @@ cmd_dsync_run_local(struct dsync_cmd_context *ctx, struct mail_user *user,
 
 	/* update mail_location and create another user for the
 	   second location. */
-	set_parser = mail_storage_service_user_get_settings_parser(ctx->ctx.cur_service_user);
-	if (settings_parse_keyvalue(set_parser, "mail_location", location) < 0)
-		i_unreached();
+	struct settings_instance *set_instance =
+		mail_storage_service_user_get_settings_instance(ctx->ctx.cur_service_user);
+	settings_override(set_instance, "mail_location", location,
+			  SETTINGS_OVERRIDE_TYPE_CODE);
 	ret = mail_storage_service_next(ctx->ctx.storage_service,
 					ctx->ctx.cur_service_user,
 					&user2, &error);
@@ -900,7 +900,7 @@ static void dsync_server_run_command(struct dsync_cmd_context *ctx,
 
 static int
 dsync_connect_tcp(struct dsync_cmd_context *ctx,
-		  const struct master_service_ssl_settings *ssl_set,
+		  struct mail_storage_service_user *service_user,
 		  const char *target, bool ssl, const char **error_r)
 {
 	struct doveadm_client_settings conn_set;
@@ -924,9 +924,10 @@ dsync_connect_tcp(struct dsync_cmd_context *ctx,
 	}
 
 	if (ssl) {
-		master_service_ssl_client_settings_to_iostream_set(ssl_set,
-			pool_datastack_create(), &conn_set.ssl_set);
-
+		if (mail_storage_service_user_init_ssl_client_settings(
+				service_user, pool_datastack_create(),
+				&conn_set.ssl_set, error_r) < 0)
+			return -1;
 		if (ctx->ssl_ctx == NULL &&
 		    ssl_iostream_client_context_cache_get(&conn_set.ssl_set,
 							  &ctx->ssl_ctx,
@@ -980,7 +981,7 @@ dsync_connect_tcp(struct dsync_cmd_context *ctx,
 
 static int
 parse_location(struct dsync_cmd_context *ctx,
-	       const struct master_service_ssl_settings *ssl_set,
+	       struct mail_storage_service_user *service_user,
 	       const char *location,
 	       const char *const **remote_cmd_args_r, const char **error_r)
 {
@@ -988,12 +989,12 @@ parse_location(struct dsync_cmd_context *ctx,
 
 	if (str_begins(location, "tcp:", &ctx->remote_name)) {
 		/* TCP connection to remote dsync */
-		return dsync_connect_tcp(ctx, ssl_set, ctx->remote_name,
+		return dsync_connect_tcp(ctx, service_user, ctx->remote_name,
 					 FALSE, error_r);
 	}
 	if (str_begins(location, "tcps:", &ctx->remote_name)) {
 		/* TCP+SSL connection to remote dsync */
-		return dsync_connect_tcp(ctx, ssl_set, ctx->remote_name,
+		return dsync_connect_tcp(ctx, service_user, ctx->remote_name,
 					 TRUE, error_r);
 	}
 
@@ -1013,6 +1014,24 @@ parse_location(struct dsync_cmd_context *ctx,
 	return 0;
 }
 
+static int
+get_default_replica_location(struct dsync_cmd_context *ctx,
+			     struct mail_storage_service_user *service_user,
+			     const char **error_r)
+{
+	const struct mail_storage_settings *mail_set;
+	if (settings_get(mail_storage_service_user_get_event(service_user),
+			 &mail_storage_setting_parser_info,
+			 SETTINGS_GET_FLAG_NO_CHECK |
+			 SETTINGS_GET_FLAG_NO_EXPAND,
+			 &mail_set, error_r) < 0)
+		return -1;
+	ctx->local_location = p_strdup(ctx->ctx.pool,
+		mail_user_set_plugin_getenv(mail_set, "mail_replica"));
+	settings_free(mail_set);
+	return 0;
+}
+
 static int cmd_dsync_prerun(struct doveadm_mail_cmd_context *_ctx,
 			    struct mail_storage_service_user *service_user,
 			    const char **error_r)
@@ -1022,13 +1041,7 @@ static int cmd_dsync_prerun(struct doveadm_mail_cmd_context *_ctx,
 		container_of(_ctx, struct dsync_cmd_context, ctx);
 
 	const char *const *remote_cmd_args = NULL;
-	const struct mail_user_settings *user_set;
-	const struct master_service_ssl_settings *ssl_set;
 	const char *username = "";
-
-	user_set = mail_storage_service_user_get_set(service_user,
-			&mail_user_setting_parser_info);
-	ssl_set = mail_storage_service_user_get_ssl_settings(service_user);
 
 	ctx->fd_in = -1;
 	ctx->fd_out = -1;
@@ -1037,8 +1050,9 @@ static int cmd_dsync_prerun(struct doveadm_mail_cmd_context *_ctx,
 	ctx->remote_name = "remote";
 
 	if (ctx->default_replica_location) {
-		ctx->local_location =
-			mail_user_set_plugin_getenv(user_set, "mail_replica");
+		if (get_default_replica_location(ctx, service_user, error_r) < 0)
+			return -1;
+
 		if (ctx->local_location == NULL ||
 		    *ctx->local_location == '\0') {
 			*error_r = "User has no mail_replica in userdb";
@@ -1061,7 +1075,7 @@ static int cmd_dsync_prerun(struct doveadm_mail_cmd_context *_ctx,
 	}
 
 	if (remote_cmd_args == NULL && ctx->local_location != NULL) {
-		if (parse_location(ctx, ssl_set, ctx->local_location,
+		if (parse_location(ctx, service_user, ctx->local_location,
 				   &remote_cmd_args, error_r) < 0)
 			return -1;
 	}

@@ -10,6 +10,7 @@
 #include "var-expand.h"
 #include "restrict-access.h"
 #include "anvil-client.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "mail-storage.h"
 #include "mail-storage-service.h"
@@ -34,6 +35,7 @@ struct lmtp_local_recipient {
 	guid_128_t anvil_conn_guid;
 
 	struct lmtp_local_recipient *duplicate;
+	const struct lda_settings *lda_set;
 
 	bool anvil_connect_sent:1;
 };
@@ -118,6 +120,7 @@ lmtp_local_rcpt_destroy(struct smtp_server_recipient *rcpt ATTR_UNUSED,
 	if (llrcpt->anvil_query != NULL)
 		anvil_client_query_abort(anvil, &llrcpt->anvil_query);
 	lmtp_local_rcpt_anvil_disconnect(llrcpt);
+	settings_free(llrcpt->lda_set);
 	mail_storage_service_user_unref(&llrcpt->service_user);
 }
 
@@ -126,11 +129,8 @@ lmtp_local_rcpt_reply_overquota(struct lmtp_local_recipient *llrcpt,
 				const char *error)
 {
 	struct smtp_server_recipient *rcpt = llrcpt->rcpt->rcpt;
-	struct lda_settings *lda_set =
-		mail_storage_service_user_get_set(llrcpt->service_user,
-			&lda_setting_parser_info);
 
-	if (lda_set->quota_full_tempfail)
+	if (llrcpt->lda_set->quota_full_tempfail)
 		smtp_server_recipient_reply(rcpt, 452, "4.2.2", "%s", error);
 	else
 		smtp_server_recipient_reply(rcpt, 552, "5.2.2", "%s", error);
@@ -311,6 +311,7 @@ int lmtp_local_rcpt(struct client *client,
 	input.local_port = client->local_port;
 	input.remote_port = client->remote_port;
 	input.session_id = lrcpt->session_id;
+	input.local_name = client->local_name;
 	input.end_client_tls_secured =
 		client->end_client_tls_secured_set ?
 		client->end_client_tls_secured :
@@ -343,6 +344,15 @@ int lmtp_local_rcpt(struct client *client,
 
 	lrcpt->type = LMTP_RECIPIENT_TYPE_LOCAL;
 	lrcpt->backend_context = llrcpt;
+
+	if (settings_get(mail_storage_service_user_get_event(service_user),
+			 &lda_setting_parser_info,
+			 0, &llrcpt->lda_set, &error) < 0) {
+		e_error(rcpt->event, "%s", error);
+		smtp_server_recipient_reply(rcpt, 451, "4.3.0",
+					    "Temporary internal error");
+		return -1;
+	}
 
 	smtp_server_recipient_add_hook(
 		rcpt, SMTP_SERVER_RECIPIENT_HOOK_DESTROY,
@@ -426,15 +436,21 @@ lmtp_local_deliver(struct lmtp_local *local,
 	const struct mail_storage_settings *mail_set;
 	struct smtp_proxy_data proxy_data;
 	struct mail_namespace *ns;
-	struct setting_parser_context *set_parser;
-	const char *line, *error, *username;
+	const char *error, *username;
 	int ret;
 
 	input = mail_storage_service_user_get_input(service_user);
 	username = t_strdup(input->username);
 
-	mail_set = mail_storage_service_user_get_mail_set(service_user);
-	set_parser = mail_storage_service_user_get_settings_parser(service_user);
+	if (settings_get(mail_storage_service_user_get_event(service_user),
+			 &mail_storage_setting_parser_info,
+			 SETTINGS_GET_FLAG_NO_EXPAND,
+			 &mail_set, &error) < 0) {
+		e_error(rcpt->event, "%s", error);
+		smtp_server_recipient_reply(rcpt, 451, "4.3.0",
+					    "Temporary internal error");
+		return -1;
+	}
 
 	smtp_server_connection_get_proxy_data
 		(client->conn, &proxy_data);
@@ -445,12 +461,15 @@ lmtp_local_deliver(struct lmtp_local *local,
 		   advertised that it's going to timeout the connection.
 		   this avoids duplicate deliveries in case the delivery
 		   succeeds after the proxy has already disconnected from us. */
-		line = t_strdup_printf("mail_max_lock_timeout=%us",
+		struct settings_instance *set_instance =
+			mail_storage_service_user_get_settings_instance(service_user);
+		const char *value = t_strdup_printf("%us",
 				       proxy_data.timeout_secs <= 1 ? 1 :
 				       proxy_data.timeout_secs-1);
-		if (settings_parse_line(set_parser, line) < 0)
-			i_unreached();
+		settings_override(set_instance, "mail_max_lock_timeout",
+				  value, SETTINGS_OVERRIDE_TYPE_CODE);
 	}
+	settings_free(mail_set);
 
 	i_zero(&lldctx);
 	lldctx.session_id = lrcpt->session_id;
@@ -477,10 +496,13 @@ lmtp_local_deliver(struct lmtp_local *local,
 		mail_storage_service_user_get_log_prefix(service_user));
 
 	lldctx.rcpt_user = rcpt_user;
-	lldctx.smtp_set = settings_parser_get_root_set(rcpt_user->set_parser,
-			&smtp_submit_setting_parser_info);
-	lldctx.lda_set = settings_parser_get_root_set(rcpt_user->set_parser,
-			&lda_setting_parser_info);
+	if (settings_get(rcpt_user->event, &smtp_submit_setting_parser_info, 0,
+			 &lldctx.smtp_set, &error) < 0) {
+		e_error(rcpt->event, "%s", error);
+		smtp_server_recipient_reply(rcpt, 451, "4.3.0",
+					    "Temporary internal error");
+		return -1;
+	}
 
 	if (*lrcpt->detail == '\0' ||
 	    !client->lmtp_set->lmtp_save_to_detail_mailbox)
@@ -494,6 +516,8 @@ lmtp_local_deliver(struct lmtp_local *local,
 	ret = client->v.local_deliver(client, lrcpt, cmd, trans, &lldctx);
 
 	lmtp_local_rcpt_anvil_disconnect(llrcpt);
+
+	settings_free(lldctx.smtp_set);
 	return ret;
 }
 
@@ -558,7 +582,7 @@ int lmtp_local_default_deliver(struct client *client,
 
 	i_zero(&dinput);
 	dinput.session = lldctx->session;
-	dinput.set = lldctx->lda_set;
+	dinput.set = llrcpt->lda_set;
 	dinput.smtp_set = lldctx->smtp_set;
 	dinput.session_id = lldctx->session_id;
 	dinput.event_parent = event;

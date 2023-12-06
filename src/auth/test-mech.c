@@ -4,6 +4,7 @@
 #include "auth.h"
 #include "str.h"
 #include "ioloop.h"
+#include "master-service.h"
 #include "auth-common.h"
 #include "auth-request.h"
 #include "auth-request-handler-private.h"
@@ -94,20 +95,23 @@ static void test_mechs_init(void)
 
 	/* Copy default settings */
 	set = *(const struct auth_settings *)auth_setting_parser_info.defaults;
+	set.pool = pool_alloconly_create("test settings", 128);
+	set.base_dir = ".";
 	global_auth_settings = &set;
-	global_auth_settings->base_dir = ".";
 	memset((&set)->username_chars_map, 1, sizeof((&set)->username_chars_map));
 	set.username_format = "";
 
-	t_array_init(&set.passdbs, 2);
+	t_array_init(&set.parsed_passdbs, 2);
 	struct auth_passdb_settings *mock_set = t_new(struct auth_passdb_settings, 1);
 	*mock_set = mock_passdb_set;
-	array_push_back(&set.passdbs, &mock_set);
+	const struct auth_passdb_settings *const_mock_set = mock_set;
+	array_push_back(&set.parsed_passdbs, &const_mock_set);
 	mock_set = t_new(struct auth_passdb_settings, 1);
 	*mock_set = mock_passdb_set;
 	mock_set->master = TRUE;
-	array_push_back(&set.passdbs, &mock_set);
-	t_array_init(&set.userdbs, 1);
+	const_mock_set = mock_set;
+	array_push_back(&set.parsed_passdbs, &const_mock_set);
+	t_array_init(&set.parsed_userdbs, 1);
 
 	/* For tests of digest-md5. */
 	set.realms_arr = t_strsplit_spaces("example.com ", " ");
@@ -122,7 +126,7 @@ static void test_mechs_init(void)
 	password_schemes_init();
 	password_schemes_allow_weak(TRUE);
 
-	auths_preinit(&set, pool_datastack_create(), mech_reg, services);
+	auths_preinit(&set, mech_reg, services);
 	auths_init();
 	auth_token_init();
 }
@@ -133,7 +137,7 @@ static void test_mech_prepare_request(struct auth_request **request_r,
 				      unsigned int running_test,
 				      const struct test_case *test_case)
 {
-	global_auth_settings->ssl_username_from_cert = test_case->set_cert_username;
+	set.ssl_username_from_cert = test_case->set_cert_username;
 	struct auth *auth = auth_default_service();
 
 	struct auth_request *request = auth_request_new(mech,  NULL);
@@ -254,7 +258,7 @@ static void test_mechs(void)
 		{&mech_apop, UCHAR_LEN("1.1.1\0testuser\0tooshort"), NULL, NULL, FALSE, FALSE, FALSE},
 		{&mech_apop, UCHAR_LEN("1.1.1\0testuser\0responseoflen16-"), NULL, NULL, FALSE, FALSE, FALSE},
 		{&mech_apop, UCHAR_LEN("1.1.1"), NULL, NULL, FALSE, FALSE, FALSE},
-		{&mech_otp, UCHAR_LEN("somebody\0testuser"), "testuser", "otp(testuser): unsupported response type", FALSE, TRUE, FALSE},
+		{&mech_otp, UCHAR_LEN("somebody\0testuser"), "testuser", "unsupported response type", FALSE, TRUE, FALSE},
 		{&mech_cram_md5, UCHAR_LEN("testuser\0response"), "testuser", NULL, FALSE, FALSE, FALSE},
 		{&mech_plain, UCHAR_LEN("testuser\0"), "testuser", NULL, FALSE, FALSE, FALSE},
 
@@ -298,7 +302,7 @@ static void test_mechs(void)
 		{&mech_plain, UCHAR_LEN("failing\0withthis"), NULL, NULL, FALSE, FALSE, FALSE},
 		{&mech_otp, UCHAR_LEN("someb\0ody\0testuser"), NULL, "invalid input", FALSE, FALSE, FALSE},
 		/* phase 2 */
-		{&mech_otp, UCHAR_LEN("someb\0ody\0testuser"), "testuser", "otp(testuser): unsupported response type", FALSE, TRUE, FALSE},
+		{&mech_otp, UCHAR_LEN("someb\0ody\0testuser"), "testuser", "unsupported response type", FALSE, TRUE, FALSE},
 		{&mech_scram_sha1, UCHAR_LEN("c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,p=v0X8v3Bz2T0CJGbJQyF0X+HI4Ts="), NULL, NULL, FALSE, FALSE, FALSE},
 		{&mech_scram_sha1, UCHAR_LEN("iws0X8v3Bz2T0CJGbJQyF0X+HI4Ts=,,,,"), NULL, NULL, FALSE, FALSE, FALSE},
 		{&mech_scram_sha1, UCHAR_LEN("n,a=masteruser,,"), NULL, NULL, FALSE, FALSE, FALSE},
@@ -397,19 +401,33 @@ static void test_mechs(void)
 	mech_deinit(global_auth_settings);
 	mech_register_deinit(&mech_reg);
 	auths_free();
+	pool_unref(&set.pool);
 	i_unlink("auth-token-secret.dat");
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
 	static void (*const test_functions[])(void) = {
 		test_mechs,
 		NULL
 	};
+	const enum master_service_flags service_flags =
+		MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+		MASTER_SERVICE_FLAG_STANDALONE |
+		MASTER_SERVICE_FLAG_STD_CLIENT |
+		MASTER_SERVICE_FLAG_DONT_SEND_STATS;
+	int ret;
+
+	master_service = master_service_init("test-mech",
+					     service_flags, &argc, &argv, "");
+
+	master_service_init_finish(master_service);
 
 	struct ioloop *ioloop = io_loop_create();
 	io_loop_set_current(ioloop);
-	int ret = test_run(test_functions);
+	ret = test_run(test_functions);
 	io_loop_destroy(&ioloop);
+
+	master_service_deinit(&master_service);
 	return ret;
 }

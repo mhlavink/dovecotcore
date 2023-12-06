@@ -2,34 +2,13 @@
 #include "lib.h"
 #include "str.h"
 #include "array.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "mail-crypt-common.h"
 #include "mail-crypt-key.h"
 #include "fs-crypt-settings.h"
-
-static const struct fs_crypt_settings *
-fs_crypt_load_settings(void)
-{
-	static const struct setting_parser_info *set_roots[] = {
-		&fs_crypt_setting_parser_info,
-		NULL
-	};
-	struct master_service_settings_input input;
-	struct master_service_settings_output output;
-	const char *error;
-
-	i_zero(&input);
-	input.roots = set_roots;
-	input.service = "fs-crypt";
-	if (master_service_settings_read(master_service, &input,
-					 &output, &error) < 0)
-		i_fatal("Error reading configuration: %s", error);
-
-	return master_service_settings_get_root_set(master_service,
-				&fs_crypt_setting_parser_info);
-}
 
 static
 const char *mail_crypt_plugin_getenv(const struct fs_crypt_settings *set,
@@ -83,7 +62,9 @@ int mail_crypt_global_keys_load_pluginenv(const char *set_prefix,
 				struct mail_crypt_global_keys *global_keys_r,
 				const char **error_r)
 {
-	const struct fs_crypt_settings *set = fs_crypt_load_settings();
+	const struct fs_crypt_settings *set =
+		settings_get_or_fatal(master_service_get_event(master_service),
+				      &fs_crypt_setting_parser_info);
 
 	const char *set_key = t_strconcat(set_prefix, "_public_key", NULL);
 	const char *key_data = mail_crypt_plugin_getenv(set, set_key);
@@ -103,5 +84,6 @@ int mail_crypt_global_keys_load_pluginenv(const char *set_prefix,
 
 	if (ret != 0)
 		mail_crypt_global_keys_free(global_keys_r);
+	settings_free(set);
 	return ret;
 }

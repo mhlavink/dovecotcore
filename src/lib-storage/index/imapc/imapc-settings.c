@@ -5,8 +5,6 @@
 #include "mail-storage-settings.h"
 #include "imapc-settings.h"
 
-#include <stddef.h>
-
 #undef DEF
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct imapc_settings)
@@ -63,24 +61,17 @@ static const struct imapc_settings imapc_default_settings = {
 	.pop3_deleted_flag = ""
 };
 
-static const struct setting_parser_info imapc_setting_parser_info = {
-	.module_name = "imapc",
+const struct setting_parser_info imapc_setting_parser_info = {
+	.name = "imapc",
+
 	.defines = imapc_setting_defines,
 	.defaults = &imapc_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct imapc_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &mail_user_setting_parser_info,
+	.pool_offset1 = 1 + offsetof(struct imapc_settings, pool),
 
 	.check_func = imapc_settings_check
 };
-
-const struct setting_parser_info *imapc_get_setting_parser_info(void)
-{
-	return &imapc_setting_parser_info;
-}
 
 /* <settings checks> */
 struct imapc_feature_list {
@@ -106,6 +97,7 @@ static const struct imapc_feature_list imapc_feature_list[] = {
 	{ "fetch-empty-is-expunged", IMAPC_FEATURE_FETCH_EMPTY_IS_EXPUNGED },
 	{ "no-msn-updates", IMAPC_FEATURE_NO_MSN_UPDATES },
 	{ "no-acl", IMAPC_FEATURE_NO_ACL },
+	{ "no-metadata", IMAPC_FEATURE_NO_METADATA },
 	{ NULL, 0 }
 };
 

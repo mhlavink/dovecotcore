@@ -8,6 +8,7 @@
 #include "time-util.h"
 #include "event-filter.h"
 #include "event-exporter.h"
+#include "settings.h"
 #include "stats-settings.h"
 #include "stats-metrics.h"
 #include "settings-parser.h"
@@ -19,6 +20,7 @@
 
 struct stats_metrics {
 	pool_t pool;
+	struct event *event;
 	struct event_filter *filter; /* stats & export */
 	ARRAY(struct exporter *) exporters;
 	ARRAY(struct metric *) metrics;
@@ -92,6 +94,28 @@ void event_export_transport_assign_context(const struct exporter *exporter,
 	ptr->transport_context = context;
 }
 
+static int stats_exporters_add_filter(struct stats_metrics *metrics,
+				      const char *filter_name,
+				      const char **error_r)
+{
+	struct stats_exporter_settings *set;
+	int ret = 0;
+
+	if (settings_get_filter(metrics->event, "event_exporter", filter_name,
+				&stats_exporter_setting_parser_info, 0, &set,
+				error_r) < 0)
+		return -1;
+
+	if (set->name[0] == '\0') {
+		*error_r = "Exporter name can't be empty";
+		ret = -1;
+	} else {
+		stats_exporters_add_set(metrics, set);
+	}
+	settings_free(set);
+	return ret;
+}
+
 static struct metric *
 stats_metric_alloc(pool_t pool, const char *name,
 		   const struct stats_metric_settings *set,
@@ -113,16 +137,41 @@ stats_metric_alloc(pool_t pool, const char *name,
 	return metric;
 }
 
-static void stats_metrics_add_set(struct stats_metrics *metrics,
-				  const struct stats_metric_settings *set)
+static struct exporter *
+stats_metrics_exporter_find(struct stats_metrics *metrics,
+			    const char *name)
 {
 	struct exporter *exporter;
+
+	array_foreach_elem(&metrics->exporters, exporter) {
+		if (strcmp(name, exporter->name) == 0)
+			return exporter;
+	}
+	return NULL;
+}
+
+static int stats_metrics_add_set(struct stats_metrics *metrics,
+				 const struct stats_metric_settings *set,
+				 const char **error_r)
+{
+	struct exporter *exporter = NULL;
 	struct metric *metric;
 	const char *const *fields;
 	const char *const *tmp;
 
+	if (set->exporter[0] != '\0') {
+		exporter = stats_metrics_exporter_find(metrics, set->exporter);
+		if (exporter == NULL) {
+			*error_r = t_strdup_printf("metric %s refers to "
+						   "non-existent exporter '%s'",
+						   set->name,
+						   set->exporter);
+			return -1;
+		}
+	}
+
 	fields = t_strsplit_spaces(set->fields, " ");
-	metric = stats_metric_alloc(metrics->pool, set->metric_name, set, fields);
+	metric = stats_metric_alloc(metrics->pool, set->name, set, fields);
 
 	if (array_is_created(&set->parsed_group_by))
 		metric->group_by = array_get(&set->parsed_group_by,
@@ -136,19 +185,10 @@ static void stats_metrics_add_set(struct stats_metrics *metrics,
 	 * Metrics may also be exported - make sure exporter info is set
 	 */
 
-	if (set->exporter[0] == '\0')
-		return; /* not exported */
+	if (exporter == NULL)
+		return 0; /* not exported */
 
-	array_foreach_elem(&metrics->exporters, exporter) {
-		if (strcmp(set->exporter, exporter->name) == 0) {
-			metric->export_info.exporter = exporter;
-			break;
-		}
-	}
-
-	if (metric->export_info.exporter == NULL)
-		i_panic("Could not find exporter (%s) for metric (%s)",
-			set->exporter, set->metric_name);
+	metric->export_info.exporter = exporter;
 
 	/* Defaults */
 	metric->export_info.include = EVENT_EXPORTER_INCL_NONE;
@@ -168,6 +208,28 @@ static void stats_metrics_add_set(struct stats_metrics *metrics,
 		else
 			i_warning("Ignoring unknown exporter include '%s'", *tmp);
 	}
+	return 0;
+}
+
+static int stats_metrics_add_filter(struct stats_metrics *metrics,
+				    const char *filter_name,
+				    const char **error_r)
+{
+	struct stats_metric_settings *set;
+	int ret = 0;
+
+	if (settings_get_filter(metrics->event, "metric", filter_name,
+				&stats_metric_setting_parser_info, 0, &set,
+				error_r) < 0)
+		return -1;
+
+	if (set->name[0] == '\0') {
+		*error_r = "Metric name can't be empty";
+		ret = -1;
+	} else {
+		ret = stats_metrics_add_set(metrics, set, error_r);
+	}
+	return ret;
 }
 
 static struct stats_metric_settings *
@@ -175,7 +237,9 @@ stats_metric_settings_dup(pool_t pool, const struct stats_metric_settings *src)
 {
 	struct stats_metric_settings *set = p_new(pool, struct stats_metric_settings, 1);
 
-	set->metric_name = p_strdup(pool, src->metric_name);
+	set->pool = pool;
+	pool_ref(pool);
+	set->name = p_strdup(pool, src->name);
 	set->description = p_strdup(pool, src->description);
 	set->fields = p_strdup(pool, src->fields);
 	set->group_by = p_strdup(pool, src->group_by);
@@ -228,7 +292,7 @@ bool stats_metrics_add_dynamic(struct stats_metrics *metrics,
 			       const char **error_r)
 {
 	unsigned int existing_idx ATTR_UNUSED;
-	if (stats_metrics_find(metrics, set->metric_name, &existing_idx) != NULL) {
+	if (stats_metrics_find(metrics, set->name, &existing_idx) != NULL) {
 		*error_r = "Metric already exists";
 		return FALSE;
 	}
@@ -244,7 +308,8 @@ bool stats_metrics_add_dynamic(struct stats_metrics *metrics,
 		return FALSE;
 	}
 
-	stats_metrics_add_set(metrics, _set);
+	if (stats_metrics_add_set(metrics, _set, error_r) < 0)
+		return FALSE;
 	return TRUE;
 }
 
@@ -262,46 +327,63 @@ bool stats_metrics_remove_dynamic(struct stats_metrics *metrics,
 	return ret;
 }
 
-static void
+static int
 stats_metrics_add_from_settings(struct stats_metrics *metrics,
-				const struct stats_settings *set)
+				const struct stats_settings *set,
+				const char **error_r)
 {
+	const char *name;
+
 	/* add all the exporters first */
 	if (!array_is_created(&set->exporters)) {
 		p_array_init(&metrics->exporters, metrics->pool, 0);
 	} else {
-		struct stats_exporter_settings *exporter_set;
-
 		p_array_init(&metrics->exporters, metrics->pool,
 			     array_count(&set->exporters));
-		array_foreach_elem(&set->exporters, exporter_set)
-			stats_exporters_add_set(metrics, exporter_set);
+		array_foreach_elem(&set->exporters, name) {
+			if (stats_exporters_add_filter(metrics, name,
+						       error_r) < 0)
+				return -1;
+		}
 	}
 
 	/* then add all the metrics */
 	if (!array_is_created(&set->metrics)) {
 		p_array_init(&metrics->metrics, metrics->pool, 0);
 	} else {
-		struct stats_metric_settings *metric_set;
+		int ret;
 
 		p_array_init(&metrics->metrics, metrics->pool,
 			     array_count(&set->metrics));
-		array_foreach_elem(&set->metrics, metric_set) T_BEGIN {
-			stats_metrics_add_set(metrics, metric_set);
-		} T_END;
+		array_foreach_elem(&set->metrics, name) {
+			T_BEGIN {
+				ret = stats_metrics_add_filter(metrics, name, error_r);
+			} T_END_PASS_STR_IF(ret < 0, error_r);
+			if (ret < 0)
+				return -1;
+		}
 	}
+	return 0;
 }
 
-struct stats_metrics *stats_metrics_init(const struct stats_settings *set)
+int stats_metrics_init(struct event *event,
+		       const struct stats_settings *set,
+		       struct stats_metrics **metrics_r, const char **error_r)
 {
 	struct stats_metrics *metrics;
 	pool_t pool = pool_alloconly_create("stats metrics", 1024);
 
 	metrics = p_new(pool, struct stats_metrics, 1);
 	metrics->pool = pool;
+	metrics->event = event;
+	event_ref(event);
 	metrics->filter = event_filter_create();
-	stats_metrics_add_from_settings(metrics, set);
-	return metrics;
+	if (stats_metrics_add_from_settings(metrics, set, error_r) < 0) {
+		stats_metrics_deinit(&metrics);
+		return -1;
+	}
+	*metrics_r = metrics;
+	return 0;
 }
 
 static void stats_metric_free(struct metric *metric)
@@ -310,6 +392,8 @@ static void stats_metric_free(struct metric *metric)
 	stats_dist_deinit(&metric->duration_stats);
 	for (unsigned int i = 0; i < metric->fields_count; i++)
 		stats_dist_deinit(&metric->fields[i].stats);
+	settings_free(metric->set);
+
 	if (!array_is_created(&metric->sub_metrics))
 		return;
 	array_foreach_elem(&metric->sub_metrics, sub_metric)
@@ -336,6 +420,7 @@ void stats_metrics_deinit(struct stats_metrics **_metrics)
 	array_foreach_elem(&metrics->metrics, metric)
 		stats_metric_free(metric);
 	event_filter_unref(&metrics->filter);
+	event_unref(&metrics->event);
 	pool_unref(&metrics->pool);
 }
 
@@ -408,6 +493,7 @@ stats_metric_sub_metric_alloc(struct metric *metric, const char *name, pool_t po
 	array_append_zero(&fields);
 	sub_metric = stats_metric_alloc(pool, metric->name, metric->set,
 					array_idx(&fields, 0));
+	pool_ref(sub_metric->set->pool);
 	size_t max_len = STATS_SUB_METRIC_MAX_LENGTH - metric->sub_name_used_size;
 	sub_metric->sub_name = p_strdup(pool, str_sanitize_utf8(name, max_len));
 	sub_metric->sub_name_used_size =

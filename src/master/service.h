@@ -145,14 +145,12 @@ struct service {
 
 struct service_list {
 	pool_t pool;
-	pool_t set_pool;
 	int refcount;
 	struct timeout *to_kill;
 	unsigned int fork_counter;
 	struct event *event;
 
 	const struct master_settings *set;
-	const struct master_service_settings *service_set;
 
 	struct service *config;
 	struct service *log;

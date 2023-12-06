@@ -11,6 +11,7 @@
 #include "safe-memset.h"
 #include "str.h"
 #include "strescape.h"
+#include "settings.h"
 #include "master-service.h"
 #include "master-service-ssl-settings.h"
 #include "client.h"
@@ -90,16 +91,21 @@ static struct client *submission_client_alloc(pool_t pool)
 	return &subm_client->common;
 }
 
-static void submission_client_create(struct client *client,
-				     void **other_sets)
+static int submission_client_create(struct client *client)
 {
 	static const char *const xclient_extensions[] =
 		{ "FORWARD", NULL };
 	struct submission_client *subm_client =
 		container_of(client, struct submission_client, common);
 	struct smtp_server_settings smtp_set;
+	const char *error;
 
-	subm_client->set = other_sets[0];
+	if (settings_get(client->event, &submission_login_setting_parser_info,
+			 0, &subm_client->set, &error) < 0) {
+		e_error(client->event, "%s", error);
+		return -1;
+	}
+
 	client_parse_backend_capabilities(subm_client);
 
 	i_zero(&smtp_set);
@@ -122,6 +128,7 @@ static void submission_client_create(struct client *client,
 		smtp_server, client->input, client->output,
 		&client->real_remote_ip, client->real_remote_port,
 		&smtp_set, &smtp_callbacks, subm_client);
+	return 0;
 }
 
 static void submission_client_destroy(struct client *client)
@@ -131,6 +138,7 @@ static void submission_client_destroy(struct client *client)
 
 	if (subm_client->conn != NULL)
 		smtp_server_connection_close(&subm_client->conn, NULL);
+	settings_free(subm_client->set);
 	i_free_and_null(subm_client->proxy_xclient);
 }
 
@@ -189,6 +197,10 @@ client_connection_cmd_xclient(void *context,
 		client->common.session_id =
 			p_strdup(client->common.pool, data->session);
 	}
+	if (data->local_name != NULL) {
+		client->common.local_name =
+			p_strdup(client->common.preproxy_pool, data->local_name);
+	}
 	if (data->client_transport != NULL) {
 		client->common.end_client_tls_secured_set = TRUE;
 		client->common.end_client_tls_secured =
@@ -243,7 +255,6 @@ static void submission_login_die(void)
 
 static void submission_login_preinit(void)
 {
-	login_set_roots = submission_login_setting_roots;
 }
 
 static void submission_login_init(void)

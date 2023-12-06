@@ -6,6 +6,7 @@
 #include "var-expand.h"
 #include "unichar.h"
 #include "hostpid.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "message-address.h"
 #include "message-header-parser.h"
@@ -17,10 +18,8 @@
 #include "mail-storage-settings.h"
 #include "iostream-ssl.h"
 
-#include <stddef.h>
-
-static bool mail_storage_settings_check(void *_set, pool_t pool, const char **error_r);
-static bool namespace_settings_check(void *_set, pool_t pool, const char **error_r);
+static bool mail_storage_settings_ext_check(struct event *event, void *_set, pool_t pool, const char **error_r);
+static bool namespace_settings_ext_check(struct event *event, void *_set, pool_t pool, const char **error_r);
 static bool mailbox_settings_check(void *_set, pool_t pool, const char **error_r);
 static bool mail_user_settings_check(void *_set, pool_t pool, const char **error_r);
 static bool mail_user_settings_expand_check(void *_set, pool_t pool ATTR_UNUSED, const char **error_r);
@@ -75,15 +74,19 @@ static const struct setting_define mail_storage_setting_defines[] = {
 	DEF(BOOL, mailbox_list_index),
 	DEF(BOOL, mailbox_list_index_very_dirty_syncs),
 	DEF(BOOL, mailbox_list_index_include_inbox),
-	DEF(BOOL, mail_debug),
 	DEF(BOOL, mail_full_filesystem_access),
 	DEF(BOOL, maildir_stat_dirs),
 	DEF(BOOL, mail_shared_explicit_inbox),
 	DEF(ENUM, lock_method),
 	DEF(STR, pop3_uidl_format),
 
-	DEF(STR, hostname),
 	DEF(STR, recipient_delimiter),
+
+	{ .type = SET_FILTER_ARRAY, .key = "namespace",
+	   .offset = offsetof(struct mail_storage_settings, namespaces),
+	   .filter_array_field_name = "namespace_name" },
+	{ .type = SET_STRLIST, .key = "plugin",
+	  .offset = offsetof(struct mail_storage_settings, plugin_envs) },
 
 	SETTING_DEFINE_LIST_END
 };
@@ -133,38 +136,36 @@ const struct mail_storage_settings mail_storage_default_settings = {
 	.mailbox_list_index = TRUE,
 	.mailbox_list_index_very_dirty_syncs = FALSE,
 	.mailbox_list_index_include_inbox = FALSE,
-	.mail_debug = FALSE,
 	.mail_full_filesystem_access = FALSE,
 	.maildir_stat_dirs = FALSE,
 	.mail_shared_explicit_inbox = FALSE,
 	.lock_method = "fcntl:flock:dotlock",
 	.pop3_uidl_format = "%08Xu%08Xv",
 
-	.hostname = "",
 	.recipient_delimiter = "+",
+
+	.namespaces = ARRAY_INIT,
+	.plugin_envs = ARRAY_INIT,
 };
 
 const struct setting_parser_info mail_storage_setting_parser_info = {
-	.module_name = "mail",
+	.name = "mail_storage",
+
 	.defines = mail_storage_setting_defines,
 	.defaults = &mail_storage_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct mail_storage_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &mail_user_setting_parser_info,
-
-	.check_func = mail_storage_settings_check,
+	.pool_offset1 = 1 + offsetof(struct mail_storage_settings, pool),
+	.ext_check_func = mail_storage_settings_ext_check,
 };
 
 #undef DEF
 #define DEF(type, name) \
-	SETTING_DEFINE_STRUCT_##type(#name, name, struct mailbox_settings)
+	SETTING_DEFINE_STRUCT_##type("mailbox_"#name, name, struct mailbox_settings)
 
 static const struct setting_define mailbox_setting_defines[] = {
 	DEF(STR, name),
-	{ .type = SET_ENUM, .key = "auto",
+	{ .type = SET_ENUM, .key = "mailbox_auto",
 	  .offset = offsetof(struct mailbox_settings, autocreate) } ,
 	DEF(STR, special_use),
 	DEF(STR, driver),
@@ -188,26 +189,20 @@ const struct mailbox_settings mailbox_default_settings = {
 };
 
 const struct setting_parser_info mailbox_setting_parser_info = {
+	.name = "mailbox",
+
 	.defines = mailbox_setting_defines,
 	.defaults = &mailbox_default_settings,
 
-	.type_offset = offsetof(struct mailbox_settings, name),
 	.struct_size = sizeof(struct mailbox_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &mail_user_setting_parser_info,
+	.pool_offset1 = 1 + offsetof(struct mailbox_settings, pool),
 
 	.check_func = mailbox_settings_check
 };
 
 #undef DEF
-#undef DEFLIST_UNIQUE
 #define DEF(type, name) \
-	SETTING_DEFINE_STRUCT_##type(#name, name, struct mail_namespace_settings)
-#define DEFLIST_UNIQUE(field, name, defines) \
-	{ .type = SET_DEFLIST_UNIQUE, .key = name, \
-	  .offset = offsetof(struct mail_namespace_settings, field), \
-	  .list_info = defines }
+	SETTING_DEFINE_STRUCT_##type("namespace_"#name, name, struct mail_namespace_settings)
 
 static const struct setting_define mail_namespace_setting_defines[] = {
 	DEF(STR, name),
@@ -215,8 +210,6 @@ static const struct setting_define mail_namespace_setting_defines[] = {
 	DEF(STR, separator),
 	DEF(STR_VARS, prefix),
 	DEF(STR_VARS, location),
-	{ .type = SET_ALIAS, .key = "mail" },
-	{ .type = SET_ALIAS, .key = "mail_location" },
 	DEF(STR_VARS, alias_for),
 
 	DEF(BOOL, inbox),
@@ -227,7 +220,9 @@ static const struct setting_define mail_namespace_setting_defines[] = {
 	DEF(BOOL, disabled),
 	DEF(UINT, order),
 
-	DEFLIST_UNIQUE(mailboxes, "mailbox", &mailbox_setting_parser_info),
+	{ .type = SET_FILTER_ARRAY, .key = "mailbox",
+	   .offset = offsetof(struct mail_namespace_settings, mailboxes),
+	   .filter_array_field_name = "mailbox_name" },
 
 	SETTING_DEFINE_LIST_END
 };
@@ -252,31 +247,26 @@ const struct mail_namespace_settings mail_namespace_default_settings = {
 };
 
 const struct setting_parser_info mail_namespace_setting_parser_info = {
+	.name = "mail_namespace",
+
 	.defines = mail_namespace_setting_defines,
 	.defaults = &mail_namespace_default_settings,
 
-	.type_offset = offsetof(struct mail_namespace_settings, name),
 	.struct_size = sizeof(struct mail_namespace_settings),
+	.pool_offset1 = 1 + offsetof(struct mail_namespace_settings, pool),
 
-	.parent_offset = offsetof(struct mail_namespace_settings, user_set),
-	.parent = &mail_user_setting_parser_info,
-
-	.check_func = namespace_settings_check
+	.ext_check_func = namespace_settings_ext_check
 };
 
 #undef DEF
-#undef DEFLIST_UNIQUE
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct mail_user_settings)
-#define DEFLIST_UNIQUE(field, name, defines) \
-	{ .type = SET_DEFLIST_UNIQUE, .key = name, \
-	  .offset = offsetof(struct mail_user_settings, field), \
-	  .list_info = defines }
 
 static const struct setting_define mail_user_setting_defines[] = {
 	DEF(STR, base_dir),
 	DEF(STR, auth_socket_path),
 	DEF(STR_VARS, mail_temp_dir),
+	DEF(BOOL, mail_debug),
 
 	DEF(STR, mail_uid),
 	DEF(STR, mail_gid),
@@ -294,14 +284,10 @@ static const struct setting_define mail_user_setting_defines[] = {
 	DEF(STR, mail_plugins),
 	DEF(STR, mail_plugin_dir),
 
-	DEF(STR, mail_log_prefix),
+	DEF(STR_VARS, mail_log_prefix),
 
 	DEF(STR, hostname),
 	DEF(STR_VARS, postmaster_address),
-
-	DEFLIST_UNIQUE(namespaces, "namespace", &mail_namespace_setting_parser_info),
-	{ .type = SET_STRLIST, .key = "plugin",
-	  .offset = offsetof(struct mail_user_settings, plugin_envs) },
 
 	SETTING_DEFINE_LIST_END
 };
@@ -310,6 +296,7 @@ static const struct mail_user_settings mail_user_default_settings = {
 	.base_dir = PKG_RUNDIR,
 	.auth_socket_path = "auth-userdb",
 	.mail_temp_dir = "/tmp",
+	.mail_debug = FALSE,
 
 	.mail_uid = "",
 	.mail_gid = "",
@@ -331,21 +318,16 @@ static const struct mail_user_settings mail_user_default_settings = {
 
 	.hostname = "",
 	.postmaster_address = "postmaster@%{if;%d;ne;;%d;%{hostname}}",
-
-	.namespaces = ARRAY_INIT,
-	.plugin_envs = ARRAY_INIT
 };
 
 const struct setting_parser_info mail_user_setting_parser_info = {
-	.module_name = "mail",
+	.name = "mail_user",
+
 	.defines = mail_user_setting_defines,
 	.defaults = &mail_user_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct mail_user_settings),
-
-	.parent_offset = SIZE_MAX,
-
+	.pool_offset1 = 1 + offsetof(struct mail_user_settings, pool),
 	.check_func = mail_user_settings_check,
 #ifndef CONFIG_BINARY
 	.expand_check_func = mail_user_settings_expand_check,
@@ -355,8 +337,8 @@ const struct setting_parser_info mail_user_setting_parser_info = {
 const struct mail_storage_settings *
 mail_user_set_get_storage_set(struct mail_user *user)
 {
-	return settings_parser_get_root_set(user->set_parser,
-		&mail_storage_setting_parser_info);
+	i_assert(user->_mail_set != NULL);
+	return user->_mail_set;
 }
 
 static void
@@ -386,8 +368,105 @@ static bool mail_cache_fields_parse(const char *key, const char *value,
 	return TRUE;
 }
 
-static bool mail_storage_settings_check(void *_set, pool_t pool,
+static int
+mail_storage_settings_find_ns_by_prefix(struct event *event,
+					struct mail_storage_settings *set,
+					const char *ns_prefix,
+					const struct mail_namespace_settings **ns_r,
 					const char **error_r)
+{
+	const struct mail_namespace_settings *ns;
+	const char *ns_name, *error;
+
+	array_foreach_elem(&set->namespaces, ns_name) {
+		if (settings_get_filter(event, "namespace", ns_name,
+					&mail_namespace_setting_parser_info,
+					SETTINGS_GET_FLAG_NO_CHECK |
+					SETTINGS_GET_FLAG_FAKE_EXPAND,
+					&ns, &error) < 0) {
+			*error_r = t_strdup_printf(
+				"Failed to get namespace %s: %s",
+				ns_name, error);
+			return -1;
+		}
+		if (strcmp(ns->prefix, ns_prefix) == 0) {
+			*ns_r = ns;
+			return 0;
+		}
+		settings_free(ns);
+	}
+	*ns_r = NULL;
+	return 0;
+}
+
+static bool
+mail_storage_settings_check_namespaces(struct event *event,
+				       struct mail_storage_settings *set,
+				       const char **error_r)
+{
+	const struct mail_namespace_settings *ns, *alias_ns;
+	const char *ns_name, *error;
+
+	if (!array_is_created(&set->namespaces))
+		return TRUE;
+
+	array_foreach_elem(&set->namespaces, ns_name) {
+		if (settings_get_filter(event, "namespace", ns_name,
+					&mail_namespace_setting_parser_info,
+					SETTINGS_GET_FLAG_FAKE_EXPAND,
+					&ns, &error) < 0) {
+			*error_r = t_strdup_printf(
+				"Failed to get namespace %s: %s",
+				ns_name, error);
+			return FALSE;
+		}
+
+		if (ns->disabled) {
+			settings_free(ns);
+			continue;
+		}
+
+		if (ns->parsed_have_special_use_mailboxes)
+			set->parsed_have_special_use_mailboxes = TRUE;
+
+		if (ns->alias_for == NULL) {
+			settings_free(ns);
+			continue;
+		}
+
+		if (mail_storage_settings_find_ns_by_prefix(event, set,
+				ns->alias_for, &alias_ns, error_r) < 0) {
+			settings_free(ns);
+			return FALSE;
+		}
+		if (alias_ns == NULL) {
+			*error_r = t_strdup_printf(
+				"Namespace '%s': alias_for points to "
+				"unknown namespace: %s",
+				ns->prefix != NULL ? ns->prefix : "",
+				ns->alias_for);
+			settings_free(ns);
+			return FALSE;
+		}
+		if (alias_ns->alias_for != NULL) {
+			*error_r = t_strdup_printf(
+				"Namespace '%s': alias_for chaining isn't "
+				"allowed: %s -> %s",
+				ns->prefix != NULL ? ns->prefix : "",
+				ns->alias_for, alias_ns->alias_for);
+			settings_free(alias_ns);
+			settings_free(ns);
+			return FALSE;
+		}
+		settings_free(alias_ns);
+		settings_free(ns);
+	}
+	return TRUE;
+}
+
+static bool
+mail_storage_settings_ext_check(struct event *event, void *_set, pool_t pool,
+				const char **error_r)
 {
 	struct mail_storage_settings *set = _set;
 	struct hash_format *format;
@@ -491,11 +570,6 @@ static bool mail_storage_settings_check(void *_set, pool_t pool,
 
 	// FIXME: check set->mail_server_admin syntax (RFC 5464, Section 6.2.2)
 
-#ifndef CONFIG_BINARY
-	if (*set->hostname == '\0')
-		set->hostname = p_strdup(pool, my_hostdomain());
-#endif
-
 	/* parse mail_attachment_indicator_options */
 	if (*set->mail_attachment_detection_options != '\0') {
 		ARRAY_TYPE(const_string) content_types;
@@ -538,16 +612,57 @@ static bool mail_storage_settings_check(void *_set, pool_t pool,
 	if (!mail_cache_fields_parse("mail_never_cache_fields",
 				     set->mail_never_cache_fields, error_r))
 		return FALSE;
+
+	if (!mail_storage_settings_check_namespaces(event, set, error_r))
+		return FALSE;
 	return TRUE;
 }
 
-static bool namespace_settings_check(void *_set, pool_t pool ATTR_UNUSED,
+static int
+namespace_have_special_use_mailboxes(struct event *event,
+				     struct mail_namespace_settings *ns,
 				     const char **error_r)
 {
+	struct mailbox_settings *box_set;
+	const char *box_name, *error;
+	int ret = 0;
+
+	if (!array_is_created(&ns->mailboxes))
+		return 0;
+
+	event = event_create(event);
+	event_add_str(event, "namespace", ns->name);
+	array_foreach_elem(&ns->mailboxes, box_name) {
+		if (settings_get_filter(event,
+					SETTINGS_EVENT_MAILBOX_NAME_WITHOUT_PREFIX,
+					box_name,
+					&mailbox_setting_parser_info,
+					SETTINGS_GET_FLAG_NO_CHECK |
+					SETTINGS_GET_FLAG_FAKE_EXPAND,
+					&box_set, &error) < 0) {
+			*error_r = t_strdup_printf(
+				"Failed to get mailbox %s: %s",
+				box_name, error);
+			break;
+		}
+		bool have_special_use = box_set->special_use[0] != '\0';
+		settings_free(box_set);
+		if (have_special_use) {
+			ret = 1;
+			break;
+		}
+	}
+	event_unref(&event);
+	return ret;
+}
+
+static bool namespace_settings_ext_check(struct event *event,
+					 void *_set, pool_t pool ATTR_UNUSED,
+					 const char **error_r)
+{
 	struct mail_namespace_settings *ns = _set;
-	struct mail_namespace_settings *const *namespaces;
 	const char *name;
-	unsigned int i, count;
+	int ret;
 
 	name = ns->prefix != NULL ? ns->prefix : "";
 
@@ -569,32 +684,11 @@ static bool namespace_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 		return FALSE;
 	}
 
-	if (ns->alias_for != NULL && !ns->disabled) {
-		if (array_is_created(&ns->user_set->namespaces)) {
-			namespaces = array_get(&ns->user_set->namespaces,
-					       &count);
-		} else {
-			namespaces = NULL;
-			count = 0;
-		}
-		for (i = 0; i < count; i++) {
-			if (strcmp(namespaces[i]->prefix, ns->alias_for) == 0)
-				break;
-		}
-		if (i == count) {
-			*error_r = t_strdup_printf(
-				"Namespace '%s': alias_for points to "
-				"unknown namespace: %s", name, ns->alias_for);
-			return FALSE;
-		}
-		if (namespaces[i]->alias_for != NULL) {
-			*error_r = t_strdup_printf(
-				"Namespace '%s': alias_for chaining isn't "
-				"allowed: %s -> %s", name, ns->alias_for,
-				namespaces[i]->alias_for);
-			return FALSE;
-		}
-	}
+	ret = namespace_have_special_use_mailboxes(event, ns, error_r);
+	if (ret < 0)
+		return FALSE;
+	if (ret > 0)
+		ns->parsed_have_special_use_mailboxes = TRUE;
 	return TRUE;
 }
 

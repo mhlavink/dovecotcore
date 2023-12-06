@@ -4,9 +4,11 @@
 #include "array.h"
 #include "str.h"
 #include "hash.h"
+#include "llist.h"
 #include "strescape.h"
 #include "istream.h"
 #include "module-dir.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "service-settings.h"
 #include "master-service.h"
@@ -15,6 +17,7 @@
 #include "all-settings.h"
 #include "old-set-parser.h"
 #include "config-request.h"
+#include "config-dump-full.h"
 #include "config-parser-private.h"
 
 #include <unistd.h>
@@ -31,63 +34,194 @@
 #define DNS_LOOKUP_TIMEOUT_SECS 30
 #define DNS_LOOKUP_WARN_SECS 5
 
+struct config_parser_key {
+	struct config_parser_key *prev, *next;
+
+	/* Index number to get setting_parser_info from all_infos[] or
+	   module_parsers[] */
+	unsigned int info_idx;
+	/* Index number inside setting_parser_info->defines[] */
+	unsigned int define_idx;
+};
+
+struct config_parsed {
+	pool_t pool;
+	struct config_filter_parser *const *filter_parsers;
+	struct config_module_parser *module_parsers;
+	ARRAY_TYPE(const_string) errors;
+};
+
 ARRAY_DEFINE_TYPE(setting_parser_info_p, const struct setting_parser_info *);
 
 static const enum settings_parser_flags settings_parser_flags =
 	SETTINGS_PARSER_FLAG_IGNORE_UNKNOWN_KEYS |
 	SETTINGS_PARSER_FLAG_TRACK_CHANGES;
 
-struct config_module_parser *config_module_parsers;
-struct config_filter_context *config_filter;
 struct module *modules;
 void (*hook_config_parser_begin)(struct config_parser_context *ctx);
 int (*hook_config_parser_end)(struct config_parser_context *ctx,
 			      const char **error_r);
 
-static ARRAY_TYPE(service_settings) services_free_at_deinit = ARRAY_INIT;
-static ARRAY_TYPE(setting_parser_info_p) roots_free_at_deinit = ARRAY_INIT;
+static ARRAY_TYPE(config_service) services_free_at_deinit = ARRAY_INIT;
+static ARRAY_TYPE(setting_parser_info_p) infos_free_at_deinit = ARRAY_INIT;
 
-static const char *info_type_name_find(const struct setting_parser_info *info)
+static struct config_filter_parser *
+config_filter_parser_find(struct config_parser_context *ctx,
+			  const struct config_filter *filter);
+static struct config_section_stack *
+config_add_new_section(struct config_parser_context *ctx);
+static void
+config_add_new_parser(struct config_parser_context *ctx,
+		      struct config_section_stack *cur_section);
+static int
+config_apply_exact_line(struct config_parser_context *ctx, const char *key,
+			const char *value);
+
+void config_parser_set_change_counter(struct config_parser_context *ctx,
+				      uint8_t change_counter)
 {
-	unsigned int i;
+	struct config_module_parser *module_parsers =
+		ctx->cur_section->module_parsers;
 
-	for (i = 0; info->defines[i].key != NULL; i++) {
-		if (info->defines[i].offset == info->type_offset)
-			return info->defines[i].key;
+	ctx->change_counter = change_counter;
+	for (unsigned int i = 0; module_parsers[i].info != NULL; i++) {
+		if (module_parsers[i].parser != NULL) {
+			settings_parse_set_change_counter(module_parsers[i].parser,
+							  change_counter);
+		}
 	}
-	i_panic("setting parser: Invalid type_offset value");
-	return NULL;
 }
 
-static int config_add_type(struct setting_parser_context *parser,
-			   const char *line, const char *section_name)
+static struct config_section_stack *
+config_parser_add_filter_array(struct config_parser_context *ctx,
+			       const char *filter_key, const char *name)
 {
-	const struct setting_parser_info *info;
+	config_parser_set_change_counter(ctx, CONFIG_PARSER_CHANGE_INTERNAL);
+	if (config_apply_exact_line(ctx, filter_key, name) < 0) {
+		i_panic("Failed to add %s %s: %s", filter_key, name,
+			ctx->error);
+	}
+	config_parser_set_change_counter(ctx, CONFIG_PARSER_CHANGE_EXPLICIT);
+
+	struct config_section_stack *section;
+	section = config_add_new_section(ctx);
+	section->filter.filter_name =
+		p_strdup_printf(ctx->pool, "%s/%s", filter_key, name);
+	section->filter.filter_name_array = TRUE;
+	section->is_filter = TRUE;
+	/* use cur_section's filter_parser as parent */
+	section->filter_parser = ctx->cur_section->filter_parser;
+	config_add_new_parser(ctx, section);
+	section->filter_parser->filter_required_setting_seen = TRUE;
+	return section;
+}
+
+static void
+config_parser_add_service_default_struct(struct config_parser_context *ctx,
+					 unsigned int service_info_idx,
+					 const struct service_settings *default_set)
+{
+	const struct setting_parser_info *info = all_infos[service_info_idx];
+	string_t *value_str = t_str_new(64);
+	bool dump;
+
+	config_parser_set_change_counter(ctx, CONFIG_PARSER_CHANGE_INTERNAL);
+	for (unsigned int i = 0; info->defines[i].key != NULL; i++) {
+		const void *value = CONST_PTR_OFFSET(default_set,
+						     info->defines[i].offset);
+		i_assert(value != NULL);
+
+		str_truncate(value_str, 0);
+		if (!config_export_type(value_str, value, NULL,
+					info->defines[i].type, TRUE, &dump))
+			continue;
+
+		if (config_apply_line(ctx, info->defines[i].key,
+				      str_c(value_str), NULL) < 0) {
+			i_panic("Failed to add default setting %s=%s for service %s: %s",
+				info->defines[i].key, str_c(value_str),
+				default_set->name, ctx->error);
+		}
+	}
+	config_parser_set_change_counter(ctx, CONFIG_PARSER_CHANGE_EXPLICIT);
+}
+
+static void
+config_parser_add_service_default_keyvalues(struct config_parser_context *ctx,
+					    const char *service_name,
+					    const struct setting_keyvalue *defaults)
+{
+	struct config_filter_parser *orig_filter_parser =
+		ctx->cur_section->filter_parser;
+	struct config_module_parser *orig_module_parsers =
+		ctx->cur_section->module_parsers;
 	const char *p;
-	string_t *str;
-	int ret;
 
-	info = settings_parse_get_prev_info(parser);
-	if (info == NULL) {
-		/* section inside strlist */
-		return -1;
-	}
-	if (info->type_offset == SIZE_MAX)
-		return 0;
+	for (unsigned int i = 0; defaults[i].key != NULL; i++) T_BEGIN {
+		const char *key = defaults[i].key;
 
-	str = t_str_new(256);
-	p = strchr(line, '=');
-	str_append_data(str, line, p-line);
-	str_append_c(str, SETTINGS_SEPARATOR);
-	str_append(str, p+1);
-	if (info != NULL) {
-		str_append_c(str, SETTINGS_SEPARATOR);
-		str_append(str, info_type_name_find(info));
-	}
+		if ((p = strchr(key, '/')) != NULL &&
+		    (p = strchr(p + 1, '/')) != NULL) {
+			/* *_listener filter */
+			const char *escaped_key = t_strdup_until(key, p);
+			struct config_filter filter = {
+				.filter_name = settings_section_unescape(escaped_key),
+				.filter_name_array = TRUE,
+				.parent = &orig_filter_parser->filter,
+			};
+			struct config_filter_parser *filter_parser =
+				config_filter_parser_find(ctx, &filter);
+			if (filter_parser == NULL) {
+				ctx->cur_section->filter = filter;
+				ctx->cur_section->filter.filter_name =
+					p_strdup(ctx->pool, filter.filter_name);
+				ctx->cur_section->filter_parser = orig_filter_parser;
+				config_add_new_parser(ctx, ctx->cur_section);
+				ctx->cur_section->filter_parser->filter_required_setting_seen = TRUE;
+			} else {
+				ctx->cur_section->filter_parser = filter_parser;
+				ctx->cur_section->module_parsers =
+					ctx->cur_section->filter_parser->module_parsers;
+				ctx->cur_section->filter = filter_parser->filter;
+			}
+			key = p + 1;
+		}
 
-	ret = settings_parse_keyvalue(parser, str_c(str), section_name);
-	i_assert(ret > 0);
-	return 0;
+		config_parser_set_change_counter(ctx, CONFIG_PARSER_CHANGE_INTERNAL);
+		if (config_apply_line(ctx, key, defaults[i].value, NULL) < 0) {
+			i_panic("Failed to add default setting %s=%s for service %s: %s",
+				defaults[i].key, defaults[i].value,
+				service_name, ctx->error);
+		}
+		config_parser_set_change_counter(ctx, CONFIG_PARSER_CHANGE_EXPLICIT);
+
+		ctx->cur_section->filter_parser = orig_filter_parser;
+		ctx->cur_section->module_parsers = orig_module_parsers;
+		ctx->cur_section->filter = orig_filter_parser->filter;
+	} T_END;
+}
+
+static void config_parser_add_services(struct config_parser_context *ctx,
+				       unsigned int service_info_idx)
+{
+	struct config_section_stack *orig_section = ctx->cur_section;
+
+	for (unsigned int i = 0; config_all_services[i].set != NULL; i++) T_BEGIN {
+		const struct service_settings *set = config_all_services[i].set;
+		struct config_section_stack *section =
+			config_parser_add_filter_array(ctx, "service",
+						       set->name);
+		ctx->cur_section = section;
+		config_parser_add_service_default_struct(ctx, service_info_idx, set);
+
+		const struct setting_keyvalue *defaults =
+			config_all_services[i].defaults;
+		if (defaults != NULL) {
+			config_parser_add_service_default_keyvalues(
+				ctx, set->name, defaults);
+		}
+		ctx->cur_section = orig_section;
+	} T_END;
 }
 
 static bool
@@ -95,8 +229,13 @@ config_parser_is_in_localremote(struct config_section_stack *section)
 {
 	const struct config_filter *filter = &section->filter;
 
-	return filter->local_name != NULL || filter->local_bits > 0 ||
-		filter->remote_bits > 0;
+	do {
+		if (filter->local_name != NULL || filter->local_bits > 0 ||
+		    filter->remote_bits > 0)
+			return TRUE;
+		filter = filter->parent;
+	} while (filter != NULL);
+	return FALSE;
 }
 
 static void
@@ -120,40 +259,149 @@ get_setting_full_path(struct config_parser_context *ctx, const char *key)
 	return str_c(str);
 }
 
-int config_apply_line(struct config_parser_context *ctx, const char *key,
-		      const char *line, const char *section_name)
+static bool
+config_is_filter_name(struct config_parser_context *ctx, const char *key,
+		      const struct setting_define **def_r)
 {
-	struct config_module_parser *l;
-	bool found = FALSE;
-	int ret;
+	struct config_parser_key *config_key;
+	const struct setting_define *def;
 
-	for (l = ctx->cur_section->parsers; l->root != NULL; l++) {
-		ret = settings_parse_line(l->parser, line);
-		if (ret > 0) {
-			found = TRUE;
+	config_key = hash_table_lookup(ctx->all_keys, key);
+	if (config_key == NULL)
+		return FALSE;
+
+	def = &all_infos[config_key->info_idx]->defines[config_key->define_idx];
+	if (def->type != SET_FILTER_NAME && def->type != SET_FILTER_ARRAY)
+		return FALSE;
+
+	*def_r = def;
+	return TRUE;
+}
+
+static int
+config_apply_exact_line(struct config_parser_context *ctx, const char *key,
+			const char *value)
+{
+	struct config_parser_key *config_key;
+
+	if (ctx->cur_section->filter_def != NULL &&
+	    !ctx->cur_section->filter_parser->filter_required_setting_seen &&
+	    ctx->cur_section->filter_def->required_setting != NULL &&
+	    strcmp(key, ctx->cur_section->filter_def->required_setting) == 0)
+		ctx->cur_section->filter_parser->filter_required_setting_seen = TRUE;
+
+	/* if key is strlist/key, lookup only "strlist" */
+	config_key = hash_table_lookup(ctx->all_keys, t_strcut(key, '/'));
+	if (config_key == NULL)
+		return 0;
+
+	for (; config_key != NULL; config_key = config_key->next) {
+		struct config_module_parser *l =
+			&ctx->cur_section->module_parsers[config_key->info_idx];
+		if (l->parser == NULL) {
+			l->parser = settings_parser_init(ctx->pool,
+				all_infos[config_key->info_idx],
+				settings_parser_flags);
+			settings_parse_set_change_counter(l->parser,
+							  ctx->change_counter);
+		}
+		if (settings_parse_keyidx_value(l->parser,
+				config_key->define_idx, key, value) == 0) {
 			/* FIXME: remove once auth does support these. */
-			if (strcmp(l->root->module_name, "auth") == 0 &&
+			if (strcmp(l->info->name, "auth") == 0 &&
 			    config_parser_is_in_localremote(ctx->cur_section)) {
 				ctx->error = p_strconcat(ctx->pool,
 					"Auth settings not supported inside local/remote blocks: ",
 					key, NULL);
 				return -1;
 			}
-			if (section_name != NULL) {
-				if (config_add_type(l->parser, line, section_name) < 0) {
-					ctx->error = "Section not allowed here";
-					return -1;
-				}
-			}
-		} else if (ret < 0) {
+		} else {
 			ctx->error = settings_parser_get_error(l->parser);
 			return -1;
 		}
 	}
-	if (!found) {
+	return 1;
+}
+
+int config_apply_line(struct config_parser_context *ctx,
+		      const char *key_with_path,
+		      const char *value, const char **full_key_r)
+{
+	struct config_filter orig_filter = ctx->cur_section->filter;
+	struct config_module_parser *orig_module_parsers =
+		ctx->cur_section->module_parsers;
+	struct config_filter_parser *filter_parser, *orig_filter_parser;
+	const char *p, *key;
+	int ret = 0;
+
+	orig_filter_parser = ctx->cur_section->filter_parser;
+	while ((p = strchr(key_with_path, '/')) != NULL &&
+	       (p = strchr(p + 1, '/')) != NULL) {
+		/* Support e.g. service/imap/inet_listener/imap prefix here.
+		   These prefixes are used by default settings and
+		   old-set-parser. */
+		struct config_filter filter = {
+			.parent = &ctx->cur_section->filter,
+			.filter_name = t_strdup_until(key_with_path, p),
+			.filter_name_array = TRUE,
+		};
+		filter_parser = config_filter_parser_find(ctx, &filter);
+		if (filter_parser == NULL)
+			break;
+		key_with_path = p + 1;
+		ctx->cur_section->filter_parser = filter_parser;
+		ctx->cur_section->module_parsers =
+			ctx->cur_section->filter_parser->module_parsers;
+		ctx->cur_section->filter = filter_parser->filter;
+	}
+	/* the only '/' left should be if key is under strlist/ */
+	key = key_with_path;
+
+	if (ctx->cur_section->filter.filter_name_array) {
+		/* first try the filter name-specific prefix, so e.g.
+		   inet_listener { ssl=yes } won't try to change the global
+		   ssl setting. */
+		const char *filter_key =
+			t_strcut(ctx->cur_section->filter.filter_name, '/');
+		const char *key2 = t_strdup_printf("%s_%s", filter_key, key);
+		ret = config_apply_exact_line(ctx, key2, value);
+		if (ret > 0 && full_key_r != NULL)
+			*full_key_r = key2;
+	}
+	if (ret == 0) {
+		ret = config_apply_exact_line(ctx, key, value);
+		if (full_key_r != NULL)
+			*full_key_r = key;
+	}
+	ctx->cur_section->filter_parser = orig_filter_parser;
+	ctx->cur_section->module_parsers = orig_module_parsers;
+	ctx->cur_section->filter = orig_filter;
+	if (ret == 0) {
 		ctx->error = p_strconcat(ctx->pool, "Unknown setting: ",
 					 get_setting_full_path(ctx, key), NULL);
 		return -1;
+	}
+	return 0;
+}
+
+static int
+config_apply_error(struct config_parser_context *ctx, const char *key)
+{
+	struct config_parser_key *config_key;
+
+	/* Couldn't get value for the setting, but we're delaying error
+	   handling. Mark all settings parsers containing this key as failed.
+	   See config-parser.h for details. */
+	config_key = hash_table_lookup(ctx->all_keys, t_strcut(key, '/'));
+	if (config_key == NULL)
+		return -1;
+
+	for (; config_key != NULL; config_key = config_key->next) {
+		struct config_module_parser *l =
+			&ctx->cur_section->module_parsers[config_key->info_idx];
+		if (l->delayed_error == NULL)
+			l->delayed_error = ctx->error;
+		ctx->error = NULL;
 	}
 	return 0;
 }
@@ -179,39 +427,46 @@ config_module_parsers_init(pool_t pool)
 	struct config_module_parser *dest;
 	unsigned int i, count;
 
-	for (count = 0; all_roots[count] != NULL; count++) ;
+	for (count = 0; all_infos[count] != NULL; count++) ;
 
 	dest = p_new(pool, struct config_module_parser, count + 1);
 	for (i = 0; i < count; i++) {
-		dest[i].root = all_roots[i];
-		dest[i].parser = settings_parser_init(pool, all_roots[i],
-						      settings_parser_flags);
+		/* create parser lazily */
+		dest[i].info = all_infos[i];
 	}
 	return dest;
 }
 
 static void
-config_add_new_parser(struct config_parser_context *ctx)
+config_add_new_parser(struct config_parser_context *ctx,
+		      struct config_section_stack *cur_section)
 {
-	struct config_section_stack *cur_section = ctx->cur_section;
-	struct config_filter_parser *parser;
+	struct config_filter_parser *filter_parser;
 
-	parser = p_new(ctx->pool, struct config_filter_parser, 1);
-	parser->filter = cur_section->filter;
+	filter_parser = p_new(ctx->pool, struct config_filter_parser, 1);
+	filter_parser->filter = cur_section->filter;
 	if (ctx->cur_input->linenum == 0) {
-		parser->file_and_line =
+		filter_parser->file_and_line =
 			p_strdup(ctx->pool, ctx->cur_input->path);
 	} else {
-		parser->file_and_line =
+		filter_parser->file_and_line =
 			p_strdup_printf(ctx->pool, "%s:%d",
 					ctx->cur_input->path,
 					ctx->cur_input->linenum);
 	}
-	parser->parsers = cur_section->prev == NULL ? ctx->root_parsers :
+	filter_parser->module_parsers = cur_section->prev == NULL ?
+		ctx->root_module_parsers :
 		config_module_parsers_init(ctx->pool);
-	array_push_back(&ctx->all_parsers, &parser);
+	array_push_back(&ctx->all_filter_parsers, &filter_parser);
 
-	cur_section->parsers = parser->parsers;
+	if (cur_section->filter_parser != NULL) {
+		DLLIST2_APPEND(&cur_section->filter_parser->children_head,
+			       &cur_section->filter_parser->children_tail,
+			       filter_parser);
+	}
+
+	cur_section->filter_parser = filter_parser;
+	cur_section->module_parsers = filter_parser->module_parsers;
 }
 
 static struct config_section_stack *
@@ -222,7 +477,8 @@ config_add_new_section(struct config_parser_context *ctx)
 	section = p_new(ctx->pool, struct config_section_stack, 1);
 	section->prev = ctx->cur_section;
 	section->filter = ctx->cur_section->filter;
-	section->parsers = ctx->cur_section->parsers;
+	section->filter_parser = ctx->cur_section->filter_parser;
+	section->module_parsers = ctx->cur_section->module_parsers;
 
 	section->open_path = p_strdup(ctx->pool, ctx->cur_input->path);
 	section->open_linenum = ctx->cur_input->linenum;
@@ -233,11 +489,11 @@ static struct config_filter_parser *
 config_filter_parser_find(struct config_parser_context *ctx,
 			  const struct config_filter *filter)
 {
-	struct config_filter_parser *parser;
+	struct config_filter_parser *filter_parser;
 
-	array_foreach_elem(&ctx->all_parsers, parser) {
-		if (config_filters_equal(&parser->filter, filter))
-			return parser;
+	array_foreach_elem(&ctx->all_filter_parsers, filter_parser) {
+		if (config_filters_equal(&filter_parser->filter, filter))
+			return filter_parser;
 	}
 	return NULL;
 }
@@ -291,16 +547,26 @@ int config_parse_net(const char *value, struct ip_addr *ip_r,
 
 static bool
 config_filter_add_new_filter(struct config_parser_context *ctx,
-			     const char *key, const char *value)
+			     const struct config_line *line)
 {
+	const char *key = line->key, *value = line->value;
 	struct config_filter *filter = &ctx->cur_section->filter;
 	struct config_filter *parent = &ctx->cur_section->prev->filter;
-	struct config_filter_parser *parser;
+	struct config_filter_parser *filter_parser;
+	const struct setting_define *filter_def = NULL;
 	const char *error;
+
+	i_zero(filter);
+	filter->parent = parent;
 
 	if (strcmp(key, "protocol") == 0) {
 		if (parent->service != NULL)
 			ctx->error = "Nested protocol { protocol { .. } } block not allowed";
+		else if (parent->filter_name != NULL)
+			ctx->error = p_strdup_printf(ctx->pool,
+				"%s { protocol { .. } } not allowed (use protocol { %s { .. } } instead)",
+				t_strcut(parent->filter_name, '/'),
+				t_strcut(parent->filter_name, '/'));
 		else
 			filter->service = p_strdup(ctx->pool, value);
 	} else if (strcmp(key, "local") == 0) {
@@ -310,6 +576,11 @@ config_filter_add_new_filter(struct config_parser_context *ctx,
 			ctx->error = "protocol { local { .. } } not allowed (use local { protocol { .. } } instead)";
 		else if (parent->local_name != NULL)
 			ctx->error = "local_name { local { .. } } not allowed (use local { local_name { .. } } instead)";
+		else if (parent->filter_name != NULL)
+			ctx->error = p_strdup_printf(ctx->pool,
+				"%s { local { .. } } not allowed (use local { %s { .. } } instead)",
+				t_strcut(parent->filter_name, '/'),
+				t_strcut(parent->filter_name, '/'));
 		else if (config_parse_net(value, &filter->local_net,
 					  &filter->local_bits, &error) < 0)
 			ctx->error = p_strdup(ctx->pool, error);
@@ -326,11 +597,21 @@ config_filter_add_new_filter(struct config_parser_context *ctx,
 			ctx->error = "remote { local_name { .. } } not allowed (use local_name { remote { .. } } instead)";
 		else if (parent->service != NULL)
 			ctx->error = "protocol { local_name { .. } } not allowed (use local_name { protocol { .. } } instead)";
+		else if (parent->filter_name != NULL)
+			ctx->error = p_strdup_printf(ctx->pool,
+				"%s { local_name { .. } } not allowed (use local_name { %s { .. } } instead)",
+				t_strcut(parent->filter_name, '/'),
+				t_strcut(parent->filter_name, '/'));
 		else
 			filter->local_name = p_strdup(ctx->pool, value);
 	} else if (strcmp(key, "remote") == 0) {
 		if (parent->service != NULL)
 			ctx->error = "protocol { remote { .. } } not allowed (use remote { protocol { .. } } instead)";
+		else if (parent->filter_name != NULL)
+			ctx->error = p_strdup_printf(ctx->pool,
+				"%s { remote { .. } } not allowed (use remote { %s { .. } } instead)",
+				t_strcut(parent->filter_name, '/'),
+				t_strcut(parent->filter_name, '/'));
 		else if (config_parse_net(value, &filter->remote_net,
 					  &filter->remote_bits, &error) < 0)
 			ctx->error = p_strdup(ctx->pool, error);
@@ -342,40 +623,162 @@ config_filter_add_new_filter(struct config_parser_context *ctx,
 			ctx->error = "remote net1 { remote net2 { .. } } requires net2 to be inside net1";
 		else
 			filter->remote_host = p_strdup(ctx->pool, value);
+	} else if (config_is_filter_name(ctx, key, &filter_def)) {
+		if (filter_def->type == SET_FILTER_NAME) {
+			if (value[0] != '\0' || line->value_quoted) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"%s { } must not have a section name",
+					key);
+				return TRUE;
+			}
+			if (parent->filter_name != NULL &&
+			    !parent->filter_name_array) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"Nested named filters not allowed: %s { %s { .. } }",
+					parent->filter_name, key);
+				return FALSE;
+			}
+			filter->filter_name = p_strdup(ctx->pool, key);
+		} else {
+			if (parent->filter_name != NULL &&
+			    !parent->filter_name_array) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"%s { %s { .. } } not allowed (use %s { %s { .. } } instead)",
+					parent->filter_name, key, key, parent->filter_name);
+				return FALSE;
+			}
+			if (strcmp(key, "namespace") == 0 &&
+			    parent->filter_name_array &&
+			    (str_begins_with(parent->filter_name, "namespace/") ||
+			     str_begins_with(parent->filter_name, "mailbox/"))) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"%s { .. } not allowed under %s { .. }",
+					key, t_strcut(parent->filter_name, '/'));
+				return FALSE;
+			}
+			if (strcmp(key, "mailbox") == 0 &&
+			    parent->filter_name_array &&
+			    str_begins_with(parent->filter_name, "mailbox/")) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"%s { .. } not allowed under %s { .. }",
+					key, t_strcut(parent->filter_name, '/'));
+				return FALSE;
+			}
+			if (strcmp(key, "service") == 0 &&
+			    parent->filter_name_array) {
+				i_assert(parent->filter_name != NULL);
+				ctx->error = p_strdup_printf(ctx->pool,
+					"%s { .. } not allowed under %s { .. }",
+					key, t_strcut(parent->filter_name, '/'));
+				return FALSE;
+			}
+			if (value[0] == '\0' && !line->value_quoted) {
+				ctx->error = p_strdup_printf(ctx->pool,
+					"%s { } is missing section name", key);
+				return TRUE;
+			}
+			filter->filter_name =
+				p_strdup_printf(ctx->pool, "%s/%s", key, value);
+			filter->filter_name_array = TRUE;
+		}
 	} else {
 		return FALSE;
 	}
 
-	parser = config_filter_parser_find(ctx, filter);
-	if (parser != NULL)
-		ctx->cur_section->parsers = parser->parsers;
-	else
-		config_add_new_parser(ctx);
+	filter_parser = config_filter_parser_find(ctx, filter);
+	if (filter_parser != NULL) {
+		ctx->cur_section->filter_parser = filter_parser;
+		ctx->cur_section->module_parsers =
+			ctx->cur_section->filter_parser->module_parsers;
+	} else {
+		if (filter_def != NULL && filter_def->type == SET_FILTER_ARRAY) {
+			/* add it to the list of filter names */
+			const char *escaped_value =
+				settings_section_escape(value);
+			if (config_apply_line(ctx, filter_def->key,
+					      escaped_value, NULL) < 0) {
+				i_panic("BUG: Invalid setting definitions: "
+					"Failed to set %s=%s: %s",
+					filter_def->key, escaped_value,
+					ctx->error);
+			}
+		}
+		config_add_new_parser(ctx, ctx->cur_section);
+	}
 	ctx->cur_section->is_filter = TRUE;
+
+	if (filter_def != NULL) {
+		ctx->cur_section->filter_def = filter_def;
+		if (filter_def->type == SET_FILTER_ARRAY) {
+			/* add the name field for the filter */
+			if (config_apply_line(ctx, filter_def->filter_array_field_name,
+					      value, NULL) < 0) {
+				i_panic("BUG: Invalid setting definitions: "
+					"Failed to set %s=%s: %s",
+					filter_def->filter_array_field_name,
+					value, ctx->error);
+			}
+		}
+	}
 	return TRUE;
 }
 
-static int
+static void
 config_filter_parser_check(struct config_parser_context *ctx,
-			   const struct config_module_parser *p,
-			   const char **error_r)
+			   struct config_parsed *new_config,
+			   struct event *event,
+			   struct config_filter_parser *filter_parser)
 {
+	struct config_module_parser *p;
+	const struct config_filter *filter;
 	const char *error = NULL;
+	pool_t tmp_pool;
 	bool ok;
 
-	for (; p->root != NULL; p++) {
-		settings_parse_var_skip(p->parser);
+	event = event_create(event);
+	for (filter = &filter_parser->filter; filter != NULL; filter = filter->parent) {
+		if (filter->service != NULL)
+			event_add_str(event, "protocol", filter->service);
+		if (filter->local_name != NULL)
+			event_add_str(event, "local_name", filter->local_name);
+		if (filter->local_bits > 0)
+			event_add_ip(event, "local_ip", &filter->local_net);
+		if (filter->remote_bits > 0)
+			event_add_ip(event, "remote_ip", &filter->remote_net);
+	}
+
+	tmp_pool = pool_alloconly_create(MEMPOOL_GROWING"config parsers check", 1024);
+	for (p = filter_parser->module_parsers; p->info != NULL; p++) {
+		if (p->parser == NULL)
+			continue;
+		p_clear(tmp_pool);
+		struct setting_parser_context *tmp_parser =
+			settings_parser_dup(p->parser, tmp_pool);
+		settings_parse_var_skip(tmp_parser);
 		T_BEGIN {
-			ok = settings_parser_check(p->parser, ctx->pool, &error);
+			ok = settings_parser_check(tmp_parser, tmp_pool,
+						   event, &error);
 		} T_END_PASS_STR_IF(!ok, &error);
+		settings_parser_unref(&tmp_parser);
+
 		if (!ok) {
 			/* be sure to assert-crash early if error is missing */
 			i_assert(error != NULL);
-			*error_r = error;
-			return -1;
+			if (!ctx->delay_errors) {
+				/* the errors are still slightly delayed so
+				   we get the full list of them. */
+				error = p_strdup(new_config->pool, error);
+				array_push_back(&new_config->errors, &error);
+			} else if (p->delayed_error == NULL) {
+				/* Settings checking failed, but we're delaying
+				   the error until the settings struct is used
+				   by the client side. See config-parser.h */
+				p->delayed_error = p_strdup(ctx->pool, error);
+			}
 		}
 	}
-	return 0;
+	pool_unref(&tmp_pool);
+	event_unref(&event);
 }
 
 static const char *
@@ -386,12 +789,15 @@ get_str_setting(struct config_filter_parser *parser, const char *key,
 	const char *const *set_value;
 	enum setting_type set_type;
 
-	module_parser = parser->parsers;
-	for (; module_parser->parser != NULL; module_parser++) {
+	module_parser = parser->module_parsers;
+	for (; module_parser->info != NULL; module_parser++) {
+		if (module_parser->parser == NULL)
+			continue;
+		const char *lookup_key = key;
 		set_value = settings_parse_get_value(module_parser->parser,
-						     key, &set_type);
+						     &lookup_key, &set_type);
 		if (set_value != NULL &&
-		    settings_parse_is_changed(module_parser->parser, key)) {
+		    settings_parse_get_change_counter(module_parser->parser, lookup_key) != 0) {
 			i_assert(set_type == SET_STR || set_type == SET_ENUM);
 			return *set_value;
 		}
@@ -401,17 +807,13 @@ get_str_setting(struct config_filter_parser *parser, const char *key,
 
 static int
 config_all_parsers_check(struct config_parser_context *ctx,
-			 struct config_filter_context *new_filter,
+			 struct config_parsed *new_config,
 			 const char **error_r)
 {
 	struct config_filter_parser *const *parsers;
-	struct config_module_parser *tmp_parsers;
-	struct master_service_settings_output output;
 	unsigned int i, count;
 	const char *ssl_set, *global_ssl_set;
-	pool_t tmp_pool;
 	bool ssl_warned = FALSE;
-	int ret = 0;
 
 	if (ctx->cur_section->prev != NULL) {
 		*error_r = t_strdup_printf(
@@ -421,21 +823,41 @@ config_all_parsers_check(struct config_parser_context *ctx,
 		return -1;
 	}
 
-	tmp_pool = pool_alloconly_create(MEMPOOL_GROWING"config parsers check", 1024*64);
-	parsers = array_get(&ctx->all_parsers, &count);
+	int fd = config_dump_full(new_config, CONFIG_DUMP_FULL_DEST_TEMPDIR, 0,
+				  NULL);
+	if (fd == -1) {
+		*error_r = "Failed to write binary config file";
+		return -1;
+	}
+	struct settings_root *set_root = settings_root_init();
+	const char *const *specific_services, *error;
+	if (settings_read(set_root, fd, "(temp config file)", NULL, NULL, 0,
+			  &specific_services, &error) < 0) {
+		*error_r = t_strdup_printf(
+			"Failed to read settings from binary config file: %s",
+			error);
+		i_close_fd(&fd);
+		settings_root_deinit(&set_root);
+		return -1;
+	}
+
+	parsers = array_get(&ctx->all_filter_parsers, &count);
 	i_assert(count > 0 && parsers[count-1] == NULL);
 	count--;
 
-	global_ssl_set = get_str_setting(parsers[0], "ssl", "");
-	for (i = 0; i < count && ret == 0; i++) {
-		if (config_filter_parsers_get(new_filter, tmp_pool,
-					      &parsers[i]->filter,
-					      &tmp_parsers, &output,
-					      error_r) < 0) {
-			ret = -1;
-			break;
-		}
+	struct event *event = event_create(NULL);
+	event_set_ptr(event, SETTINGS_EVENT_ROOT, set_root);
 
+	/* Run check_func()s for each filter independently. If you have
+	   protocol imap { ... local { ... } } blocks, it's going to check the
+	   "local" filter without applying settings from the "protocol imap"
+	   filter. In theory this could complain about nonexistent problems,
+	   but currently such checks are rare enough that this shouldn't be a
+	   practical problem. Fixing this is possible and it was done in a
+	   previous version of the code, but it got in the way of cleaning up
+	   the config code, so at least for now it's not done. */
+	global_ssl_set = get_str_setting(parsers[0], "ssl", "");
+	for (i = 0; i < count; i++) {
 		ssl_set = get_str_setting(parsers[i], "ssl", global_ssl_set);
 		if (strcmp(ssl_set, "no") != 0 &&
 		    strcmp(global_ssl_set, "no") == 0 && !ssl_warned) {
@@ -444,12 +866,21 @@ config_all_parsers_check(struct config_parser_context *ctx,
 			ssl_warned = TRUE;
 		}
 
-		ret = config_filter_parser_check(ctx, tmp_parsers, error_r);
-		config_filter_parsers_free(tmp_parsers);
-		p_clear(tmp_pool);
+		config_filter_parser_check(ctx, new_config, event, parsers[i]);
 	}
-	pool_unref(&tmp_pool);
-	return ret;
+	event_unref(&event);
+	i_close_fd(&fd);
+	settings_root_deinit(&set_root);
+
+	const char *const *errors =
+		array_get(config_parsed_get_errors(new_config), &count);
+	if (count > 0) {
+		/* Use the first error as the main error. The others are also
+		   printed out by doveconf. */
+		*error_r = errors[0];
+		return -1;
+	}
+	return 0;
 }
 
 static int
@@ -558,17 +989,16 @@ settings_include(struct config_parser_context *ctx, const char *pattern,
 #endif
 }
 
-static enum config_line_type
+static void
 config_parse_line(struct config_parser_context *ctx,
 		  char *line, string_t *full_line,
-		  const char **key_r, const char **value_r)
+		  struct config_line *config_line_r)
 {
 	const char *key;
 	size_t len;
 	char *p;
 
-	*key_r = NULL;
-	*value_r = NULL;
+	i_zero(config_line_r);
 
 	/* @UNSAFE: line is modified */
 
@@ -577,8 +1007,10 @@ config_parse_line(struct config_parser_context *ctx,
 		line++;
 
 	/* ignore comments or empty lines */
-	if (*line == '#' || *line == '\0')
-		return CONFIG_LINE_TYPE_SKIP;
+	if (*line == '#' || *line == '\0') {
+		config_line_r->type = CONFIG_LINE_TYPE_SKIP;
+		return;
+	}
 
 	/* strip away comments. pretty kludgy way really.. */
 	for (p = line; *p != '\0'; p++) {
@@ -624,7 +1056,8 @@ config_parse_line(struct config_parser_context *ctx,
 			str_append_data(full_line, line, len);
 			str_append_c(full_line, ' ');
 		}
-		return CONFIG_LINE_TYPE_CONTINUE;
+		config_line_r->type = CONFIG_LINE_TYPE_CONTINUE;
+		return;
 	}
 	if (str_len(full_line) > 0) {
 		str_append(full_line, line);
@@ -641,13 +1074,17 @@ config_parse_line(struct config_parser_context *ctx,
 		*line++ = '\0';
 		while (IS_WHITE(*line)) line++;
 	}
-	*key_r = key;
-	*value_r = line;
+	config_line_r->key = key;
+	config_line_r->value = line;
 
-	if (strcmp(key, "!include") == 0)
-		return CONFIG_LINE_TYPE_INCLUDE;
-	if (strcmp(key, "!include_try") == 0)
-		return CONFIG_LINE_TYPE_INCLUDE_TRY;
+	if (strcmp(key, "!include") == 0) {
+		config_line_r->type = CONFIG_LINE_TYPE_INCLUDE;
+		return;
+	}
+	if (strcmp(key, "!include_try") == 0) {
+		config_line_r->type = CONFIG_LINE_TYPE_INCLUDE_TRY;
+		return;
+	}
 
 	if (*line == '=') {
 		/* a) */
@@ -656,12 +1093,14 @@ config_parse_line(struct config_parser_context *ctx,
 
 		if (*line == '<') {
 			while (IS_WHITE(line[1])) line++;
-			*value_r = line + 1;
-			return CONFIG_LINE_TYPE_KEYFILE;
+			config_line_r->value = line + 1;
+			config_line_r->type = CONFIG_LINE_TYPE_KEYFILE;
+			return;
 		}
 		if (*line != '\'' && *line != '"' && strchr(line, '$') != NULL) {
-			*value_r = line;
-			return CONFIG_LINE_TYPE_KEYVARIABLE;
+			config_line_r->value = line;
+			config_line_r->type = CONFIG_LINE_TYPE_KEYVARIABLE;
+			return;
 		}
 
 		len = strlen(line);
@@ -670,23 +1109,27 @@ config_parse_line(struct config_parser_context *ctx,
 		     (*line == '\'' && line[len-1] == '\''))) {
 			line[len-1] = '\0';
 			line = str_unescape(line+1);
+			config_line_r->value_quoted = TRUE;
 		}
-		*value_r = line;
-		return CONFIG_LINE_TYPE_KEYVALUE;
+		config_line_r->value = line;
+		config_line_r->type = CONFIG_LINE_TYPE_KEYVALUE;
+		return;
 	}
 
-	if (strcmp(key, "}") == 0 && *line == '\0')
-		return CONFIG_LINE_TYPE_SECTION_END;
+	if (strcmp(key, "}") == 0 && *line == '\0') {
+		config_line_r->type = CONFIG_LINE_TYPE_SECTION_END;
+		return;
+	}
 
 	/* b) + errors */
 	line[-1] = '\0';
 
 	if (*line == '{')
-		*value_r = "";
+		config_line_r->value = "";
 	else {
 		/* get section name */
 		if (*line != '"') {
-			*value_r = line;
+			config_line_r->value = line;
 			while (!IS_WHITE(*line) && *line != '\0')
 				line++;
 			if (*line != '\0') {
@@ -702,84 +1145,80 @@ config_parse_line(struct config_parser_context *ctx,
 				*line++ = '\0';
 				while (IS_WHITE(*line))
 					line++;
-				*value_r = str_unescape(value);
+				config_line_r->value = str_unescape(value);
+				config_line_r->value_quoted = TRUE;
 			}
 		}
 		if (*line != '{') {
-			*value_r = "Expecting '{'";
-			return CONFIG_LINE_TYPE_ERROR;
+			config_line_r->value = "Expecting '{'";
+			config_line_r->type = CONFIG_LINE_TYPE_ERROR;
+			return;
 		}
 	}
 	if (line[1] != '\0') {
-		*value_r = "Garbage after '{'";
-		return CONFIG_LINE_TYPE_ERROR;
+		config_line_r->value = "Garbage after '{'";
+		config_line_r->type = CONFIG_LINE_TYPE_ERROR;
+		return;
 	}
-	return CONFIG_LINE_TYPE_SECTION_BEGIN;
+	config_line_r->type = CONFIG_LINE_TYPE_SECTION_BEGIN;
 }
 
-static int config_parse_finish(struct config_parser_context *ctx, const char **error_r)
+static int
+config_parse_finish(struct config_parser_context *ctx,
+		    enum config_parse_flags flags,
+		    struct config_parsed **config_r, const char **error_r)
 {
-	struct config_filter_context *new_filter;
+	struct config_parsed *new_config;
 	const char *error;
 	int ret = 0;
 
 	if (hook_config_parser_end != NULL)
 		ret = hook_config_parser_end(ctx, error_r);
 
-	new_filter = config_filter_init(ctx->pool);
-	array_append_zero(&ctx->all_parsers);
-	config_filter_add_all(new_filter, array_front(&ctx->all_parsers));
+	new_config = p_new(ctx->pool, struct config_parsed, 1);
+	new_config->pool = ctx->pool;
+	pool_ref(new_config->pool);
+	p_array_init(&new_config->errors, ctx->pool, 1);
+
+	array_append_zero(&ctx->all_filter_parsers);
+	new_config->filter_parsers = array_front(&ctx->all_filter_parsers);
+	new_config->module_parsers = ctx->root_module_parsers;
 
 	if (ret < 0)
 		;
-	else if (ctx->hide_errors)
-		ret = 0;
-	else if ((ret = config_all_parsers_check(ctx, new_filter, &error)) < 0) {
+	else if ((ret = config_all_parsers_check(ctx, new_config, &error)) < 0) {
 		*error_r = t_strdup_printf("Error in configuration file %s: %s",
 					   ctx->path, error);
 	}
 
-	if (config_filter != NULL)
-		config_filter_deinit(&config_filter);
-	config_module_parsers = ctx->root_parsers;
-	config_filter = new_filter;
+	if (ret < 0 && (flags & CONFIG_PARSE_FLAG_RETURN_BROKEN_CONFIG) == 0) {
+		config_parsed_free(&new_config);
+		return -1;
+	}
+	*config_r = new_config;
 	return ret;
 }
 
 static const void *
-config_get_value(struct config_section_stack *section, const char *key,
+config_get_value(struct config_section_stack *section,
+		 struct config_parser_key *config_key, const char *key,
 		 bool expand_parent, enum setting_type *type_r)
 {
-	struct config_module_parser *l;
+	struct config_module_parser *l =
+		&section->module_parsers[config_key->info_idx];
 	const void *value;
 
-	for (l = section->parsers; l->root != NULL; l++) {
-		value = settings_parse_get_value(l->parser, key, type_r);
-		if (value != NULL) {
-			if (!expand_parent || section->prev == NULL ||
-			    settings_parse_is_changed(l->parser, key))
-				return value;
+	if (l->parser != NULL) {
+		value = settings_parse_get_value(l->parser, &key, type_r);
+		i_assert(value != NULL);
 
-			/* not changed by this parser. maybe parent has. */
-			return config_get_value(section->prev,
-						key, TRUE, type_r);
-		}
+		if (!expand_parent || section->prev == NULL ||
+		    settings_parse_get_change_counter(l->parser, key) != 0)
+			return value;
 	}
-	return NULL;
-}
 
-static bool
-config_skip_key(struct config_parser_context *ctx, const char *key)
-{
-	if (ctx->skip_ssl_server_settings &&
-	    (strcmp(key, "ssl_cert") == 0 ||
-	     strcmp(key, "ssl_key") == 0 ||
-	     strcmp(key, "ssl_ca") == 0 ||
-	     strcmp(key, "ssl_verify_client_cert") == 0)) {
-		/* FIXME: temporary kludge - remove later */
-		return TRUE;
-	}
-	return FALSE;
+	/* not changed by this parser. maybe parent has. */
+	return config_get_value(section->prev, config_key, key, TRUE, type_r);
 }
 
 static int config_write_keyvariable(struct config_parser_context *ctx,
@@ -814,14 +1253,17 @@ static int config_write_keyvariable(struct config_parser_context *ctx,
 			if (envval != NULL)
 				str_append(str, envval);
 		} else {
+			struct config_parser_key *config_key;
 			const char *var_value;
 			enum setting_type var_type;
 
 			i_assert(var_name[0] == '$');
 			var_name++;
 
-			var_value = config_get_value(ctx->cur_section, var_name,
-						     expand_parent, &var_type);
+			config_key = hash_table_lookup(ctx->all_keys, var_name);
+			var_value = config_key == NULL ? NULL :
+				config_get_value(ctx->cur_section, config_key,
+						 var_name, expand_parent, &var_type);
 			if (var_value == NULL) {
 				ctx->error = p_strconcat(ctx->pool,
 							 "Unknown variable: $",
@@ -852,24 +1294,25 @@ static int config_write_keyvariable(struct config_parser_context *ctx,
 }
 
 static int config_write_value(struct config_parser_context *ctx,
-			      enum config_line_type type,
-			      const char *key, const char *value)
+			      const struct config_line *line)
 {
-	string_t *str = ctx->str;
-	const char *error, *path, *full_key;
+	const char *error, *path, *key_with_path;
 
-	switch (type) {
+	str_truncate(ctx->value, 0);
+	switch (line->type) {
 	case CONFIG_LINE_TYPE_KEYVALUE:
-		str_append(str, value);
+		str_append(ctx->value, line->value);
 		break;
 	case CONFIG_LINE_TYPE_KEYFILE:
-		full_key = t_strndup(str_data(ctx->str), str_len(str)-1);
 		if (!ctx->expand_values) {
-			str_append_c(str, '<');
-			str_append(str, value);
+			str_append_c(ctx->value, '<');
+			str_append(ctx->value, line->value);
 		} else {
-			path = fix_relative_path(value, ctx->cur_input);
-			if (str_append_file(str, full_key, path, &error) < 0) {
+			key_with_path = t_strconcat(str_c(ctx->key_path),
+						    line->key, NULL);
+			path = fix_relative_path(line->value, ctx->cur_input);
+			if (str_append_file(ctx->value, key_with_path, path,
+					    &error) < 0) {
 				/* file reading failed */
 				ctx->error = p_strdup(ctx->pool, error);
 				return -1;
@@ -877,7 +1320,8 @@ static int config_write_value(struct config_parser_context *ctx,
 		}
 		break;
 	case CONFIG_LINE_TYPE_KEYVARIABLE:
-		if (config_write_keyvariable(ctx, key, value, str) < 0)
+		if (config_write_keyvariable(ctx, line->key, line->value,
+					     ctx->value) < 0)
 			return -1;
 		break;
 	default:
@@ -891,7 +1335,7 @@ config_parser_check_warnings(struct config_parser_context *ctx, const char *key)
 {
 	const char *path, *first_pos;
 
-	first_pos = hash_table_lookup(ctx->seen_settings, str_c(ctx->str));
+	first_pos = hash_table_lookup(ctx->seen_settings, key);
 	if (ctx->cur_section->prev == NULL) {
 		/* changing a root setting. if we've already seen it inside
 		   filters, log a warning. */
@@ -907,98 +1351,126 @@ config_parser_check_warnings(struct config_parser_context *ctx, const char *key)
 		return;
 	first_pos = p_strdup_printf(ctx->pool, "%s line %u",
 				    ctx->cur_input->path, ctx->cur_input->linenum);
-	path = p_strdup(ctx->pool, str_c(ctx->str));
+	path = p_strdup(ctx->pool, key);
 	hash_table_insert(ctx->seen_settings, path, first_pos);
 }
 
 void config_parser_apply_line(struct config_parser_context *ctx,
-			      enum config_line_type type,
-			      const char *key, const char *value)
+			      const struct config_line *line)
 {
-	const char *section_name;
+	const char *full_key;
 
-	str_truncate(ctx->str, ctx->pathlen);
-	switch (type) {
+	switch (line->type) {
 	case CONFIG_LINE_TYPE_SKIP:
 		break;
 	case CONFIG_LINE_TYPE_CONTINUE:
 		i_unreached();
 	case CONFIG_LINE_TYPE_ERROR:
-		ctx->error = p_strdup(ctx->pool, value);
+		ctx->error = p_strdup(ctx->pool, line->value);
 		break;
 	case CONFIG_LINE_TYPE_KEYVALUE:
 	case CONFIG_LINE_TYPE_KEYFILE:
 	case CONFIG_LINE_TYPE_KEYVARIABLE:
-		if (config_skip_key(ctx, key))
-			break;
-		str_append(ctx->str, key);
-		config_parser_check_warnings(ctx, key);
-		str_append_c(ctx->str, '=');
-
-		if (config_write_value(ctx, type, key, value) < 0)
-			break;
-		(void)config_apply_line(ctx, key, str_c(ctx->str), NULL);
+		if (config_write_value(ctx, line) < 0) {
+			if (!ctx->delay_errors ||
+			    config_apply_error(ctx, line->key) < 0)
+				break;
+		} else {
+			const char *key_with_path = t_strdup_printf("%s%s",
+				str_c(ctx->key_path), line->key);
+			if (config_apply_line(ctx, key_with_path,
+					      str_c(ctx->value), &full_key) == 0)
+				config_parser_check_warnings(ctx, full_key);
+		}
 		break;
 	case CONFIG_LINE_TYPE_SECTION_BEGIN:
 		ctx->cur_section = config_add_new_section(ctx);
-		ctx->cur_section->pathlen = ctx->pathlen;
-		ctx->cur_section->key = p_strdup(ctx->pool, key);
+		ctx->cur_section->pathlen = str_len(ctx->key_path);
+		ctx->cur_section->key = p_strdup(ctx->pool, line->key);
 
-		if (config_filter_add_new_filter(ctx, key, value)) {
+		if (config_filter_add_new_filter(ctx, line)) {
 			/* new filter */
 			break;
 		}
 
-		/* new config section */
-		if (*value == '\0') {
-			/* no section name, use a counter */
-			section_name = dec2str(ctx->section_counter++);
-		} else {
-			section_name = settings_section_escape(value);
-		}
-		str_append(ctx->str, key);
-		ctx->pathlen = str_len(ctx->str);
-
-		str_append_c(ctx->str, '=');
-		str_append(ctx->str, section_name);
-
-		if (config_apply_line(ctx, key, str_c(ctx->str), value) < 0)
-			break;
-
-		str_truncate(ctx->str, ctx->pathlen);
-		str_append_c(ctx->str, SETTINGS_SEPARATOR);
-		str_append(ctx->str, section_name);
-		str_append_c(ctx->str, SETTINGS_SEPARATOR);
-		ctx->pathlen = str_len(ctx->str);
+		/* This is SET_STRLIST */
+		str_append(ctx->key_path, line->key);
+		str_append_c(ctx->key_path, SETTINGS_SEPARATOR);
 		break;
 	case CONFIG_LINE_TYPE_SECTION_END:
 		if (ctx->cur_section->prev == NULL)
 			ctx->error = "Unexpected '}'";
-		else {
-			ctx->pathlen = ctx->cur_section->pathlen;
+		else if (ctx->cur_section->filter_def != NULL &&
+			 ctx->cur_section->filter_def->required_setting != NULL &&
+			 !ctx->cur_section->filter_parser->filter_required_setting_seen) {
+			ctx->error = p_strdup_printf(ctx->pool,
+				"Named filter %s is required to have %s setting, "
+				"but it is missing",
+				ctx->cur_section->filter_def->key,
+				ctx->cur_section->filter_def->required_setting);
+		} else {
+			str_truncate(ctx->key_path, ctx->cur_section->pathlen);
 			ctx->cur_section = ctx->cur_section->prev;
 		}
 		break;
 	case CONFIG_LINE_TYPE_INCLUDE:
 	case CONFIG_LINE_TYPE_INCLUDE_TRY:
-		(void)settings_include(ctx, fix_relative_path(value, ctx->cur_input),
-				       type == CONFIG_LINE_TYPE_INCLUDE_TRY);
+		(void)settings_include(ctx, fix_relative_path(line->value, ctx->cur_input),
+				       line->type == CONFIG_LINE_TYPE_INCLUDE_TRY);
 		break;
 	}
 }
 
+static void
+config_parser_add_info(struct config_parser_context *ctx,
+		       unsigned int info_idx)
+{
+	const struct setting_parser_info *info = all_infos[info_idx];
+	struct config_parser_key *config_key, *old_config_key;
+	const char *name;
+
+	for (unsigned int i = 0; info->defines[i].key != NULL; i++) {
+		const struct setting_define *def = &info->defines[i];
+		if (!hash_table_lookup_full(ctx->all_keys, info->defines[i].key,
+					    &name, &old_config_key))
+			old_config_key = NULL;
+		else {
+			const struct setting_parser_info *old_info =
+				all_infos[old_config_key->info_idx];
+			const struct setting_define *old_def =
+				&old_info->defines[old_config_key->define_idx];
+			i_assert(strcmp(old_def->key, def->key) == 0);
+			if (old_def->type != def->type)
+				i_panic("Setting key '%s' type mismatch between infos %s and %s (%d != %d)",
+					def->key, old_info->name, info->name,
+					old_def->type, def->type);
+			if (old_def->flags != def->flags)
+				i_panic("Setting key '%s' flags mismatch between infos %s and %s (%d != %d)",
+					def->key, old_info->name, info->name,
+					old_def->flags, def->flags);
+		}
+		config_key = p_new(ctx->pool, struct config_parser_key, 1);
+		config_key->info_idx = info_idx;
+		config_key->define_idx = i;
+		if (old_config_key != NULL)
+			DLLIST_PREPEND(&old_config_key, config_key);
+		hash_table_update(ctx->all_keys, def->key, config_key);
+	}
+}
+
 int config_parse_file(const char *path, enum config_parse_flags flags,
+		      struct config_parsed **config_r,
 		      const char **error_r)
 {
 	struct input_stack root;
 	struct config_parser_context ctx;
 	unsigned int i, count;
-	const char *key, *value;
 	string_t *full_line;
-	enum config_line_type type;
 	char *line;
 	int fd, ret = 0;
 	bool handled;
+
+	*config_r = NULL;
 
 	if (path == NULL) {
 		path = "<defaults>";
@@ -1014,20 +1486,37 @@ int config_parse_file(const char *path, enum config_parse_flags flags,
 	i_zero(&ctx);
 	ctx.pool = pool_alloconly_create(MEMPOOL_GROWING"config file parser", 1024*256);
 	ctx.path = path;
-	ctx.hide_errors = fd == -1 ||
-		(flags & CONFIG_PARSE_FLAG_HIDE_ERRORS) != 0;
-	ctx.skip_ssl_server_settings =
-		(flags & CONFIG_PARSE_FLAG_SKIP_SSL_SERVER) != 0;
+	ctx.hide_obsolete_warnings =
+		(flags & CONFIG_PARSE_FLAG_HIDE_OBSOLETE_WARNINGS) != 0;
+	ctx.delay_errors = (flags & CONFIG_PARSE_FLAG_DELAY_ERRORS) != 0;
+	hash_table_create(&ctx.all_keys, ctx.pool, 500, str_hash, strcmp);
 
-	for (count = 0; all_roots[count] != NULL; count++) ;
-	ctx.root_parsers =
+	for (count = 0; all_infos[count] != NULL; count++) ;
+	ctx.root_module_parsers =
 		p_new(ctx.pool, struct config_module_parser, count+1);
+	unsigned int service_info_idx = UINT_MAX;
 	for (i = 0; i < count; i++) {
-		ctx.root_parsers[i].root = all_roots[i];
-		ctx.root_parsers[i].parser =
-			settings_parser_init(ctx.pool, all_roots[i],
+		if (strcmp(all_infos[i]->name, "service") == 0)
+			service_info_idx = i;
+		ctx.root_module_parsers[i].info = all_infos[i];
+		ctx.root_module_parsers[i].parser =
+			settings_parser_init(ctx.pool, all_infos[i],
 					     settings_parser_flags);
+		settings_parse_set_change_counter(ctx.root_module_parsers[i].parser,
+						  CONFIG_PARSER_CHANGE_EXPLICIT);
+		config_parser_add_info(&ctx, i);
+		for (unsigned int j = 0; j < i; j++) {
+			if (strcmp(all_infos[j]->name, all_infos[i]->name) == 0) {
+				/* Just fatal - it's difficult to continue
+				   correctly here, and it's not supposed to
+				   happen. */
+				i_panic("Duplicate settings struct name: %s",
+					all_infos[i]->name);
+			}
+		}
 	}
+	i_assert(service_info_idx != UINT_MAX ||
+		 (flags & CONFIG_PARSE_FLAG_NO_DEFAULTS) != 0);
 
 	i_zero(&root);
 	root.path = path;
@@ -1035,34 +1524,36 @@ int config_parse_file(const char *path, enum config_parse_flags flags,
 	ctx.expand_values = (flags & CONFIG_PARSE_FLAG_EXPAND_VALUES) != 0;
 	hash_table_create(&ctx.seen_settings, ctx.pool, 0, str_hash, strcmp);
 
-	p_array_init(&ctx.all_parsers, ctx.pool, 128);
+	p_array_init(&ctx.all_filter_parsers, ctx.pool, 128);
 	ctx.cur_section = p_new(ctx.pool, struct config_section_stack, 1);
-	config_add_new_parser(&ctx);
+	config_add_new_parser(&ctx, ctx.cur_section);
 
-	ctx.str = str_new(ctx.pool, 256);
+	ctx.key_path = str_new(ctx.pool, 256);
+	ctx.value = str_new(ctx.pool, 256);
 	full_line = str_new(default_pool, 512);
 	ctx.cur_input->input = fd != -1 ?
 		i_stream_create_fd_autoclose(&fd, SIZE_MAX) :
 		i_stream_create_from_data("", 0);
 	i_stream_set_return_partial_line(ctx.cur_input->input, TRUE);
 	old_settings_init(&ctx);
+	if ((flags & CONFIG_PARSE_FLAG_NO_DEFAULTS) == 0)
+		config_parser_add_services(&ctx, service_info_idx);
 	if (hook_config_parser_begin != NULL) T_BEGIN {
 		hook_config_parser_begin(&ctx);
 	} T_END;
 
 prevfile:
 	while ((line = i_stream_read_next_line(ctx.cur_input->input)) != NULL) {
+		struct config_line config_line;
 		ctx.cur_input->linenum++;
-		type = config_parse_line(&ctx, line, full_line,
-					 &key, &value);
-		str_truncate(ctx.str, ctx.pathlen);
-		if (type == CONFIG_LINE_TYPE_CONTINUE)
+		config_parse_line(&ctx, line, full_line, &config_line);
+		if (config_line.type == CONFIG_LINE_TYPE_CONTINUE)
 			continue;
 
 		T_BEGIN {
-			handled = old_settings_handle(&ctx, type, key, value);
+			handled = old_settings_handle(&ctx, &config_line);
 			if (!handled)
-				config_parser_apply_line(&ctx, type, key, value);
+				config_parser_apply_line(&ctx, &config_line);
 		} T_END;
 
 		if (ctx.error != NULL) {
@@ -1081,22 +1572,108 @@ prevfile:
 	if (line == NULL && ctx.cur_input != NULL)
 		goto prevfile;
 
+	while (ctx.cur_input != NULL) {
+		i_stream_destroy(&ctx.cur_input->input);
+		ctx.cur_input = ctx.cur_input->prev;
+	}
+
 	old_settings_handle_post(&ctx);
 	hash_table_destroy(&ctx.seen_settings);
+	hash_table_destroy(&ctx.all_keys);
 	str_free(&full_line);
 	if (ret == 0)
-		ret = config_parse_finish(&ctx, error_r);
+		ret = config_parse_finish(&ctx, flags, config_r, error_r);
+	else {
+		struct config_filter_parser *filter_parser;
+		array_foreach_elem(&ctx.all_filter_parsers, filter_parser)
+			config_module_parsers_free(filter_parser->module_parsers);
+		config_module_parsers_free(ctx.root_module_parsers);
+	}
+	pool_unref(&ctx.pool);
 	return ret < 0 ? ret : 1;
+}
+
+const ARRAY_TYPE(const_string) *
+config_parsed_get_errors(struct config_parsed *config)
+{
+	return &config->errors;
+}
+
+struct config_filter_parser *
+config_parsed_get_global_filter_parser(struct config_parsed *config)
+{
+	return config->filter_parsers[0];
+}
+
+struct config_filter_parser *const *
+config_parsed_get_filter_parsers(struct config_parsed *config)
+{
+	return config->filter_parsers;
+}
+
+const struct config_module_parser *
+config_parsed_get_module_parsers(struct config_parsed *config)
+{
+	return config->module_parsers;
+}
+
+const char *
+config_module_parsers_get_setting(const struct config_module_parser *module_parsers,
+				  const char *info_name, const char *key)
+{
+	const struct config_module_parser *l;
+
+	for (l = module_parsers; l->info != NULL; l++) {
+		if (strcmp(l->info->name, info_name) != 0)
+			continue;
+
+		enum setting_type type;
+		const char *const *value =
+			settings_parse_get_value(l->parser, &key, &type);
+		if (value != NULL) {
+			i_assert(type == SET_STR || type == SET_STR_VARS);
+			return *value;
+		}
+	}
+	i_panic("BUG: Couldn't find setting with info=%s key=%s",
+		info_name, key);
+}
+
+void config_parsed_free(struct config_parsed **_config)
+{
+	struct config_parsed *config = *_config;
+	unsigned int i;
+
+	*_config = NULL;
+
+	for (i = 0; config->filter_parsers[i] != NULL; i++)
+		config_module_parsers_free(config->filter_parsers[i]->module_parsers);
+	config_module_parsers_free(config->module_parsers);
+	pool_unref(&config->pool);
+}
+
+void config_module_parsers_free(struct config_module_parser *parsers)
+{
+	unsigned int i;
+
+	for (i = 0; parsers[i].info != NULL; i++)
+		settings_parser_unref(&parsers[i].parser);
+}
+
+static int config_service_cmp(const struct config_service *s1,
+			      const struct config_service *s2)
+{
+	return strcmp(s1->set->name, s2->set->name);
 }
 
 void config_parse_load_modules(void)
 {
 	struct module_dir_load_settings mod_set;
 	struct module *m;
-	const struct setting_parser_info **roots;
-	ARRAY_TYPE(setting_parser_info_p) new_roots;
-	ARRAY_TYPE(service_settings) new_services;
-	struct service_settings *const *services, *service_set;
+	const struct setting_parser_info **infos;
+	ARRAY_TYPE(setting_parser_info_p) new_infos;
+	ARRAY_TYPE(config_service) new_services;
+	const struct config_service *services;
 	unsigned int i, count;
 
 	i_zero(&mod_set);
@@ -1104,45 +1681,50 @@ void config_parse_load_modules(void)
 	modules = module_dir_load(CONFIG_MODULE_DIR, NULL, &mod_set);
 	module_dir_init(modules);
 
-	i_array_init(&new_roots, 64);
+	i_array_init(&new_infos, 64);
 	i_array_init(&new_services, 64);
 	for (m = modules; m != NULL; m = m->next) {
-		roots = module_get_symbol_quiet(m,
-			t_strdup_printf("%s_set_roots", m->name));
-		if (roots != NULL) {
-			for (i = 0; roots[i] != NULL; i++)
-				array_push_back(&new_roots, &roots[i]);
+		infos = module_get_symbol_quiet(m,
+			t_strdup_printf("%s_set_infos", m->name));
+		if (infos != NULL) {
+			for (i = 0; infos[i] != NULL; i++)
+				array_push_back(&new_infos, &infos[i]);
 		}
 
 		services = module_get_symbol_quiet(m,
-			t_strdup_printf("%s_service_settings_array", m->name));
+			t_strdup_printf("%s_services_array", m->name));
 		if (services != NULL) {
-			for (count = 0; services[count] != NULL; count++) ;
+			for (count = 0; services[count].set != NULL; count++) ;
 			array_append(&new_services, services, count);
 		} else {
-			service_set = module_get_symbol_quiet(m,
+			struct config_service new_service = { };
+			new_service.set = module_get_symbol_quiet(m,
 				t_strdup_printf("%s_service_settings", m->name));
-			if (service_set != NULL)
-				array_push_back(&new_services, &service_set);
+			if (new_service.set != NULL) {
+				new_service.defaults = module_get_symbol_quiet(m,
+					t_strdup_printf("%s_service_settings_defaults", m->name));
+				array_push_back(&new_services, &new_service);
+			}
 		}
 	}
-	if (array_count(&new_roots) > 0) {
+	if (array_count(&new_infos) > 0) {
 		/* modules added new settings. add the defaults and start
 		   using the new list. */
-		for (i = 0; all_roots[i] != NULL; i++)
-			array_push_back(&new_roots, &all_roots[i]);
-		array_append_zero(&new_roots);
-		all_roots = array_front(&new_roots);
-		roots_free_at_deinit = new_roots;
+		for (i = 0; all_infos[i] != NULL; i++)
+			array_push_back(&new_infos, &all_infos[i]);
+		array_append_zero(&new_infos);
+		all_infos = array_front(&new_infos);
+		infos_free_at_deinit = new_infos;
 	} else {
-		array_free(&new_roots);
+		array_free(&new_infos);
 	}
 	if (array_count(&new_services) > 0) {
 		/* module added new services. update the defaults. */
-		services = array_get(default_services, &count);
-		for (i = 0; i < count; i++)
-			array_push_back(&new_services, &services[i]);
-		*default_services = new_services;
+		for (i = 0; config_all_services[i].set != NULL; i++)
+			array_push_back(&new_services, &config_all_services[i]);
+		array_sort(&new_services, config_service_cmp);
+		array_append_zero(&new_services);
+		config_all_services = array_front(&new_services);
 		services_free_at_deinit = new_services;
 	} else {
 		array_free(&new_services);
@@ -1153,6 +1735,6 @@ void config_parser_deinit(void)
 {
 	if (array_is_created(&services_free_at_deinit))
 		array_free(&services_free_at_deinit);
-	if (array_is_created(&roots_free_at_deinit))
-		array_free(&roots_free_at_deinit);
+	if (array_is_created(&infos_free_at_deinit))
+		array_free(&infos_free_at_deinit);
 }

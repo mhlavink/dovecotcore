@@ -258,10 +258,12 @@ int shared_storage_get_namespace(struct mail_namespace **_ns,
 		mail_storage_service_user_get_service_ctx(user->service_user);
 	struct event *service_user_event =
 		mail_storage_service_user_get_event(user->service_user);
+	struct settings_instance *service_user_set_instance =
+		mail_storage_service_user_get_settings_instance(user->service_user);
 	const struct mail_storage_service_input input = {
 		.event_parent = event_get_parent(service_user_event),
 		.username = userdomain,
-		.unexpanded_set_parser = user->unexpanded_set_parser,
+		.set_instance = service_user_set_instance,
 		.session_id = user->session_id,
 		.autocreated = TRUE,
 		.no_userdb_lookup = TRUE,
@@ -346,7 +348,6 @@ shared_mail_user_init(struct mail_storage *_storage,
 	new_ns->flags = (NAMESPACE_FLAG_SUBSCRIPTIONS & ns->flags) |
 		NAMESPACE_FLAG_LIST_PREFIX | NAMESPACE_FLAG_HIDDEN |
 		NAMESPACE_FLAG_AUTOCREATED | NAMESPACE_FLAG_INBOX_ANY;
-	new_ns->user_set = user->set;
 	new_ns->mail_set = _storage->set;
 	i_array_init(&new_ns->all_storages, 2);
 
@@ -410,7 +411,6 @@ struct mail_storage shared_storage = {
 	.class_flags = 0, /* unknown at this point */
 
 	.v = {
-		NULL,
 		shared_storage_alloc,
 		shared_storage_create,
 		index_storage_destroy,

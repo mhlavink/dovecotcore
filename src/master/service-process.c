@@ -298,7 +298,7 @@ service_process_setup_environment(struct service *service, unsigned int uid,
 				  const char *hostdomain)
 {
 	const struct master_service_settings *service_set =
-		service->list->service_set;
+		master_service_get_service_settings(master_service);
 	master_service_env_clean();
 
 	env_put(MASTER_IS_PARENT_ENV, "1");
@@ -319,7 +319,7 @@ service_process_setup_environment(struct service *service, unsigned int uid,
 
 	if (service_set->verbose_proctitle)
 		env_put(MASTER_VERBOSE_PROCTITLE_ENV, "1");
-	if (!service->set->master_set->version_ignore)
+	if (!service->list->set->version_ignore)
 		env_put(MASTER_DOVECOT_VERSION_ENV, PACKAGE_VERSION);
 
 	if (service_set->stats_writer_socket_path[0] == '\0')

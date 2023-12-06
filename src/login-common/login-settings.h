@@ -5,6 +5,7 @@ struct master_service_ssl_settings;
 struct master_service_ssl_server_settings;
 
 struct login_settings {
+	pool_t pool;
 	const char *login_trusted_networks;
 	const char *login_source_ips;
 	const char *login_greeting;
@@ -35,16 +36,6 @@ struct login_settings {
 	char *const *log_format_elements_split;
 };
 
-extern const struct setting_parser_info **login_set_roots;
 extern const struct setting_parser_info login_setting_parser_info;
-
-struct login_settings *
-login_settings_read(pool_t pool,
-		    const struct ip_addr *local_ip,
-		    const struct ip_addr *remote_ip,
-		    const char *local_name,
-		    const struct master_service_ssl_settings **ssl_set_r,
-		    const struct master_service_ssl_server_settings **ssl_server_set_r,
-		    void ***other_settings_r) ATTR_NULL(2, 3, 4);
 
 #endif

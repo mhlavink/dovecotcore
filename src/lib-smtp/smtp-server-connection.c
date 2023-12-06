@@ -1536,6 +1536,7 @@ void smtp_server_connection_get_proxy_data(struct smtp_server_connection *conn,
 	proxy_data->login = conn->username;
 	proxy_data->session = conn->session_id;
 	proxy_data->client_transport = conn->client_transport;
+	proxy_data->local_name = conn->local_name;
 
 	if (conn->proxy_proto != SMTP_PROXY_PROTOCOL_UNKNOWN)
 		proxy_data->proto = conn->proxy_proto;
@@ -1585,7 +1586,10 @@ void smtp_server_connection_set_proxy_data(
 		i_free(conn->client_transport);
 		conn->client_transport = i_strdup(proxy_data->client_transport);
 	}
-
+	if (proxy_data->local_name != NULL) {
+		i_free(conn->local_name);
+		conn->local_name = i_strdup(proxy_data->local_name);
+	}
 	if (proxy_data->ttl_plus_1 > 0)
 		conn->proxy_ttl_plus_1 = proxy_data->ttl_plus_1;
 	if (conn->proxy_timeout_secs > 0)
@@ -1657,4 +1661,12 @@ smtp_server_connection_reason_begin(struct smtp_server_connection *conn,
 	const char *reason_code =
 		event_reason_code(conn->set.reason_code_module, name);
 	return event_reason_begin(reason_code);
+}
+
+const char *
+smtp_server_connection_get_server_name(struct smtp_server_connection *conn)
+{
+	if (conn->ssl_iostream == NULL)
+		return NULL;
+	return ssl_iostream_get_server_name(conn->ssl_iostream);
 }

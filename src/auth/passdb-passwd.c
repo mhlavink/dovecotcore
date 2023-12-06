@@ -22,7 +22,7 @@ passwd_lookup(struct auth_request *request, struct passwd *pw_r)
 			"getpwnam() failed: %m");
 		return PASSDB_RESULT_INTERNAL_FAILURE;
 	case 0:
-		auth_request_log_unknown_user(request, AUTH_SUBSYS_DB);
+		auth_request_db_log_unknown_user(request);
 		return PASSDB_RESULT_USER_UNKNOWN;
 	}
 
@@ -51,8 +51,8 @@ passwd_verify_plain(struct auth_request *request, const char *password,
 		return;
 	}
 	/* check if the password is valid */
-	res = auth_request_password_verify(request, password, pw.pw_passwd,
-					   PASSWD_PASS_SCHEME, AUTH_SUBSYS_DB);
+	res = auth_request_db_password_verify(request, password, pw.pw_passwd,
+					      PASSWD_PASS_SCHEME);
 
 	/* clear the passwords from memory */
 	safe_memset(pw.pw_passwd, 0, strlen(pw.pw_passwd));

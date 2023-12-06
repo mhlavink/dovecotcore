@@ -7,6 +7,7 @@
 #include "hash.h"
 #include "str.h"
 #include "net.h"
+#include "settings.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "service.h"
@@ -132,7 +133,7 @@ service_create_inet_listeners(struct service *service,
 	const char *const *tmp, *addresses;
 	const struct ip_addr *ips;
 	unsigned int i, ips_count;
-	bool ssl_disabled = strcmp(service->set->master_set->ssl, "no") == 0;
+	bool ssl_disabled = strcmp(service->list->set->ssl, "no") == 0;
 
 	if (set->port == 0) {
 		/* disabled */
@@ -143,7 +144,7 @@ service_create_inet_listeners(struct service *service,
 		addresses = set->address;
 	else {
 		/* use the default listen address */
-		addresses = service->set->master_set->listen;
+		addresses = service->list->set->listen;
 	}
 
 	tmp = t_strsplit_spaces(addresses, ", ");
@@ -205,21 +206,21 @@ service_create_real(pool_t pool, struct event *event,
 	service->throttle_msecs = SERVICE_STARTUP_FAILURE_THROTTLE_MIN_MSECS;
 
 	service->client_limit = set->client_limit != 0 ? set->client_limit :
-		set->master_set->default_client_limit;
+		service_list->set->default_client_limit;
 	if (set->service_count > 0 &&
 	    service->client_limit > set->service_count)
 		service->client_limit = set->service_count;
 
 	service->vsz_limit = set->vsz_limit != UOFF_T_MAX ? set->vsz_limit :
-		set->master_set->default_vsz_limit;
+		service_list->set->default_vsz_limit;
 	service->idle_kill = set->idle_kill != 0 ? set->idle_kill :
-		set->master_set->default_idle_kill;
+		service_list->set->default_idle_kill;
 	service->type = service->set->parsed_type;
 
 	if (set->process_limit == 0) {
 		/* use default */
 		service->process_limit =
-			set->master_set->default_process_limit;
+			service_list->set->default_process_limit;
 	} else {
 		service->process_limit = set->process_limit;
 	}
@@ -285,20 +286,20 @@ service_create_real(pool_t pool, struct event *event,
 		service->status_fd[1] = service_anvil_global->status_fd[1];
 	}
 
-	if (array_is_created(&set->unix_listeners))
-		unix_listeners = array_get(&set->unix_listeners, &unix_count);
+	if (array_is_created(&set->parsed_unix_listeners))
+		unix_listeners = array_get(&set->parsed_unix_listeners, &unix_count);
 	else {
 		unix_listeners = NULL;
 		unix_count = 0;
 	}
-	if (array_is_created(&set->fifo_listeners))
-		fifo_listeners = array_get(&set->fifo_listeners, &fifo_count);
+	if (array_is_created(&set->parsed_fifo_listeners))
+		fifo_listeners = array_get(&set->parsed_fifo_listeners, &fifo_count);
 	else {
 		fifo_listeners = NULL;
 		fifo_count = 0;
 	}
-	if (array_is_created(&set->inet_listeners))
-		inet_listeners = array_get(&set->inet_listeners, &inet_count);
+	if (array_is_created(&set->parsed_inet_listeners))
+		inet_listeners = array_get(&set->parsed_inet_listeners, &inet_count);
 	else {
 		inet_listeners = NULL;
 		inet_count = 0;
@@ -397,7 +398,8 @@ service_lookup_type(struct service_list *service_list, enum service_type type)
 	return NULL;
 }
 
-static bool service_want(struct service_settings *set)
+static bool service_want(const struct master_settings *master_set,
+			 struct service_settings *set)
 {
 	char *const *proto;
 
@@ -411,7 +413,7 @@ static bool service_want(struct service_settings *set)
 	if (*set->protocol == '\0')
 		return TRUE;
 
-	for (proto = set->master_set->protocols_split; *proto != NULL; proto++) {
+	for (proto = master_set->protocols_split; *proto != NULL; proto++) {
 		if (strcmp(*proto, set->protocol) == 0)
 			return TRUE;
 	}
@@ -433,18 +435,16 @@ services_create_real(const struct master_settings *set, pool_t pool,
 	service_list->refcount = 1;
 	service_list->pool = pool;
 	service_list->event = event;
-	service_list->service_set = master_service_settings_get(master_service);
-	service_list->set_pool = master_service_settings_detach(master_service);
 	service_list->set = set;
 	service_list->master_log_fd[0] = -1;
 	service_list->master_log_fd[1] = -1;
 	service_list->master_fd = -1;
 
-	service_settings = array_get(&set->services, &count);
+	service_settings = array_get(&set->parsed_services, &count);
 	p_array_init(&service_list->services, pool, count);
 
 	for (i = 0; i < count; i++) {
-		if (!service_want(service_settings[i]))
+		if (!service_want(set, service_settings[i]))
 			continue;
 		T_BEGIN {
 			service = service_create(pool, service_settings[i],
@@ -509,6 +509,7 @@ int services_create(const struct master_settings *set,
 		pool_unref(&pool);
 		return -1;
 	}
+	pool_ref(set->pool);
 	return 0;
 }
 
@@ -658,14 +659,15 @@ static void services_kill_timeout(struct service_list *service_list)
 
 void services_destroy(struct service_list *service_list, bool wait)
 {
+	const struct master_service_settings *service_set =
+		master_service_get_service_settings(master_service);
 	/* make sure we log if child processes died unexpectedly */
 	service_list->destroying = TRUE;
 	services_monitor_reap_children();
 
 	services_monitor_stop(service_list, wait);
 
-	if (service_list->refcount > 1 &&
-	    service_list->service_set->shutdown_clients) {
+	if (service_list->refcount > 1 && service_set->shutdown_clients) {
 		service_list->to_kill =
 			timeout_add(SERVICE_DIE_TIMEOUT_MSECS,
 				    services_kill_timeout, service_list);
@@ -699,7 +701,7 @@ void service_list_unref(struct service_list *service_list)
 
 	timeout_remove(&service_list->to_kill);
 	event_unref(&service_list->event);
-	pool_unref(&service_list->set_pool);
+	settings_free(service_list->set);
 	pool_unref(&service_list->pool);
 }
 

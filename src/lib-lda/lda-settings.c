@@ -7,18 +7,11 @@
 #include "smtp-submit-settings.h"
 #include "lda-settings.h"
 
-#include <stddef.h>
-
 static bool lda_settings_check(void *_set, pool_t pool, const char **error_r);
 
 #undef DEF
-#undef DEFLIST
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct lda_settings)
-#define DEFLIST(field, name, defines) \
-	{ .type = SET_DEFLIST, .key = name, \
-	  .offset = offsetof(struct lda_settings, field), \
-	  .list_info = defines }
 
 static const struct setting_define lda_setting_defines[] = {
 	DEF(STR, hostname),
@@ -47,26 +40,17 @@ static const struct lda_settings lda_default_settings = {
 	.lda_mailbox_autosubscribe = FALSE
 };
 
-static const struct setting_parser_info *lda_setting_dependencies[] = {
-	&mail_user_setting_parser_info,
-	&smtp_submit_setting_parser_info,
-	NULL
-};
-
 const struct setting_parser_info lda_setting_parser_info = {
-	.module_name = "lda",
+	.name = "lda",
+
 	.defines = lda_setting_defines,
 	.defaults = &lda_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct lda_settings),
-
-	.parent_offset = SIZE_MAX,
-
+	.pool_offset1 = 1 + offsetof(struct lda_settings, pool),
 #ifndef CONFIG_BINARY
 	.check_func = lda_settings_check,
 #endif
-	.dependencies = lda_setting_dependencies
 };
 
 static bool lda_settings_check(void *_set, pool_t pool,

@@ -76,7 +76,7 @@ static struct dict_init_cache_list *dict_init_cache_find(const char *dict_name)
 }
 
 int dict_init_cache_get(const char *dict_name, const char *uri,
-			const struct dict_settings *set,
+			const struct dict_legacy_settings *set,
 			struct dict **dict_r, const char **error_r)
 {
 	struct dict_init_cache_list *match;
@@ -84,7 +84,7 @@ int dict_init_cache_get(const char *dict_name, const char *uri,
 
 	match = dict_init_cache_find(dict_name);
 	if (match == NULL) {
-		if (dict_init(uri, set, dict_r, error_r) < 0)
+		if (dict_init_legacy(uri, set, dict_r, error_r) < 0)
 			return -1;
 		match = dict_init_cache_add(dict_name, *dict_r);
 	} else {

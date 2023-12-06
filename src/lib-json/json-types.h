@@ -69,7 +69,7 @@ struct json_data {
 struct json_value {
 	enum json_content_type content_type;
 	union {
-		/* JSON2_CONTENT_TYPE_LIST */
+		/* JSON_CONTENT_TYPE_LIST */
 		struct json_tree_node_list *list; /* only used by trees */
 		/* JSON_CONTENT_TYPE_STRING */
 		const char *str;
@@ -79,7 +79,7 @@ struct json_value {
 		struct istream *stream;
 		/* JSON_CONTENT_TYPE_INTEGER */
 		intmax_t intnum;
-		/* JSON2_CONTENT_TYPE_TREE */
+		/* JSON_CONTENT_TYPE_TREE */
 		struct json_tree *tree;
 	} content;
 };
@@ -90,7 +90,7 @@ const char *json_content_type_get_name(enum json_content_type ctype);
 /* number */
 
 static inline int
-json_value_get_uinteger(const struct json_value *jvalue, uintmax_t *num_r)
+json_value_get_uintmax(const struct json_value *jvalue, uintmax_t *num_r)
 {
 	i_assert(jvalue->content_type == JSON_CONTENT_TYPE_INTEGER);
 	if (jvalue->content.intnum < 0)
@@ -100,7 +100,7 @@ json_value_get_uinteger(const struct json_value *jvalue, uintmax_t *num_r)
 }
 
 static inline int
-json_value_get_integer(const struct json_value *jvalue, intmax_t *num_r)
+json_value_get_intmax(const struct json_value *jvalue, intmax_t *num_r)
 {
 	i_assert(jvalue->content_type == JSON_CONTENT_TYPE_INTEGER);
 	*num_r = jvalue->content.intnum;
@@ -154,17 +154,6 @@ JSON_VALUE_GET_S__TEMPLATE(json_value_get_int32,
 			   int32_t, INT32_MIN, INT32_MAX)
 JSON_VALUE_GET_S__TEMPLATE(json_value_get_int64,
 			   int64_t, INT64_MIN, INT64_MAX)
-
-#define JSON_VALUE_GET_F__TEMPLATE(name, type)                          \
-static inline int                                                       \
-name(const struct json_value *jvalue, type *num_r)                      \
-{                                                                       \
-	if (jvalue->content_type == JSON_CONTENT_TYPE_INTEGER)          \
-		*num_r = (type)jvalue->content.intnum;                  \
-	else                                                            \
-		i_unreached();                                          \
-	return 0;                                                       \
-}
 
 /* string */
 
@@ -378,7 +367,7 @@ json_node_get_intmax(const struct json_node *jnode, intmax_t *num_r)
 		return -1;
 	if (jnode->value.content_type != JSON_CONTENT_TYPE_INTEGER)
 		return -1;
-	return json_value_get_integer(&jnode->value, num_r);
+	return json_value_get_intmax(&jnode->value, num_r);
 }
 static inline int
 json_node_get_int(const struct json_node *jnode, int *num_r)
@@ -433,7 +422,7 @@ json_node_get_uintmax(const struct json_node *jnode, uintmax_t *num_r)
 		return -1;
 	if (jnode->value.content_type != JSON_CONTENT_TYPE_INTEGER)
 		return -1;
-	return json_value_get_uinteger(&jnode->value, num_r);
+	return json_value_get_uintmax(&jnode->value, num_r);
 }
 static inline int
 json_node_get_uint(const struct json_node *jnode, unsigned int *num_r)

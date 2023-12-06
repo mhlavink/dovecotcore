@@ -14,7 +14,6 @@
 #include "mech.h"
 #include "passdb.h"
 
-
 /* Linear whitespace */
 #define IS_LWS(c) ((c) == ' ' || (c) == '\t')
 
@@ -23,7 +22,8 @@ static_assert_array_size(qop_names, QOP_COUNT);
 
 static string_t *get_digest_challenge(struct digest_auth_request *request)
 {
-	const struct auth_settings *set = request->auth_request.set;
+	struct auth_request *auth_request = &request->auth_request;
+	const struct auth_settings *set = auth_request->set;
 	buffer_t buf;
 	string_t *str;
 	const char *const *tmp;
@@ -79,9 +79,11 @@ static string_t *get_digest_challenge(struct digest_auth_request *request)
 	return str;
 }
 
-static bool verify_credentials(struct digest_auth_request *request,
-			       const unsigned char *credentials, size_t size)
+static bool
+verify_credentials(struct digest_auth_request *request,
+		   const unsigned char *credentials, size_t size)
 {
+	struct auth_request *auth_request = &request->auth_request;
 	struct md5_context ctx;
 	unsigned char digest[MD5_RESULTLEN];
 	const char *a1_hex, *a2_hex, *response_hex;
@@ -89,7 +91,7 @@ static bool verify_credentials(struct digest_auth_request *request,
 
 	/* get the MD5 password */
 	if (size != MD5_RESULTLEN) {
-                e_error(request->auth_request.mech_event,
+                e_error(auth_request->mech_event,
 			"invalid credentials length");
 		return FALSE;
 	}
@@ -176,10 +178,10 @@ static bool verify_credentials(struct digest_auth_request *request,
 
 		if (i == 0) {
 			/* verify response */
-			if (!mem_equals_timing_safe(response_hex, request->response, 32)) {
-				auth_request_log_info(&request->auth_request,
-						      AUTH_SUBSYS_MECH,
-						      AUTH_LOG_MSG_PASSWORD_MISMATCH);
+			if (!mem_equals_timing_safe(response_hex,
+						    request->response, 32)) {
+				e_info(auth_request->mech_event,
+				       AUTH_LOG_MSG_PASSWORD_MISMATCH);
 				return FALSE;
 			}
 		} else {
@@ -248,16 +250,18 @@ static bool parse_next(char **data, char **key, char **value)
 	return TRUE;
 }
 
-static bool auth_handle_response(struct digest_auth_request *request,
-				 char *key, char *value, const char **error)
+static bool
+auth_handle_response(struct digest_auth_request *request,
+		     char *key, char *value, const char **error)
 {
+	struct auth_request *auth_request = &request->auth_request;
 	unsigned int i;
 
 	(void)str_lcase(key);
 
 	if (strcmp(key, "realm") == 0) {
-		if (request->auth_request.fields.realm == NULL && *value != '\0')
-			auth_request_set_realm(&request->auth_request, value);
+		if (auth_request->fields.realm == NULL && *value != '\0')
+			auth_request_set_realm(auth_request, value);
 		return TRUE;
 	}
 
@@ -420,9 +424,10 @@ static bool auth_handle_response(struct digest_auth_request *request,
 	return TRUE;
 }
 
-static bool parse_digest_response(struct digest_auth_request *request,
-				  const unsigned char *data, size_t size,
-				  const char **error)
+static bool
+parse_digest_response(struct digest_auth_request *request,
+		      const unsigned char *data, size_t size,
+		      const char **error)
 {
 	char *copy, *key, *value;
 	bool failed;
@@ -486,9 +491,10 @@ static bool parse_digest_response(struct digest_auth_request *request,
 	return !failed;
 }
 
-static void credentials_callback(enum passdb_result result,
-				 const unsigned char *credentials, size_t size,
-				 struct auth_request *auth_request)
+static void
+credentials_callback(enum passdb_result result,
+		     const unsigned char *credentials, size_t size,
+		     struct auth_request *auth_request)
 {
 	struct digest_auth_request *request =
 		(struct digest_auth_request *)auth_request;
@@ -531,12 +537,13 @@ mech_digest_md5_auth_continue(struct auth_request *auth_request,
 		}
 
 		if (auth_request_set_username(auth_request, username, &error) &&
-				(request->authzid == NULL ||
-				 auth_request_set_login_username(auth_request,
-								 request->authzid,
-								 &error))) {
-			auth_request_lookup_credentials(auth_request,
-					"DIGEST-MD5", credentials_callback);
+		    (request->authzid == NULL ||
+		     auth_request_set_login_username(auth_request,
+						     request->authzid,
+						     &error))) {
+			auth_request_lookup_credentials(
+				auth_request, "DIGEST-MD5",
+				credentials_callback);
 			return;
 		}
 	}
@@ -568,7 +575,8 @@ static struct auth_request *mech_digest_md5_auth_new(void)
 	struct digest_auth_request *request;
 	pool_t pool;
 
-	pool = pool_alloconly_create(MEMPOOL_GROWING"digest_md5_auth_request", 2048);
+	pool = pool_alloconly_create(
+		MEMPOOL_GROWING"digest_md5_auth_request", 2048);
 	request = p_new(pool, struct digest_auth_request, 1);
 	request->pool = pool;
 	request->qop = QOP_AUTH;

@@ -244,10 +244,6 @@ typedef void auth_request_proxy_cb_t(bool success, struct auth_request *);
 
 extern unsigned int auth_request_state_count[AUTH_REQUEST_STATE_MAX];
 
-extern const char auth_default_subsystems[2];
-#define AUTH_SUBSYS_DB &auth_default_subsystems[0]
-#define AUTH_SUBSYS_MECH &auth_default_subsystems[1]
-
 struct auth_request *
 auth_request_new(const struct mech_module *mech, struct event *parent_event);
 struct auth_request *auth_request_new_dummy(struct event *parent_event);
@@ -336,47 +332,50 @@ int auth_request_proxy_finish(struct auth_request *request,
 			      auth_request_proxy_cb_t *callback);
 void auth_request_proxy_finish_failure(struct auth_request *request);
 
-void auth_request_log_password_mismatch(struct auth_request *request,
-					const char *subsystem);
 enum passdb_result
 auth_request_password_verify(struct auth_request *request,
+			     struct event *event,
 			     const char *plain_password,
 			     const char *crypted_password,
-			     const char *scheme, const char *subsystem)
+			     const char *scheme)
 			     ATTR_WARN_UNUSED_RESULT;
 enum passdb_result
 auth_request_password_verify_log(struct auth_request *request,
+				 struct event *event,
 				 const char *plain_password,
 				 const char *crypted_password,
-				 const char *scheme, const char *subsystem,
+				 const char *scheme,
 				 bool log_password_mismatch)
 				 ATTR_WARN_UNUSED_RESULT;
+enum passdb_result
+auth_request_db_password_verify(struct auth_request *request,
+				const char *plain_password,
+				const char *crypted_password,
+				const char *scheme)
+				ATTR_WARN_UNUSED_RESULT;
+enum passdb_result
+auth_request_db_password_verify_log(struct auth_request *request,
+				    const char *plain_password,
+				    const char *crypted_password,
+				    const char *scheme,
+				    bool log_password_mismatch)
+				    ATTR_WARN_UNUSED_RESULT;
 enum passdb_result auth_request_password_missing(struct auth_request *request);
 
-void auth_request_get_log_prefix(string_t *str,
-				 struct auth_request *auth_request,
-				 const char *subsystem);
-
-void auth_request_log_debug(struct auth_request *auth_request,
-			    const char *subsystem,
-			    const char *format, ...) ATTR_FORMAT(3, 4);
-void auth_request_log_info(struct auth_request *auth_request,
-			   const char *subsystem,
-			   const char *format, ...) ATTR_FORMAT(3, 4);
-void auth_request_log_warning(struct auth_request *auth_request,
-			      const char *subsystem,
-			      const char *format, ...) ATTR_FORMAT(3, 4);
-void auth_request_log_error(struct auth_request *auth_request,
-			    const char *subsystem,
-			    const char *format, ...) ATTR_FORMAT(3, 4);
+void auth_request_log_password_mismatch(struct auth_request *request,
+					struct event *event);
 void auth_request_log_unknown_user(struct auth_request *auth_request,
-				   const char *subsystem);
-
+				   struct event *event);
 void auth_request_log_login_failure(struct auth_request *request,
-				    const char *subsystem,
-				    const char *message);
-void auth_request_verify_plain_callback_finish(enum passdb_result result,
-					       struct auth_request *request);
+				    struct event *event, const char *message);
+void auth_request_db_log_password_mismatch(struct auth_request *auth_request);
+void auth_request_db_log_unknown_user(struct auth_request *auth_request);
+void auth_request_db_log_login_failure(struct auth_request *request,
+				       const char *message);
+
+void
+auth_request_verify_plain_callback_finish(enum passdb_result result,
+                                          struct auth_request *request);
 void auth_request_verify_plain_callback(enum passdb_result result,
 					struct auth_request *request);
 void auth_request_lookup_credentials_callback(enum passdb_result result,

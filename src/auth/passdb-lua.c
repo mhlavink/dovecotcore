@@ -25,7 +25,7 @@ passdb_lua_verify_password(struct dlua_passdb_module *module,
 		auth_lua_call_password_verify(module->script, request,
 					      password, &error);
 	if (result == PASSDB_RESULT_PASSWORD_MISMATCH) {
-		auth_request_log_password_mismatch(request, AUTH_SUBSYS_DB);
+		auth_request_db_log_password_mismatch(request);
 	} else if (result == PASSDB_RESULT_INTERNAL_FAILURE && error != NULL) {
 		e_error(authdb_event(request), "passdb-lua: %s",
 			error);
@@ -95,10 +95,8 @@ passdb_lua_verify_plain(struct auth_request *request, const char *password,
 		if (result == PASSDB_RESULT_OK) {
 			if (lua_scheme == NULL)
 				lua_scheme = "PLAIN";
-			result = auth_request_password_verify(request, password,
-							      lua_password,
-							      lua_scheme,
-							      AUTH_SUBSYS_DB);
+			result = auth_request_db_password_verify(
+				request, password, lua_password, lua_scheme);
 		}
 	}
 	callback(result, request);

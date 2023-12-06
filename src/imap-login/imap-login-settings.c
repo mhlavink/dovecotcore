@@ -7,47 +7,6 @@
 #include "login-settings.h"
 #include "imap-login-settings.h"
 
-#include <stddef.h>
-
-/* <settings checks> */
-static struct file_listener_settings imap_login_unix_listeners_array[] = {
-	{
-		.path = "srv.imap-login/%{pid}",
-		.type = "admin",
-		.mode = 0600,
-		.user = "",
-		.group = "",
-	},
-};
-static struct file_listener_settings *imap_login_unix_listeners[] = {
-	&imap_login_unix_listeners_array[0],
-};
-static buffer_t imap_login_unix_listeners_buf = {
-	{ { imap_login_unix_listeners, sizeof(imap_login_unix_listeners) } }
-};
-
-static struct inet_listener_settings imap_login_inet_listeners_array[] = {
-	{
-		.name = "imap",
-		.address = "",
-		.port = 143,
-	},
-	{
-		.name = "imaps",
-		.address = "",
-		.port = 993,
-		.ssl = TRUE,
-	},
-};
-static struct inet_listener_settings *imap_login_inet_listeners[] = {
-	&imap_login_inet_listeners_array[0],
-	&imap_login_inet_listeners_array[1]
-};
-static buffer_t imap_login_inet_listeners_buf = {
-	{ { imap_login_inet_listeners, sizeof(imap_login_inet_listeners) } }
-};
-/* </settings checks> */
-
 struct service_settings imap_login_service_settings = {
 	.name = "imap-login",
 	.protocol = "imap",
@@ -68,11 +27,28 @@ struct service_settings imap_login_service_settings = {
 	.idle_kill = 0,
 	.vsz_limit = UOFF_T_MAX,
 
-	.unix_listeners = { { &imap_login_unix_listeners_buf,
-			      sizeof(imap_login_unix_listeners[0]) } },
+	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
-	.inet_listeners = { { &imap_login_inet_listeners_buf,
-			      sizeof(imap_login_inet_listeners[0]) } }
+	.inet_listeners = ARRAY_INIT,
+};
+
+const struct setting_keyvalue imap_login_service_settings_defaults[] = {
+	{ "unix_listener", "srv.imap-login\\s%{pid}" },
+
+	{ "unix_listener/srv.imap-login\\s%{pid}/path", "srv.imap-login/%{pid}" },
+	{ "unix_listener/srv.imap-login\\s%{pid}/type", "admin" },
+	{ "unix_listener/srv.imap-login\\s%{pid}/mode", "0600" },
+
+	{ "inet_listener", "imap imaps" },
+
+	{ "inet_listener/imap/name", "imap" },
+	{ "inet_listener/imap/port", "143" },
+
+	{ "inet_listener/imaps/name", "imaps" },
+	{ "inet_listener/imaps/port", "993" },
+	{ "inet_listener/imaps/ssl", "yes" },
+
+	{ NULL, NULL }
 };
 
 #undef DEF
@@ -95,25 +71,12 @@ static const struct imap_login_settings imap_login_default_settings = {
 	.imap_id_retain = FALSE,
 };
 
-static const struct setting_parser_info *imap_login_setting_dependencies[] = {
-	&login_setting_parser_info,
-	NULL
-};
+const struct setting_parser_info imap_login_setting_parser_info = {
+	.name = "imap_login",
 
-static const struct setting_parser_info imap_login_setting_parser_info = {
-	.module_name = "imap-login",
 	.defines = imap_login_setting_defines,
 	.defaults = &imap_login_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct imap_login_settings),
-
-	.parent_offset = SIZE_MAX,
-	.dependencies = imap_login_setting_dependencies
-};
-
-const struct setting_parser_info *imap_login_setting_roots[] = {
-	&login_setting_parser_info,
-	&imap_login_setting_parser_info,
-	NULL
+	.pool_offset1 = 1 + offsetof(struct imap_login_settings, pool),
 };

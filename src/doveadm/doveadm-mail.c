@@ -12,6 +12,7 @@
 #include "unichar.h"
 #include "module-dir.h"
 #include "wildcard-match.h"
+#include "settings.h"
 #include "master-service.h"
 #include "mail-user.h"
 #include "mail-namespace.h"
@@ -328,13 +329,13 @@ static int cmd_force_resync_box(struct doveadm_mail_cmd_context *_ctx,
 
 static int cmd_force_resync_prerun(struct doveadm_mail_cmd_context *ctx ATTR_UNUSED,
 				   struct mail_storage_service_user *service_user,
-				   const char **error_r)
+				   const char **error_r ATTR_UNUSED)
 {
-	if (mail_storage_service_user_set_setting(service_user,
-						  "mailbox_list_index_very_dirty_syncs",
-						  "no",
-						  error_r) <= 0)
-		i_unreached();
+	struct settings_instance *set_instance =
+		mail_storage_service_user_get_settings_instance(service_user);
+	settings_override(set_instance,
+			  "mailbox_list_index_very_dirty_syncs", "no",
+			  SETTINGS_OVERRIDE_TYPE_CODE);
 	return 0;
 }
 
@@ -347,7 +348,9 @@ static int cmd_force_resync_run(struct doveadm_mail_cmd_context *_ctx,
 	const enum mailbox_list_iter_flags iter_flags =
 		MAILBOX_LIST_ITER_NO_AUTO_BOXES |
 		MAILBOX_LIST_ITER_RETURN_NO_FLAGS |
-		MAILBOX_LIST_ITER_STAR_WITHIN_NS;
+		MAILBOX_LIST_ITER_STAR_WITHIN_NS |
+		MAILBOX_LIST_ITER_RAW_LIST |
+		MAILBOX_LIST_ITER_FORCE_RESYNC;
 	const enum mail_namespace_type ns_mask = MAIL_NAMESPACE_TYPE_MASK_ALL;
 	struct mailbox_list_iterate_context *iter;
 	const struct mailbox_info *info;
@@ -504,7 +507,7 @@ int doveadm_mail_single_user(struct doveadm_mail_cmd_context *ctx,
 	i_assert(cctx->username != NULL);
 
 	doveadm_mail_ctx_to_storage_service_input(ctx, &ctx->storage_service_input);
-	ctx->storage_service = mail_storage_service_init(master_service, NULL,
+	ctx->storage_service = mail_storage_service_init(master_service,
 							 ctx->service_flags);
 	T_BEGIN {
 		ctx->v.init(ctx);
@@ -528,7 +531,7 @@ doveadm_mail_all_users(struct doveadm_mail_cmd_context *ctx,
 	ctx->service_flags |= MAIL_STORAGE_SERVICE_FLAG_USERDB_LOOKUP;
 
 	doveadm_mail_ctx_to_storage_service_input(ctx, &ctx->storage_service_input);
-	ctx->storage_service = mail_storage_service_init(master_service, NULL,
+	ctx->storage_service = mail_storage_service_init(master_service,
 							 ctx->service_flags);
 
 	T_BEGIN {
@@ -839,7 +842,7 @@ doveadm_cmdv2_wrapper_parse_common_options(struct doveadm_mail_cmd_context *mctx
 {
 	struct doveadm_cmd_context *cctx = mctx->cctx;
 	bool tcp_server = cctx->conn_type == DOVEADM_CONNECTION_TYPE_TCP;
-	const char *value_str;
+	const char *socket_path, *value_str;
 
 	mctx->service_flags |= MAIL_STORAGE_SERVICE_FLAG_USERDB_LOOKUP;
 	*wildcard_user_r = NULL;
@@ -865,10 +868,15 @@ doveadm_cmdv2_wrapper_parse_common_options(struct doveadm_mail_cmd_context *mctx
 		i_fatal("One of -u, -F, or -A must be provided");
 	}
 
-	if (doveadm_cmd_param_str(cctx, "socket-path",
-				  &doveadm_settings->doveadm_socket_path) &&
-	    doveadm_settings->doveadm_worker_count == 0)
-		doveadm_settings->doveadm_worker_count = 1;
+	if (doveadm_cmd_param_str(cctx, "socket-path", &socket_path)) {
+		struct doveadm_settings *set =
+			p_memdup(doveadm_settings->pool, doveadm_settings,
+				 sizeof(*doveadm_settings));
+		set->doveadm_socket_path = p_strdup(set->pool, socket_path);
+		if (set->doveadm_worker_count == 0)
+			set->doveadm_worker_count = 1;
+		doveadm_settings = mctx->set = set;
+	}
 
 	if (doveadm_cmd_param_istream(cctx, "file", &mctx->cmd_input))
 		i_stream_ref(mctx->cmd_input);

@@ -5,8 +5,6 @@
 #include "mail-storage-settings.h"
 #include "mbox-settings.h"
 
-#include <stddef.h>
-
 #undef DEF
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct mbox_settings)
@@ -37,19 +35,12 @@ static const struct mbox_settings mbox_default_settings = {
 	.mbox_md5 = "apop3d:all"
 };
 
-static const struct setting_parser_info mbox_setting_parser_info = {
-	.module_name = "mbox",
+const struct setting_parser_info mbox_setting_parser_info = {
+	.name = "mbox",
+
 	.defines = mbox_setting_defines,
 	.defaults = &mbox_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct mbox_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &mail_user_setting_parser_info
+	.pool_offset1 = 1 + offsetof(struct mbox_settings, pool),
 };
-
-const struct setting_parser_info *mbox_get_setting_parser_info(void)
-{
-	return &mbox_setting_parser_info;
-}

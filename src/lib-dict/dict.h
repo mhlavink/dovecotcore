@@ -31,11 +31,17 @@ enum dict_data_type {
 	DICT_DATA_TYPE_LAST
 };
 
-struct dict_settings {
+struct dict_legacy_settings {
 	const char *base_dir;
 	/* set to parent event, if exists */
 	struct event *event_parent;
 };
+
+struct dict_settings {
+	pool_t pool;
+	const char *dict_driver;
+};
+extern const struct setting_parser_info dict_setting_parser_info;
 
 struct dict_op_settings {
 	const char *username;
@@ -99,8 +105,14 @@ void dict_drivers_unregister_all(void);
 
 /* Open dictionary with given URI (type:data).
    Returns 0 if ok, -1 if URI is invalid. */
-int dict_init(const char *uri, const struct dict_settings *set,
-	      struct dict **dict_r, const char **error_r);
+int dict_init_legacy(const char *uri, const struct dict_legacy_settings *set,
+		     struct dict **dict_r, const char **error_r);
+/* Initialize the dict by pulling settings automatically using the event.
+   The event parameter is used as the parent event. Returns 1 if ok, 0 if
+   dict_driver setting is empty (error_r is also set), -1 if settings lookup or
+   driver initialization failed. */
+int dict_init_auto(struct event *event, struct dict **dict_r,
+		   const char **error_r);
 /* Close dictionary. */
 void dict_deinit(struct dict **dict);
 /* Wait for all pending asynchronous operations to finish. */

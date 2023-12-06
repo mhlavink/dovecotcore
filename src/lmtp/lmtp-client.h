@@ -21,7 +21,6 @@ struct lmtp_local_deliver_context {
 
 	const struct mail_storage_settings *mail_set;
 	const struct smtp_submit_settings *smtp_set;
-	const struct lda_settings *lda_set;
 
 	struct mail_deliver_session *session;
 };
@@ -73,14 +72,15 @@ struct client {
 	struct lmtp_client_vfuncs v;
 	struct event *event;
 
-	const struct lda_settings *unexpanded_lda_set;
+	struct settings_instance *set_instance;
+	const struct lda_settings *lda_set;
 	const struct lmtp_settings *lmtp_set;
-	const struct master_service_settings *service_set;
 
 	struct smtp_server_connection *conn;
 
 	struct ip_addr remote_ip, local_ip, real_local_ip, real_remote_ip;
 	in_port_t remote_port, local_port, real_local_port, real_remote_port;
+	const char *local_name;
 
 	struct mail_user *raw_mail_user;
 	const char *my_domain;

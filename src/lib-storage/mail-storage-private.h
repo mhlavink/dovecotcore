@@ -51,8 +51,6 @@ struct mail_module_register {
 };
 
 struct mail_storage_vfuncs {
-	const struct setting_parser_info *(*get_setting_parser_info)(void);
-
 	struct mail_storage *(*alloc)(void);
 	int (*create)(struct mail_storage *storage, struct mail_namespace *ns,
 		      const char **error_r);
@@ -882,11 +880,6 @@ void mailbox_refresh_permissions(struct mailbox *box);
 /* Open private index files for mailbox. Returns 1 if opened, 0 if there
    are no private indexes (or flags) in this mailbox, -1 if error. */
 int mailbox_open_index_pvt(struct mailbox *box);
-/* Create path's directory with proper permissions. The root directory is also
-   created if necessary. Returns 1 if created, 0 if it already existed,
-   -1 if error. */
-int mailbox_mkdir(struct mailbox *box, const char *path,
-		  enum mailbox_list_path_type type);
 /* Create a non-mailbox type directory for mailbox if it's missing (e.g. index).
    Optimized for case where the directory usually exists. */
 int mailbox_create_missing_dir(struct mailbox *box,
@@ -930,7 +923,8 @@ static inline const char *mailbox_name_sanitize(const char *name)
 }
 
 struct event *
-mail_storage_mailbox_create_event(struct event *parent, const char *vname);
+mail_storage_mailbox_create_event(struct event *parent,
+				  struct mailbox_list *list, const char *vname);
 
 /* for unit testing */
 int mailbox_verify_name(struct mailbox *box);

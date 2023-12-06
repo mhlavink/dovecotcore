@@ -105,6 +105,7 @@ union mailbox_list_module_context {
 
 struct mailbox_list {
 	const char *name;
+	struct event *event;
 	enum mailbox_list_properties props;
 	size_t mailbox_name_max_length;
 
@@ -161,12 +162,14 @@ struct mailbox_list_iterate_context {
 	enum mailbox_list_iter_flags flags;
 	bool failed;
 	bool index_iteration;
+	bool iter_from_index_dir;
 
 	struct imap_match_glob *glob;
 	struct mailbox_list_autocreate_iterate_context *autocreate_ctx;
 	struct mailbox_info specialuse_info;
 
 	ARRAY(union mailbox_list_iterate_module_context *) module_contexts;
+	HASH_TABLE(const char *, void*) found_mailboxes;
 };
 
 struct mailbox_list_iter_update_context {

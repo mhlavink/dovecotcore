@@ -935,13 +935,13 @@ static void test_do_init(void)
 	struct dcrypt_settings dcrypt_set = {
 		.module_dir = TEST_DCRYPT_MODULE_DIR,
 	};
-	struct dict_settings dict_set = {
+	struct dict_legacy_settings dict_set = {
 		.base_dir = ".",
 	};
 
 	i_unlink_if_exists(".keys");
 	dict_driver_register(&dict_driver_file);
-	if (dict_init("file:.keys", &dict_set, &keys_dict, &error) < 0)
+	if (dict_init_legacy("file:.keys", &dict_set, &keys_dict, &error) < 0)
 		i_fatal("dict_init(file:.keys): %s", error);
 	if (!dcrypt_initialize(NULL, &dcrypt_set, &error)) {
 		i_error("No functional dcrypt backend found - "

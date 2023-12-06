@@ -3,6 +3,7 @@
 #include "lib.h"
 #include "ioloop.h"
 #include "str.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "imap-arg.h"
 #include "imap-resp-code.h"
@@ -13,6 +14,7 @@
 #include "imapc-list.h"
 #include "imapc-search.h"
 #include "imapc-sync.h"
+#include "imapc-attribute.h"
 #include "imapc-settings.h"
 #include "imapc-storage.h"
 
@@ -307,19 +309,23 @@ static void imapc_storage_client_login(struct imapc_storage_client *client,
 }
 
 int imapc_storage_client_create(struct mail_namespace *ns,
-				const struct imapc_settings *imapc_set,
-				const struct mail_storage_settings *mail_set,
 				struct imapc_storage_client **client_r,
 				const char **error_r)
 {
+	const struct imapc_settings *imapc_set;
 	struct imapc_storage_client *client;
 	struct imapc_client_settings set;
 	string_t *str;
+
+	if (settings_get(ns->user->event, &imapc_setting_parser_info, 0,
+			 &imapc_set, error_r) < 0)
+		return -1;
 
 	i_zero(&set);
 	set.host = imapc_set->imapc_host;
 	if (*set.host == '\0') {
 		*error_r = "missing imapc_host";
+		settings_free(imapc_set);
 		return -1;
 	}
 	set.port = imapc_set->imapc_port;
@@ -333,6 +339,7 @@ int imapc_storage_client_create(struct mail_namespace *ns,
 	set.password = imapc_set->imapc_password;
 	if (*set.password == '\0') {
 		*error_r = "missing imapc_password";
+		settings_free(imapc_set);
 		return -1;
 	}
 	set.sasl_mechanisms = imapc_set->imapc_sasl_mechanisms;
@@ -345,7 +352,7 @@ int imapc_storage_client_create(struct mail_namespace *ns,
 	set.dns_client_socket_path = *ns->user->set->base_dir == '\0' ? "" :
 		t_strconcat(ns->user->set->base_dir, "/",
 			    DNS_CLIENT_SOCKET_NAME, NULL);
-	set.debug = mail_set->mail_debug;
+	set.debug = event_want_debug(ns->user->event);
 	set.rawlog_dir = mail_user_home_expand(ns->user,
 					       imapc_set->imapc_rawlog_dir);
 	if ((imapc_set->parsed_features & IMAPC_FEATURE_SEND_ID) != 0)
@@ -355,7 +362,7 @@ int imapc_storage_client_create(struct mail_namespace *ns,
 	mail_user_set_get_temp_prefix(str, ns->user->set);
 	set.temp_path_prefix = str_c(str);
 
-	mail_user_init_ssl_client_settings(ns->user, &set.ssl_set);
+	set.ssl_set = *ns->user->ssl_set;
 	if (!imapc_set->imapc_ssl_verify)
 		set.ssl_set.allow_invalid_cert = TRUE;
 
@@ -372,6 +379,7 @@ int imapc_storage_client_create(struct mail_namespace *ns,
 
 	client = i_new(struct imapc_storage_client, 1);
 	client->refcount = 1;
+	client->set = imapc_set;
 	i_array_init(&client->untagged_callbacks, 16);
 	/* FIXME: storage->event would be better, but we first get here when
 	   creating mailbox_list, and storage doesn't even exist yet. */
@@ -402,6 +410,7 @@ void imapc_storage_client_unref(struct imapc_storage_client **_client)
 	if (--client->refcount > 0)
 		return;
 	imapc_client_deinit(&client->client);
+	settings_free(client->set);
 	array_foreach_modifiable(&client->untagged_callbacks, cb)
 		i_free(cb->name);
 	array_free(&client->untagged_callbacks);
@@ -417,8 +426,21 @@ imapc_storage_create(struct mail_storage *_storage,
 	struct imapc_storage *storage = IMAPC_STORAGE(_storage);
 	struct imapc_mailbox_list *imapc_list = NULL;
 
-	storage->set = settings_parser_get_root_set(_storage->user->set_parser,
-		imapc_get_setting_parser_info());
+	if (strcmp(ns->list->name, MAILBOX_LIST_NAME_IMAPC) == 0) {
+		imapc_list = (struct imapc_mailbox_list *)ns->list;
+		storage->client = imapc_list->client;
+		storage->client->refcount++;
+	} else {
+		if (imapc_storage_client_create(ns, &storage->client, error_r) < 0)
+			return -1;
+	}
+	storage->client->_storage = storage;
+	storage->set = storage->client->set;
+	p_array_init(&storage->remote_namespaces, _storage->pool, 4);
+	if (!IMAPC_HAS_FEATURE(storage, IMAPC_FEATURE_NO_FETCH_BODYSTRUCTURE)) {
+		_storage->nonbody_access_fields |=
+			MAIL_FETCH_IMAP_BODY | MAIL_FETCH_IMAP_BODYSTRUCTURE;
+	}
 
 	/* serialize all the settings */
 	_storage->unique_root_dir = p_strdup_printf(_storage->pool,
@@ -441,22 +463,6 @@ imapc_storage_create(struct mail_storage *_storage,
 						    (size_t) storage->set->imapc_max_line_length,
 						    storage->set->pop3_deleted_flag,
 						    ns->list->set.root_dir);
-
-	if (strcmp(ns->list->name, MAILBOX_LIST_NAME_IMAPC) == 0) {
-		imapc_list = (struct imapc_mailbox_list *)ns->list;
-		storage->client = imapc_list->client;
-		storage->client->refcount++;
-	} else {
-		if (imapc_storage_client_create(ns, storage->set, _storage->set,
-						&storage->client, error_r) < 0)
-			return -1;
-	}
-	storage->client->_storage = storage;
-	p_array_init(&storage->remote_namespaces, _storage->pool, 4);
-	if (!IMAPC_HAS_FEATURE(storage, IMAPC_FEATURE_NO_FETCH_BODYSTRUCTURE)) {
-		_storage->nonbody_access_fields |=
-			MAIL_FETCH_IMAP_BODY | MAIL_FETCH_IMAP_BODYSTRUCTURE;
-	}
 
 	imapc_storage_client_register_untagged(storage->client, "STATUS",
 					       imapc_untagged_status);
@@ -1348,7 +1354,6 @@ struct mail_storage imapc_storage = {
 	.event_category = &event_category_imapc,
 
 	.v = {
-		imapc_get_setting_parser_info,
 		imapc_storage_alloc,
 		imapc_storage_create,
 		imapc_storage_destroy,
@@ -1385,11 +1390,11 @@ struct mailbox imapc_mailbox = {
 		imapc_mailbox_get_status,
 		imapc_mailbox_get_metadata,
 		index_storage_set_subscribed,
-		index_storage_attribute_set,
-		index_storage_attribute_get,
-		index_storage_attribute_iter_init,
-		index_storage_attribute_iter_next,
-		index_storage_attribute_iter_deinit,
+		imapc_storage_attribute_set,
+		imapc_storage_attribute_get,
+		imapc_storage_attribute_iter_init,
+		imapc_storage_attribute_iter_next,
+		imapc_storage_attribute_iter_deinit,
 		NULL,
 		NULL,
 		imapc_mailbox_sync_init,

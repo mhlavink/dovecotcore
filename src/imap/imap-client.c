@@ -13,11 +13,13 @@
 #include "ostream.h"
 #include "time-util.h"
 #include "var-expand.h"
+#include "settings.h"
 #include "master-service.h"
 #include "imap-resp-code.h"
 #include "imap-util.h"
 #include "imap-urlauth.h"
 #include "mail-error.h"
+#include "smtp-submit-settings.h"
 #include "mail-namespace.h"
 #include "mail-storage-service.h"
 #include "mail-autoexpunge.h"
@@ -83,33 +85,9 @@ static void client_init_urlauth(struct client *client)
 
 static bool user_has_special_use_mailboxes(struct mail_user *user)
 {
-	struct mail_namespace_settings *ns_set;
-
-	/*
-	 * We have to iterate over namespace and mailbox *settings* since
-	 * the namespaces haven't been set up yet.  The namespaces haven't
-	 * been set up so that we don't hold up the OK response to LOGIN
-	 * when using slow lib-storage backends.
-	 */
-
-	/* no namespaces => no special use flags */
-	if (!array_is_created(&user->set->namespaces))
-		return FALSE;
-
-	array_foreach_elem(&user->set->namespaces, ns_set) {
-		struct mailbox_settings *box_set;
-
-		/* no mailboxes => no special use flags */
-		if (!array_is_created(&ns_set->mailboxes))
-			continue;
-
-		array_foreach_elem(&ns_set->mailboxes, box_set) {
-			if (box_set->special_use != NULL)
-				return TRUE;
-		}
-	}
-
-	return FALSE;
+	const struct mail_storage_settings *mail_set =
+		mail_user_set_get_storage_set(user);
+	return mail_set->parsed_have_special_use_mailboxes;
 }
 
 struct client *client_create(int fd_in, int fd_out, bool unhibernated,
@@ -557,6 +535,8 @@ static void client_default_destroy(struct client *client, const char *reason)
 	imap_client_count--;
 	DLLIST_REMOVE(&imap_clients, client);
 
+	settings_free(client->set);
+	settings_free(client->smtp_set);
 	event_unref(&client->event);
 	i_free(client->last_cmd_name);
 	pool_unref(&client->pool);

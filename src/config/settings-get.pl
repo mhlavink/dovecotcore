@@ -1,5 +1,7 @@
 #!/usr/bin/env perl
 use strict;
+use warnings;
+use 5.008;
 
 print "/* WARNING: THIS FILE IS GENERATED - DO NOT PATCH!\n";
 print "   It's not enough alone in any case, because the defaults may be\n";
@@ -19,107 +21,84 @@ print '#include "hash-format.h"'."\n";
 print '#include "net.h"'."\n";
 print '#include "unichar.h"'."\n";
 print '#include "hash-method.h"'."\n";
+print '#include "settings.h"'."\n";
 print '#include "settings-parser.h"'."\n";
 print '#include "message-header-parser.h"'."\n";
-print '#include "pop3-protocol.h"'."\n";
 print '#include "imap-urlauth-worker-common.h"'."\n";
 print '#include "all-settings.h"'."\n";
-print '#include <stddef.h>'."\n";
 print '#include <unistd.h>'."\n";
 print '#define CONFIG_BINARY'."\n";
-print 'extern buffer_t config_all_services_buf;';
 
 my @services = ();
-my @service_ifdefs = ();
-my %parsers = {};
+my %service_defaults = ();
+my %infos = ();
 
+my $linked_file = 0;
 foreach my $file (@ARGV) {
+  if ($file eq "--") {
+    $linked_file = 1;
+    next;
+  }
   my $f;
   open($f, $file) || die "Can't open $file: $@";
   
-  my $state = 0;
+  my $state = "root";
   my $file_contents = "";
   my $externs = "";
   my $code = "";
-  my %funcs;
-  my $cur_name = "";
-  my $ifdef = "";
-  my $state_ifdef = 0;
   
   while (<$f>) {
     my $write = 0;
-    if ($state == 0) {
+    if ($state eq "root") {
       if (/struct .*_settings \{/ ||
-	  /struct setting_define.*\{/ ||
-	  /struct .*_default_settings = \{/) {
-	$state++;
+          /struct setting_define.*\{/ ||
+          /struct .*_default_settings = \{/) {
+        # settings-related structure - copy.
+        $state = "copy-to-end-of-block";
       } elsif (/^struct service_settings (.*) = \{/) {
-	$state++;
-	if ($ifdef eq "") {
-	  $state_ifdef = 0;
-	} else {
-	  $_ = $ifdef."\n".$_;
-	  $state_ifdef = 1;
-	}
-	push @services, $1;
-	push @service_ifdefs, $ifdef;
-      } elsif (/^(static )?const struct setting_parser_info (.*) = \{/) {
-	$cur_name = $2;
-	$state++ if ($cur_name !~ /^\*default_/);
-      } elsif (/^extern const struct setting_parser_info (.*);/) {
-	$externs .= "extern const struct setting_parser_info $1;\n";
+        # service settings - copy and add to list of services.
+        $state = "copy-to-end-of-block";
+        push @services, $1;
+      } elsif (/^const struct setting_keyvalue (.*_defaults)\[\] = \{/) {
+        # service's default settings as keyvalues - copy and add to list of
+        # defaults.
+        $service_defaults{$1} = 1;
+        $state = "copy-to-end-of-block";
+      } elsif (/^const struct setting_parser_info (.*) = \{/) {
+        # info structure for settings
+        my $cur_name = $1;
+        $infos{$cur_name} = 1;
+        # Add forward declaration for the info struct. This may be needed by
+        # the ext_check() functions.
+        $externs .= "extern const struct setting_parser_info $cur_name;\n";
+        $state = "copy-to-end-of-block";
       } elsif (/\/\* <settings checks> \*\//) {
-	$state = 4;
-	$code .= $_;
-      }
-      
-      if (/(^#ifdef .*)$/ || /^(#if .*)$/) {
-	$ifdef = $1;
-      } else {
-	$ifdef = "";
+        # Anything inside <settings check> ... </settings check> is copied.
+        $state = "copy-to-end-of-settings-checks";
+        $code .= $_;
       }
       
       if (/#define.*DEF/ || /^#undef.*DEF/ || /ARRAY_DEFINE_TYPE.*_settings/) {
-	$write = 1;
-	$state = 2 if (/\\$/);
+        # macro for setting_define { ... } - copy.
+        $write = 1;
+        if (/\\$/) {
+          # multi-line macro
+          $state = "copy-to-end-of-macro";
+        }
       }
-    } elsif ($state == 2) {
+    } elsif ($state eq "copy-to-end-of-macro") {
+      # Continue copying macro until the line doesn't end with '\'
       $write = 1;
-      $state = 0 if (!/\\$/);
-    } elsif ($state == 4) {
+      $state = "root" if (!/\\$/);
+    } elsif ($state eq "copy-to-end-of-settings-checks") {
       $code .= $_;
-      $state = 0 if (/\/\* <\/settings checks> \*\//);
+      $state = "root" if (/\/\* <\/settings checks> \*\//);
     }
-    
-    if ($state == 1 || $state == 3) {
-      if ($state == 1) {
-	if (/\.module_name = "(.*)"/) {
-	  $parsers{$cur_name} = $1;
-	}
-	if (/DEFLIST.*".*",(.*)$/) {
-	  my $value = $1;
-	  if ($value =~ /.*&(.*)\)/) {
-	    $parsers{$1} = 0;
-	    $externs .= "extern const struct setting_parser_info $1;\n";
-	  } else {
-	    $state = 3;
-	  }
-	}
-      } elsif ($state == 3) {
-	if (/.*&(.*)\)/) {
-	  $parsers{$1} = 0;
-	}        
-      }
-      
-      s/^static const (struct master_settings master_default_settings)/$1/;
 
+    if ($state eq "copy-to-end-of-block") {
       $write = 1;
       if (/};/) {
-	$state = 0;
-	if ($state_ifdef) {
-	  $_ .= "#endif\n";
-	  $state_ifdef = 0;
-	}
+        $state = "root";
       }
     }
   
@@ -128,37 +107,41 @@ foreach my $file (@ARGV) {
   
   print "/* $file */\n";
   print $externs;
-  print $code;
-  print $file_contents;
+  if ($linked_file) {
+    # The code and contents are already linked via libdovecot.so. Don't add
+    # them again.
+  } else {
+    print $code;
+    print $file_contents;
+  }
 
   close $f;
 }
 
-print "static struct service_settings *config_all_services[] = {\n";
-
-for (my $i = 0; $i < scalar(@services); $i++) {
-  my $ifdef = $service_ifdefs[$i];
-  print "$ifdef\n" if ($ifdef ne "");
-  print "\t&".$services[$i].",\n";
-  print "#endif\n" if ($ifdef ne "");
+sub service_name {
+  $_ = $_[0];
+  return $1 if (/^(.*)_service_settings$/);
+  die "unexpected service name $_";
 }
-print "};\n";
-print "buffer_t config_all_services_buf = {\n";
-print "\t{ { config_all_services, sizeof(config_all_services) } }\n";
+# Write an array of default services and their default settings.
+print "static const struct config_service config_default_services[] = {\n";
+@services = sort { service_name($a) cmp service_name($b) } @services;
+for (my $i = 0; $i < scalar(@services); $i++) {
+  my $defaults = "NULL";
+  if (defined($service_defaults{$services[$i]."_defaults"})) {
+    $defaults = $services[$i]."_defaults";
+  }
+  print "\t{ &".$services[$i].", $defaults },\n";
+}
+print "\t{ NULL, NULL }\n";
 print "};\n";
 
-print "const struct setting_parser_info *all_default_roots[] = {\n";
-print "\t&master_service_setting_parser_info,\n";
-print "\t&master_service_ssl_setting_parser_info,\n";
-print "\t&master_service_ssl_server_setting_parser_info,\n";
-print "\t&smtp_submit_setting_parser_info,\n";
-foreach my $name (sort(keys %parsers)) {
-  my $module = $parsers{$name};
-  next if (!$module);
-
+# Write a list of all settings infos.
+print "const struct setting_parser_info *all_default_infos[] = {\n";
+foreach my $name (sort(keys %infos)) {
   print "\t&".$name.", \n";
 }
 print "\tNULL\n";
 print "};\n";
-print "const struct setting_parser_info *const *all_roots = all_default_roots;\n";
-print "ARRAY_TYPE(service_settings) *default_services = &master_default_settings.services;\n";
+print "const struct setting_parser_info *const *all_infos = all_default_infos;\n";
+print "const struct config_service *config_all_services = config_default_services;\n";

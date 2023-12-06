@@ -7,36 +7,10 @@
 #include "mail-storage-settings.h"
 #include "pop3-settings.h"
 
-#include <stddef.h>
 #include <unistd.h>
 
 static bool pop3_settings_verify(void *_set, pool_t pool,
 				 const char **error_r);
-
-/* <settings checks> */
-static struct file_listener_settings pop3_unix_listeners_array[] = {
-	{
-		.path = "login/pop3",
-		.mode = 0666,
-		.user = "",
-		.group = "",
-	},
-	{
-		.path = "srv.pop3/%{pid}",
-		.type = "admin",
-		.mode = 0600,
-		.user = "",
-		.group = "",
-	},
-};
-static struct file_listener_settings *pop3_unix_listeners[] = {
-	&pop3_unix_listeners_array[0],
-	&pop3_unix_listeners_array[1],
-};
-static buffer_t pop3_unix_listeners_buf = {
-	{ { pop3_unix_listeners, sizeof(pop3_unix_listeners) } }
-};
-/* </settings checks> */
 
 struct service_settings pop3_service_settings = {
 	.name = "pop3",
@@ -58,20 +32,27 @@ struct service_settings pop3_service_settings = {
 	.idle_kill = 0,
 	.vsz_limit = UOFF_T_MAX,
 
-	.unix_listeners = { { &pop3_unix_listeners_buf,
-			      sizeof(pop3_unix_listeners[0]) } },
+	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
 	.inet_listeners = ARRAY_INIT
 };
 
+const struct setting_keyvalue pop3_service_settings_defaults[] = {
+	{ "unix_listener", "login\\spop3 srv.pop3\\s%{pid}" },
+
+	{ "unix_listener/login\\spop3/path", "login/pop3" },
+	{ "unix_listener/login\\spop3/mode", "0666" },
+
+	{ "unix_listener/srv.pop3\\s%{pid}/path", "srv.pop3/%{pid}" },
+	{ "unix_listener/srv.pop3\\s%{pid}/type", "admin" },
+	{ "unix_listener/srv.pop3\\s%{pid}/mode", "0600" },
+
+	{ NULL, NULL }
+};
+
 #undef DEF
-#undef DEFLIST
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct pop3_settings)
-#define DEFLIST(field, name, defines) \
-	{ .type = SET_DEFLIST, .key = name, \
-	  .offset = offsetof(struct pop3_settings, field), \
-	  .list_info = defines }
 
 static const struct setting_define pop3_setting_defines[] = {
 	DEF(BOOL, verbose_proctitle),
@@ -109,23 +90,15 @@ static const struct pop3_settings pop3_default_settings = {
 	.pop3_delete_type = "default:expunge:flag"
 };
 
-static const struct setting_parser_info *pop3_setting_dependencies[] = {
-	&mail_user_setting_parser_info,
-	NULL
-};
-
 const struct setting_parser_info pop3_setting_parser_info = {
-	.module_name = "pop3",
+	.name = "pop3",
+
 	.defines = pop3_setting_defines,
 	.defaults = &pop3_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct pop3_settings),
-
-	.parent_offset = SIZE_MAX,
-
+	.pool_offset1 = 1 + offsetof(struct pop3_settings, pool),
 	.check_func = pop3_settings_verify,
-	.dependencies = pop3_setting_dependencies
 };
 
 /* <settings checks> */

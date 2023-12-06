@@ -569,6 +569,11 @@ int mailbox_open_stream(struct mailbox *box, struct istream *input);
 void mailbox_close(struct mailbox *box);
 /* Close and free the mailbox. */
 void mailbox_free(struct mailbox **box);
+/* Create path's directory with proper permissions. The root directory is also
+   created if necessary. Returns 1 if created, 0 if it already existed,
+   -1 if error. */
+int mailbox_mkdir(struct mailbox *box, const char *path,
+		  enum mailbox_list_path_type type);
 
 /* Returns TRUE if box1 points to the same mailbox as ns2/vname2. */
 bool mailbox_equals(const struct mailbox *box1,
@@ -626,12 +631,9 @@ struct mail_storage *mailbox_get_storage(const struct mailbox *box) ATTR_PURE;
 /* Return namespace of given mailbox. */
 struct mail_namespace *
 mailbox_get_namespace(const struct mailbox *box) ATTR_PURE;
-/* Returns the storage's settings. */
-const struct mail_storage_settings *
-mailbox_get_settings(struct mailbox *box) ATTR_PURE;
-/* Returns the mailbox's settings, or NULL if there are none. */
+/* Returns the mailbox's settings. */
 const struct mailbox_settings *
-mailbox_settings_find(struct mail_namespace *ns, const char *vname);
+mailbox_get_settings(struct mailbox *box) ATTR_PURE;
 
 /* Returns the (virtual) name of the given mailbox. */
 const char *mailbox_get_vname(const struct mailbox *box) ATTR_PURE;

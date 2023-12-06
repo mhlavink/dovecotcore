@@ -5,8 +5,6 @@
 #include "mail-storage-settings.h"
 #include "maildir-settings.h"
 
-#include <stddef.h>
-
 #undef DEF
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct maildir_settings)
@@ -27,20 +25,12 @@ static const struct maildir_settings maildir_default_settings = {
 	.maildir_empty_new = FALSE
 };
 
-static const struct setting_parser_info maildir_setting_parser_info = {
-	.module_name = "maildir",
+const struct setting_parser_info maildir_setting_parser_info = {
+	.name = "maildir",
+
 	.defines = maildir_setting_defines,
 	.defaults = &maildir_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct maildir_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &mail_user_setting_parser_info
+	.pool_offset1 = 1 + offsetof(struct maildir_settings, pool),
 };
-
-const struct setting_parser_info *maildir_get_setting_parser_info(void)
-{
-	return &maildir_setting_parser_info;
-}
-

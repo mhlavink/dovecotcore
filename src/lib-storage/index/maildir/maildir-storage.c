@@ -5,6 +5,7 @@
 #include "mkdir-parents.h"
 #include "eacces-error.h"
 #include "unlink-old-files.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "mailbox-uidvalidity.h"
 #include "mailbox-list-private.h"
@@ -20,7 +21,6 @@
 
 struct maildir_mailbox_list_context {
 	union mailbox_list_module_context module_ctx;
-	const struct maildir_settings *set;
 };
 
 extern struct mail_storage maildir_storage;
@@ -57,8 +57,9 @@ maildir_storage_create(struct mail_storage *_storage, struct mail_namespace *ns,
 	struct mailbox_list *list = ns->list;
 	const char *dir;
 
-	storage->set = settings_parser_get_root_set(_storage->user->set_parser,
-		maildir_get_setting_parser_info());
+	if (settings_get(_storage->event, &maildir_setting_parser_info, 0,
+			 &storage->set, error_r) < 0)
+		return -1;
 
 	storage->temp_prefix = p_strdup(_storage->pool,
 					mailbox_list_get_temp_prefix(list));
@@ -76,6 +77,14 @@ maildir_storage_create(struct mail_storage *_storage, struct mail_namespace *ns,
 	_storage->temp_path_prefix = p_strconcat(_storage->pool, dir, "/",
 						 storage->temp_prefix, NULL);
 	return 0;
+}
+
+static void maildir_storage_destroy(struct mail_storage *_storage)
+{
+	struct maildir_storage *storage = MAILDIR_STORAGE(_storage);
+
+	settings_free(storage->set);
+	index_storage_destroy(_storage);
 }
 
 static void maildir_storage_get_list_settings(const struct mail_namespace *ns,
@@ -653,15 +662,13 @@ maildir_is_internal_name(struct mailbox_list *list ATTR_UNUSED,
 		strcmp(name, "tmp") == 0;
 }
 
-static void maildir_storage_add_list(struct mail_storage *storage,
+static void maildir_storage_add_list(struct mail_storage *storage ATTR_UNUSED,
 				     struct mailbox_list *list)
 {
 	struct maildir_mailbox_list_context *mlist;
 
 	mlist = p_new(list->pool, struct maildir_mailbox_list_context, 1);
 	mlist->module_ctx.super = list->v;
-	mlist->set = settings_parser_get_root_set(storage->user->set_parser,
-		maildir_get_setting_parser_info());
 
 	list->v.is_internal_name = maildir_is_internal_name;
 	MODULE_CONTEXT_SET(list, maildir_mailbox_list_module, mlist);
@@ -728,10 +735,9 @@ struct mail_storage maildir_storage = {
 	.event_category = &event_category_maildir,
 
 	.v = {
-                maildir_get_setting_parser_info,
 		maildir_storage_alloc,
 		maildir_storage_create,
-		index_storage_destroy,
+		maildir_storage_destroy,
 		maildir_storage_add_list,
 		maildir_storage_get_list_settings,
 		maildir_storage_autodetect,

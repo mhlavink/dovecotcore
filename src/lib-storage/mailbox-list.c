@@ -13,6 +13,7 @@
 #include "home-expand.h"
 #include "time-util.h"
 #include "unichar.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "iostream-ssl.h"
 #include "fs-api-private.h"
@@ -141,6 +142,8 @@ int mailbox_list_create(const char *driver, struct mail_namespace *ns,
 	list = class->v.alloc();
 	array_create(&list->module_contexts, list->pool, sizeof(void *), 5);
 
+	list->event = event_create(ns->user->event);
+	event_add_str(list->event, "namespace", ns->set->name);
 	list->ns = ns;
 	list->mail_set = ns->mail_set;
 	list->flags = flags;
@@ -209,7 +212,7 @@ int mailbox_list_create(const char *driver, struct mail_namespace *ns,
 		}
 	}
 
-	e_debug(ns->user->event,
+	e_debug(list->event,
 		"%s: root=%s, index=%s, indexpvt=%s, control=%s, inbox=%s, alt=%s",
 		list->name,
 		list->set.root_dir == NULL ? "" : list->set.root_dir,
@@ -820,7 +823,10 @@ void mailbox_list_destroy(struct mailbox_list **_list)
 		i_assert(array_count(&list->error_stack) == 0);
 		array_free(&list->error_stack);
 	}
+
+	struct event *event = list->event;
 	list->v.deinit(list);
+	event_unref(&event);
 }
 
 const char *mailbox_list_get_driver_name(const struct mailbox_list *list)
@@ -843,6 +849,12 @@ struct mail_namespace *
 mailbox_list_get_namespace(const struct mailbox_list *list)
 {
 	return list->ns;
+}
+
+struct event *
+mailbox_list_get_event(const struct mailbox_list *list)
+{
+	return list->event;
 }
 
 static mode_t get_dir_mode(mode_t mode)
@@ -893,14 +905,27 @@ int mailbox_list_default_get_storage(struct mailbox_list **list,
 				     struct mail_storage **storage_r)
 {
 	const struct mailbox_settings *set;
-
-	set = mailbox_settings_find((*list)->ns, *vname);
-	if (set != NULL && set->driver != NULL && set->driver[0] != '\0') {
-		return mailbox_list_get_storage_driver(*list, set->driver,
-						       storage_r);
+	const char *error;
+	struct event *event =
+		mail_storage_mailbox_create_event((*list)->event, *list, *vname);
+	if (settings_get(event, &mailbox_setting_parser_info, 0,
+			 &set, &error) < 0) {
+		mailbox_list_set_critical(*list, "%s", error);
+		event_unref(&event);
+		return -1;
 	}
-	*storage_r = mail_namespace_get_default_storage((*list)->ns);
-	return 0;
+
+	int ret;
+	if (set->driver != NULL && set->driver[0] != '\0') {
+		ret = mailbox_list_get_storage_driver(*list, set->driver,
+						      storage_r);
+	} else {
+		*storage_r = mail_namespace_get_default_storage((*list)->ns);
+		ret = 0;
+	}
+	event_unref(&event);
+	settings_free(set);
+	return ret;
 }
 
 int mailbox_list_get_storage(struct mailbox_list **list, const char **vname,
@@ -939,7 +964,7 @@ mailbox_list_get_permissions_stat(struct mailbox_list *list, const char *path,
 			mailbox_list_set_critical(list, "stat(%s) failed: %m",
 						  path);
 		} else {
-			e_debug(list->ns->user->event,
+			e_debug(list->event,
 				"Namespace %s: %s doesn't exist yet, "
 				"using default permissions",
 				list->ns->prefix, path);
@@ -1058,7 +1083,7 @@ mailbox_list_get_permissions_internal(struct mailbox_list *list,
 	}
 
 	if (name == NULL) {
-		e_debug(list->ns->user->event,
+		e_debug(list->event,
 			"Namespace %s: Using permissions from %s: "
 			"mode=0%o gid=%s", list->ns->prefix,
 			path != NULL ? path : "",
@@ -1655,7 +1680,7 @@ static bool mailbox_list_init_changelog(struct mailbox_list *list)
 		return FALSE;
 
 	path = t_strconcat(path, "/"MAILBOX_LOG_FILE_NAME, NULL);
-	list->changelog = mailbox_log_alloc(list->ns->user->event, path);
+	list->changelog = mailbox_log_alloc(list->event, path);
 
 	mailbox_list_get_root_permissions(list, &perm);
 	mailbox_log_set_permissions(list->changelog, perm.file_create_mode,
@@ -1836,7 +1861,7 @@ int mailbox_list_dirent_is_alias_symlink(struct mailbox_list *list,
 		} else if (!S_ISLNK(st.st_mode)) {
 			ret = 0;
 		} else if (t_readlink(path, &linkpath, &error) < 0) {
-			e_error(list->ns->user->event,
+			e_error(list->event,
 				"t_readlink(%s) failed: %s", path, error);
 			ret = -1;
 		} else {
@@ -1995,7 +2020,7 @@ void mailbox_list_set_critical(struct mailbox_list *list, const char *fmt, ...)
 	list->last_internal_error = i_strdup_vprintf(fmt, va);
 	va_end(va);
 	list->last_error_is_internal = TRUE;
-	e_error(list->ns->user->event, "%s", list->last_internal_error);
+	e_error(list->event, "%s", list->last_internal_error);
 
 	/* free the old_error and old_internal_error only after the new error
 	   is generated, because they may be one of the parameters. */

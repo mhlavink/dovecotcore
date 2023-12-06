@@ -181,7 +181,6 @@ fts_backend_solr_init(struct fts_backend *_backend, const char **error_r)
 {
 	struct solr_fts_backend *backend = (struct solr_fts_backend *)_backend;
 	struct fts_solr_user *fuser = FTS_SOLR_USER_CONTEXT(_backend->ns->user);
-	struct ssl_iostream_settings ssl_set;
 
 	if (fuser == NULL) {
 		*error_r = "Invalid fts_solr setting";
@@ -193,8 +192,8 @@ fts_backend_solr_init(struct fts_backend *_backend, const char **error_r)
 		_backend->flags |= FTS_BACKEND_FLAG_TOKENIZED_INPUT;
 	}
 
-	mail_user_init_ssl_client_settings(_backend->ns->user, &ssl_set);
-	return solr_connection_init(&fuser->set, &ssl_set, _backend->event,
+	return solr_connection_init(&fuser->set, _backend->ns->user->ssl_set,
+				    _backend->event,
 				    &backend->solr_conn, error_r);
 }
 
@@ -872,7 +871,7 @@ solr_search_multi(struct fts_backend *_backend, string_t *str,
 		  struct mailbox *const boxes[], enum fts_lookup_flags flags,
 		  struct fts_multi_result *result)
 {
-	struct event *event = _backend->ns->user->event;
+	struct event *event = _backend->ns->list->event;
 	struct solr_fts_backend *backend = (struct solr_fts_backend *)_backend;
 	struct solr_result **solr_results;
 	struct fts_result *fts_result;

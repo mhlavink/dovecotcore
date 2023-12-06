@@ -6,6 +6,7 @@
 #include "ostream.h"
 #include "connection.h"
 #include "restrict-access.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
@@ -39,8 +40,7 @@ static struct event_category event_category_quota_status = {
 	.name = "quota-status"
 };
 
-static struct quota_status_settings *quota_status_settings;
-static pool_t quota_status_pool;
+static const struct quota_status_settings *quota_status_settings;
 static enum quota_protocol protocol;
 static struct mail_storage_service_ctx *storage_service;
 static struct connection_list *clients;
@@ -279,23 +279,23 @@ static const struct connection_vfuncs client_vfuncs = {
 
 static void main_preinit(void)
 {
+	const char *error;
+
+	if (master_service_settings_read_simple(master_service, &error) < 0)
+		i_fatal("%s", error);
+
 	restrict_access_by_env(RESTRICT_ACCESS_FLAG_ALLOW_ROOT, NULL);
 	restrict_access_allow_coredumps(TRUE);
 }
 
 static void main_init(void)
 {
-	static const struct setting_parser_info *set_roots[] = {
-		&quota_status_setting_parser_info,
-		NULL
-	};
 	struct mail_storage_service_input input;
-	struct setting_parser_context *set_parser;
-	const struct mail_user_settings *user_set;
+	const struct mail_storage_settings *mail_set;
 	const char *value, *error;
 
 	clients = connection_list_init(&client_set, &client_vfuncs);
-	storage_service = mail_storage_service_init(master_service, set_roots,
+	storage_service = mail_storage_service_init(master_service,
 		MAIL_STORAGE_SERVICE_FLAG_ALLOW_ROOT |
 		MAIL_STORAGE_SERVICE_FLAG_USERDB_LOOKUP |
 		MAIL_STORAGE_SERVICE_FLAG_TEMP_PRIV_DROP |
@@ -306,25 +306,23 @@ static void main_init(void)
 	input.service = "quota-status";
 	input.username = "";
 
-	quota_status_pool = pool_alloconly_create("quota status settings", 512);
-	if (mail_storage_service_read_settings(storage_service, &input,
-					       &set_parser,
-					       &error) < 0)
+	if (settings_get(master_service_get_event(master_service),
+			 &mail_storage_setting_parser_info,
+			 SETTINGS_GET_FLAG_NO_EXPAND, &mail_set, &error) < 0)
 		i_fatal("%s", error);
-	user_set = settings_parser_get_root_set(set_parser,
-			&mail_user_setting_parser_info);
-	quota_status_settings = master_service_settings_get_root_set_dup(
-		master_service, &quota_status_setting_parser_info,
-		quota_status_pool);
+	quota_status_settings = settings_get_or_fatal(
+		master_service_get_event(master_service),
+		&quota_status_setting_parser_info);
 
-	value = mail_user_set_plugin_getenv(user_set, "quota_status_nouser");
-	nouser_reply = p_strdup(quota_status_pool,
-				value != NULL ? value : "REJECT Unknown user");
+	value = mail_user_set_plugin_getenv(mail_set, "quota_status_nouser");
+	nouser_reply = i_strdup(value != NULL ? value : "REJECT Unknown user");
+	settings_free(mail_set);
 }
 
 static void main_deinit(void)
 {
-	pool_unref(&quota_status_pool);
+	settings_free(quota_status_settings);
+	i_free(nouser_reply);
 	connection_list_deinit(&clients);
 	mail_storage_service_deinit(&storage_service);
 }

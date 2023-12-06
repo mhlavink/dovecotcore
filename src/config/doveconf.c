@@ -29,7 +29,6 @@
 
 struct prefix_stack {
 	unsigned int prefix_idx;
-	unsigned int str_pos;
 };
 ARRAY_DEFINE_TYPE(prefix_stack, struct prefix_stack);
 
@@ -37,15 +36,14 @@ struct config_dump_human_context {
 	pool_t pool;
 	string_t *list_prefix;
 	ARRAY_TYPE(const_string) strings;
-	ARRAY_TYPE(const_string) errors;
 	struct config_export_context *export_ctx;
 
 	bool list_prefix_sent:1;
 };
 
 #define LIST_KEY_PREFIX "\001"
-#define UNIQUE_KEY_SUFFIX "\xff"
 
+static struct config_parsed *config;
 static const char *indent_str = "                              !!!!";
 
 static const char *const secrets[] = {
@@ -60,29 +58,20 @@ static const char *const secrets[] = {
 
 
 static void
-config_request_get_strings(const char *key, const char *value,
-			   enum config_key_type type, void *context)
+config_request_get_strings(const struct config_export_setting *set,
+			   struct config_dump_human_context *ctx)
 {
-	struct config_dump_human_context *ctx = context;
-	const char *p;
+	const char *value;
 
-	switch (type) {
+	switch (set->type) {
 	case CONFIG_KEY_NORMAL:
-		value = p_strdup_printf(ctx->pool, "%s=%s", key, value);
+		value = p_strdup_printf(ctx->pool, "%s=%s", set->key, set->value);
 		break;
 	case CONFIG_KEY_LIST:
 		value = p_strdup_printf(ctx->pool, LIST_KEY_PREFIX"%s=%s",
-					key, value);
+					set->key, set->value);
 		break;
-	case CONFIG_KEY_UNIQUE_KEY:
-		p = strrchr(key, '/');
-		i_assert(p != NULL);
-		value = p_strdup_printf(ctx->pool, "%.*s/"UNIQUE_KEY_SUFFIX"%s=%s",
-					(int)(p - key), key, p + 1, value);
-		break;
-	case CONFIG_KEY_ERROR:
-		value = p_strdup(ctx->pool, value);
-		array_push_back(&ctx->errors, &value);
+	case CONFIG_KEY_FILTER_ARRAY:
 		return;
 	}
 	array_push_back(&ctx->strings, &value);
@@ -104,7 +93,7 @@ static int config_string_cmp(const char *const *p1, const char *const *p2)
 	if (s2[i] == '=')
 		return 1;
 
-	return s1[i] - s2[i];
+	return (signed char)s1[i] - (signed char)s2[i];
 }
 
 static struct prefix_stack prefix_stack_pop(ARRAY_TYPE(prefix_stack) *stack)
@@ -120,21 +109,12 @@ static struct prefix_stack prefix_stack_pop(ARRAY_TYPE(prefix_stack) *stack)
 	} else {
 		sc.prefix_idx = s[count-2].prefix_idx;
 	}
-	sc.str_pos = s[count-1].str_pos;
 	array_delete(stack, count-1, 1);
 	return sc;
 }
 
-static void prefix_stack_reset_str(ARRAY_TYPE(prefix_stack) *stack)
-{
-	struct prefix_stack *s;
-
-	array_foreach_modifiable(stack, s)
-		s->str_pos = UINT_MAX;
-}
-
 static struct config_dump_human_context *
-config_dump_human_init(enum config_dump_scope scope, bool check_settings)
+config_dump_human_init(enum config_dump_scope scope)
 {
 	struct config_dump_human_context *ctx;
 	enum config_dump_flags flags;
@@ -145,12 +125,8 @@ config_dump_human_init(enum config_dump_scope scope, bool check_settings)
 	ctx->pool = pool;
 	ctx->list_prefix = str_new(ctx->pool, 128);
 	i_array_init(&ctx->strings, 256);
-	i_array_init(&ctx->errors, 256);
 
-	flags = CONFIG_DUMP_FLAG_HIDE_LIST_DEFAULTS |
-		CONFIG_DUMP_FLAG_CALLBACK_ERRORS;
-	if (check_settings)
-		flags |= CONFIG_DUMP_FLAG_CHECK_SETTINGS;
+	flags = CONFIG_DUMP_FLAG_DEDUPLICATE_KEYS;
 	ctx->export_ctx = config_export_init(scope, flags,
 					     config_request_get_strings, ctx);
 	return ctx;
@@ -159,7 +135,6 @@ config_dump_human_init(enum config_dump_scope scope, bool check_settings)
 static void config_dump_human_deinit(struct config_dump_human_context *ctx)
 {
 	array_free(&ctx->strings);
-	array_free(&ctx->errors);
 	pool_unref(&ctx->pool);
 }
 
@@ -319,27 +294,30 @@ hide_secrets_from_value(struct ostream *output, const char *key,
 	return ret;
 }
 
-static int ATTR_NULL(4)
+static void ATTR_NULL(4)
 config_dump_human_output(struct config_dump_human_context *ctx,
 			 struct ostream *output, unsigned int indent,
-			 const char *setting_name_filter, bool hide_passwords)
+			 const char *setting_name_filter,
+			 const char *alt_setting_name_filter,
+			 bool hide_key, bool default_hide_passwords,
+			 const char *strip_prefix)
 {
 	ARRAY_TYPE(const_string) prefixes_arr;
 	ARRAY_TYPE(prefix_stack) prefix_stack;
 	struct prefix_stack prefix;
-	const char *const *strings, *const *args, *p, *str, *const *prefixes;
+	const char *const *strings, *p, *str, *const *prefixes;
 	const char *key, *key2, *value;
 	unsigned int i, j, count, prefix_count;
 	unsigned int prefix_idx = UINT_MAX;
 	size_t len, skip_len, setting_name_filter_len;
-	unsigned int section_idx = 0;
-	bool unique_key;
-	int ret = 0;
+	size_t alt_setting_name_filter_len;
 
 	setting_name_filter_len = setting_name_filter == NULL ? 0 :
 		strlen(setting_name_filter);
-	if (config_export_finish(&ctx->export_ctx, &section_idx) < 0)
-		return -1;
+	alt_setting_name_filter_len = alt_setting_name_filter == NULL ? 0 :
+		strlen(alt_setting_name_filter);
+	if (config_export_all_parsers(&ctx->export_ctx) < 0)
+		i_unreached(); /* settings aren't checked - this can't happen */
 
 	array_sort(&ctx->strings, config_string_cmp);
 	strings = array_get(&ctx->strings, &count);
@@ -348,21 +326,11 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 	p_array_init(&prefixes_arr, ctx->pool, 32);
 	for (i = 0; i < count && strings[i][0] == LIST_KEY_PREFIX[0]; i++) T_BEGIN {
 		p = strchr(strings[i], '=');
-		i_assert(p != NULL);
-		if (p[1] == '\0') {
-			/* "strlist=" */
-			str = p_strdup_printf(ctx->pool, "%s/",
-					      t_strcut(strings[i]+1, '='));
-			array_push_back(&prefixes_arr, &str);
-		} else {
-			/* string is in format: "list=0 1 2" */
-			for (args = t_strsplit(p + 1, " "); *args != NULL; args++) {
-				str = p_strdup_printf(ctx->pool, "%s/%s/",
-						      t_strcut(strings[i]+1, '='),
-						      *args);
-				array_push_back(&prefixes_arr, &str);
-			}
-		}
+		i_assert(p != NULL && p[1] == '\0');
+		/* "strlist=" */
+		str = p_strdup_printf(ctx->pool, "%s/",
+				      t_strcut(strings[i]+1, '='));
+		array_push_back(&prefixes_arr, &str);
 	} T_END;
 	prefixes = array_get(&prefixes_arr, &prefix_count);
 
@@ -372,20 +340,28 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 		i_assert(value != NULL);
 
 		key = t_strdup_until(strings[i], value++);
-		unique_key = FALSE;
 
-		p = strrchr(key, '/');
-		if (p != NULL && p[1] == UNIQUE_KEY_SUFFIX[0]) {
-			key = t_strconcat(t_strdup_until(key, p + 1),
-					  p + 2, NULL);
-			unique_key = TRUE;
-		}
+		bool hide_passwords = default_hide_passwords;
 		if (setting_name_filter_len > 0) {
-			/* see if this setting matches the name filter */
-			if (!(strncmp(setting_name_filter, key,
-				      setting_name_filter_len) == 0 &&
-			      (key[setting_name_filter_len] == '/' ||
-			       key[setting_name_filter_len] == '\0')))
+			/* See if this setting matches the name filter.
+			   If we're asking for a full specific setting,
+			   don't hide passwords. */
+			if (strncmp(setting_name_filter, key,
+				    setting_name_filter_len) == 0 &&
+			    (key[setting_name_filter_len] == '/' ||
+			     key[setting_name_filter_len] == '\0')) {
+				/* match */
+				if (key[setting_name_filter_len] == '\0')
+					hide_passwords = FALSE;
+			} else if (alt_setting_name_filter_len > 0 &&
+				   (strncmp(alt_setting_name_filter, key,
+					    alt_setting_name_filter_len) == 0 &&
+				    (key[alt_setting_name_filter_len] == '/' ||
+				     key[alt_setting_name_filter_len] == '\0'))) {
+				/* alt match */
+				if (key[alt_setting_name_filter_len] == '\0')
+					hide_passwords = FALSE;
+			} else
 				goto end;
 		}
 	again:
@@ -397,9 +373,7 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 			if (strncmp(prefixes[prefix_idx], key, len) != 0) {
 				prefix = prefix_stack_pop(&prefix_stack);
 				indent--;
-				if (prefix.str_pos != UINT_MAX)
-					str_truncate(ctx->list_prefix, prefix.str_pos);
-				else {
+				if (!hide_key) {
 					o_stream_nsend(output, indent_str, indent*2);
 					o_stream_nsend_str(output, "}\n");
 				}
@@ -416,8 +390,6 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 			if (strncmp(prefixes[j], key, len) == 0) {
 				key2 = key + (prefix_idx == UINT_MAX ? 0 :
 					      strlen(prefixes[prefix_idx]));
-				prefix.str_pos = !unique_key ? UINT_MAX :
-					str_len(ctx->list_prefix);
 				prefix_idx = j;
 				prefix.prefix_idx = prefix_idx;
 				array_push_back(&prefix_stack, &prefix);
@@ -428,38 +400,39 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 					str_append_data(ctx->list_prefix, key2, p - key2);
 				else
 					str_append(ctx->list_prefix, key2);
-				if (unique_key && *value != '\0') {
-					if (strchr(value, ' ') == NULL)
-						str_printfa(ctx->list_prefix, " %s", value);
-					else
-						str_printfa(ctx->list_prefix, " \"%s\"", str_escape(value));
-				}
 				str_append(ctx->list_prefix, " {\n");
 				indent++;
 
-				if (unique_key)
-					goto end;
-				else
-					goto again;
+				goto again;
 			}
 		}
-		o_stream_nsend(output, str_data(ctx->list_prefix), str_len(ctx->list_prefix));
+		if (!hide_key) {
+			o_stream_nsend(output, str_data(ctx->list_prefix),
+				       str_len(ctx->list_prefix));
+		}
 		str_truncate(ctx->list_prefix, 0);
-		prefix_stack_reset_str(&prefix_stack);
 		ctx->list_prefix_sent = TRUE;
 
 		skip_len = prefix_idx == UINT_MAX ? 0 : strlen(prefixes[prefix_idx]);
 		i_assert(skip_len == 0 ||
 			 strncmp(prefixes[prefix_idx], strings[i], skip_len) == 0);
-		o_stream_nsend(output, indent_str, indent*2);
+		if (!hide_key)
+			o_stream_nsend(output, indent_str, indent*2);
 		key = strings[i] + skip_len;
-		if (unique_key) key++;
+		const char *full_key = key;
+		if (strip_prefix != NULL && str_begins(key, strip_prefix, &key))
+			key++;
 		value = strchr(key, '=');
 		i_assert(value != NULL);
-		o_stream_nsend(output, key, value-key);
-		o_stream_nsend_str(output, " = ");
+		if (!hide_key) {
+			o_stream_nsend(output, key, value-key);
+			o_stream_nsend_str(output, " = ");
+		} else {
+			if (output->offset != 0)
+				i_fatal("Multiple settings matched with -h parameter");
+		}
 		if (hide_passwords &&
-		    hide_secrets_from_value(output, key, value+1))
+		    hide_secrets_from_value(output, full_key, value+1))
 			/* sent */
 			;
 		else if (!value_need_quote(value+1))
@@ -475,30 +448,56 @@ config_dump_human_output(struct config_dump_human_context *ctx,
 
 	while (prefix_idx != UINT_MAX) {
 		prefix = prefix_stack_pop(&prefix_stack);
-		if (prefix.str_pos != UINT_MAX)
-			break;
 		prefix_idx = prefix.prefix_idx;
 		indent--;
-		o_stream_nsend(output, indent_str, indent*2);
-		o_stream_nsend_str(output, "}\n");
+		if (!hide_key) {
+			o_stream_nsend(output, indent_str, indent*2);
+			o_stream_nsend_str(output, "}\n");
+		}
 	}
+}
 
-	/* flush output before writing errors */
-	o_stream_uncork(output);
-	array_foreach_elem(&ctx->errors, str) {
-		i_error("%s", str);
-		ret = -1;
+static const char *filter_name_escaped(const char *name)
+{
+	name = settings_section_unescape(name);
+	if (name[0] == '\0')
+		return "\"\"";
+	if (strpbrk(name, " \"{=<'$") == NULL)
+		return name;
+
+	string_t *dest = t_str_new(64);
+	str_append_c(dest, '"');
+	str_append_escaped(dest, name, strlen(name));
+	str_append_c(dest, '"');
+	return str_c(dest);
+}
+
+static void
+config_dump_named_filters(string_t *str, unsigned int *indent,
+			  const struct config_filter *filter)
+{
+	if (filter->filter_name == NULL)
+		return;
+
+	const char *p = strchr(filter->filter_name, '/');
+	str_append_max(str, indent_str, (*indent) * 2);
+	if (p == NULL)
+		str_printfa(str, "%s {\n", filter->filter_name);
+	else {
+		/* SET_FILTER_ARRAY */
+		str_printfa(str, "%s %s {\n",
+			    t_strdup_until(filter->filter_name, p),
+			    filter_name_escaped(p+1));
 	}
-	return ret;
+	*indent += 1;
 }
 
 static unsigned int
-config_dump_filter_begin(string_t *str,
+config_dump_filter_begin(string_t *str, unsigned int indent,
 			 const struct config_filter *filter)
 {
-	unsigned int indent = 0;
-
 	if (filter->local_bits > 0) {
+		str_append_max(str, indent_str, indent*2);
 		str_printfa(str, "local %s", net_ip2addr(&filter->local_net));
 
 		if (IPADDR_IS_V4(&filter->local_net)) {
@@ -537,188 +536,167 @@ config_dump_filter_begin(string_t *str,
 		str_printfa(str, "protocol %s {\n", filter->service);
 		indent++;
 	}
+	config_dump_named_filters(str, &indent, filter);
 	return indent;
 }
 
 static void
-config_dump_filter_end(struct ostream *output, unsigned int indent)
+config_dump_filter_end(struct ostream *output, unsigned int indent,
+		       unsigned int parent_indent)
 {
-	while (indent > 0) {
+	while (indent > parent_indent) {
 		indent--;
 		o_stream_nsend(output, indent_str, indent*2);
 		o_stream_nsend(output, "}\n", 2);
 	}
 }
 
-static int
-config_dump_human_sections(struct ostream *output,
-			   const struct config_filter *filter,
-			   bool hide_passwords)
+static void
+config_dump_human_filter_path(enum config_dump_scope scope,
+			      const char *const *set_filter_path,
+			      struct config_filter_parser *filter_parser,
+			      struct ostream *output, unsigned int indent,
+			      string_t *list_prefix, bool *list_prefix_sent,
+			      bool hide_key, bool hide_passwords)
 {
-	struct config_filter_parser *const *filters;
-	static struct config_dump_human_context *ctx;
-	unsigned int indent;
-	int ret = 0;
+	for (; filter_parser != NULL; filter_parser = filter_parser->next) {
+		const char *suffix, *set_name_filter = NULL;
+		const char *const *sub_filter_path = set_filter_path;
 
-	filters = config_filter_find_subset(config_filter, filter);
+		if (set_filter_path[0] == NULL) {
+			/* show everything */
+		} else if (filter_parser->filter.filter_name == NULL) {
+			/* not a named filter / array - can't match */
+			continue;
+		} else if (!str_begins(filter_parser->filter.filter_name,
+				       set_filter_path[0], &suffix)) {
+			/* filter name doesn't match the path prefix at all. */
+			continue;
+		} else if (suffix[0] == '\0') {
+			/* filter name match (e.g. "mail_attribute_dict") */
+			set_name_filter = set_filter_path[1];
+			sub_filter_path++;
+		} else if (suffix[0] != '/') {
+			/* filter name doesn't match the path */
+		} else if (set_filter_path[1] == NULL) {
+			/* filter array name prefix match (e.g. "service") */
+			sub_filter_path++;
+		} else if (strcmp(suffix+1, set_filter_path[1]) == 0) {
+			/* filter array match */
+			sub_filter_path += 2;
 
-	/* first filter should be the global one */
-	i_assert(filters[0] != NULL && filters[0]->filter.service == NULL);
-	filters++;
+			if (sub_filter_path[0] == NULL) {
+				/* Show all settings under this section */
+			} else if (sub_filter_path[1] == NULL) {
+				/* One more string in the path - it could be
+				   either a filter or a setting name.
+				   Check both. */
+				set_name_filter = sub_filter_path[0];
+			} else {
+				/* There is at least one more '/' in the path.
+				   It could be either another filter, or it
+				   could be e.g. "plugin/key". */
+				set_name_filter = t_strarray_join(sub_filter_path, "/");
+			}
+		} else {
+			continue;
+		}
 
-	for (; *filters != NULL; filters++) {
-		ctx = config_dump_human_init(CONFIG_DUMP_SCOPE_SET, FALSE);
-		indent = config_dump_filter_begin(ctx->list_prefix,
-						  &(*filters)->filter);
-		config_export_parsers(ctx->export_ctx, (*filters)->parsers);
-		if (config_dump_human_output(ctx, output, indent, NULL, hide_passwords) < 0)
-			ret = -1;
-		if (ctx->list_prefix_sent)
-			config_dump_filter_end(output, indent);
+		struct config_dump_human_context *ctx;
+		unsigned int sub_indent;
+		size_t parent_list_prefix_len = str_len(list_prefix);
+		/* If we're asking for a specific setting, don't hide
+		   passwords. */
+		bool sub_hide_passwords = set_name_filter != NULL ?
+			FALSE : hide_passwords;
+
+		ctx = config_dump_human_init(scope);
+		sub_indent = hide_key ? 0 :
+			config_dump_filter_begin(list_prefix, indent,
+						 &filter_parser->filter);
+		config_export_set_module_parsers(ctx->export_ctx,
+						 filter_parser->module_parsers);
+		str_append_str(ctx->list_prefix, list_prefix);
+		const char *filter_key =
+			!filter_parser->filter.filter_name_array ? NULL :
+			t_strcut(filter_parser->filter.filter_name, '/');
+
+		const char *alt_set_name_filter =
+			set_name_filter != NULL && filter_key != NULL ?
+			t_strdup_printf("%s_%s", filter_key, set_name_filter) :
+			NULL;
+		config_dump_human_output(ctx, output, sub_indent,
+					 set_name_filter,
+					 alt_set_name_filter, hide_key,
+					 sub_hide_passwords, filter_key);
+
+		bool sub_list_prefix_sent = ctx->list_prefix_sent;
+		if (sub_list_prefix_sent) {
+			*list_prefix_sent = TRUE;
+			str_truncate(list_prefix, 0);
+		}
 		config_dump_human_deinit(ctx);
+
+		config_dump_human_filter_path(scope, sub_filter_path,
+			filter_parser->children_head, output, sub_indent,
+			list_prefix, &sub_list_prefix_sent,
+			hide_key, hide_passwords);
+		if (sub_list_prefix_sent) {
+			*list_prefix_sent = TRUE;
+			config_dump_filter_end(output, sub_indent, indent);
+		}
+		str_truncate(list_prefix, parent_list_prefix_len);
 	}
-	return ret;
 }
 
-static int ATTR_NULL(4)
-config_dump_human(const struct config_filter *filter,
-		  enum config_dump_scope scope, const char *setting_name_filter,
-		  bool hide_passwords)
+static int
+config_dump_human(enum config_dump_scope scope,
+		  const char *setting_name_filter,
+		  bool hide_key, bool hide_passwords)
 {
-	static struct config_dump_human_context *ctx;
+	struct config_filter_parser *filter_parser;
+	struct config_dump_human_context *ctx;
 	struct ostream *output;
-	int ret;
+	const char *str;
+	int ret = 0;
 
 	output = o_stream_create_fd(STDOUT_FILENO, 0);
 	o_stream_set_no_error_handling(output, TRUE);
 	o_stream_cork(output);
 
-	ctx = config_dump_human_init(scope, TRUE);
-	config_export_by_filter(ctx->export_ctx, filter);
-	ret = config_dump_human_output(ctx, output, 0, setting_name_filter, hide_passwords);
+	filter_parser = config_parsed_get_global_filter_parser(config);
+
+	/* Check for the setting always even with a filter - it might be
+	   e.g. plugin/key strlist */
+	ctx = config_dump_human_init(scope);
+	config_export_set_module_parsers(ctx->export_ctx,
+					 filter_parser->module_parsers);
+	config_dump_human_output(ctx, output, 0, setting_name_filter, NULL,
+				 hide_key, hide_passwords, NULL);
 	config_dump_human_deinit(ctx);
 
-	if (setting_name_filter == NULL)
-		ret = config_dump_human_sections(output, filter, hide_passwords);
+	string_t *list_prefix = t_str_new(128);
+	bool list_prefix_sent = FALSE;
+	const char *const *set_filter_path =
+		setting_name_filter == NULL ? empty_str_array :
+		t_strsplit(setting_name_filter, "/");
+	if (scope == CONFIG_DUMP_SCOPE_CHANGED)
+		scope = CONFIG_DUMP_SCOPE_SET;
+	else
+		scope = CONFIG_DUMP_SCOPE_SET_AND_DEFAULT_OVERRIDES;
+	config_dump_human_filter_path(scope, set_filter_path,
+				      filter_parser->children_head, output, 0,
+				      list_prefix, &list_prefix_sent,
+				      hide_key, hide_passwords);
 
+	/* flush output before writing errors */
 	o_stream_uncork(output);
+	array_foreach_elem(config_parsed_get_errors(config), str) {
+		i_error("%s", str);
+		ret = -1;
+	}
 	o_stream_destroy(&output);
 	return ret;
-}
-
-static int
-config_dump_one(const struct config_filter *filter, bool hide_key,
-		enum config_dump_scope scope, const char *setting_name_filter,
-		bool hide_passwords)
-{
-	static struct config_dump_human_context *ctx;
-	const char *str;
-	size_t len;
-	unsigned int section_idx = 0;
-	bool dump_section = FALSE;
-
-	ctx = config_dump_human_init(scope, FALSE);
-	config_export_by_filter(ctx->export_ctx, filter);
-	if (config_export_finish(&ctx->export_ctx, &section_idx) < 0)
-		return -1;
-
-	len = strlen(setting_name_filter);
-	array_foreach_elem(&ctx->strings, str) {
-		if (strncmp(str, setting_name_filter, len) != 0)
-			continue;
-
-		if (str[len] == '=') {
-			if (hide_key)
-				printf("%s\n", str + len+1);
-			else {
-				printf("%s = %s\n", setting_name_filter,
-				       str + len+1);
-			}
-			dump_section = FALSE;
-			break;
-		} else if (str[len] == '/') {
-			dump_section = TRUE;
-		}
-	}
-	config_dump_human_deinit(ctx);
-
-	if (dump_section)
-		(void)config_dump_human(filter, scope, setting_name_filter, hide_passwords);
-	return 0;
-}
-
-static void config_request_simple_stdout(const char *key, const char *value,
-					 enum config_key_type type ATTR_UNUSED,
-					 void *context)
-{
-	char **setting_name_filters = context;
-	unsigned int i;
-	size_t filter_len;
-
-	if (setting_name_filters == NULL) {
-		printf("%s=%s\n", key, value);
-		return;
-	}
-
-	for (i = 0; setting_name_filters[i] != NULL; i++) {
-		filter_len = strlen(setting_name_filters[i]);
-		if (strncmp(setting_name_filters[i], key, filter_len) == 0 &&
-		    (key[filter_len] == '\0' || key[filter_len] == '/'))
-			printf("%s=%s\n", key, value);
-	}
-}
-
-static const char *get_setting(const char *module, const char *name)
-{
-	struct config_module_parser *l;
-	const struct setting_define *def;
-	const char *const *value;
-	const void *set;
-
-	for (l = config_module_parsers; l->root != NULL; l++) {
-		if (strcmp(l->root->module_name, module) != 0)
-			continue;
-
-		set = settings_parser_get(l->parser);
-		for (def = l->root->defines; def->key != NULL; def++) {
-			if (strcmp(def->key, name) == 0) {
-				value = CONST_PTR_OFFSET(set, def->offset);
-				return *value;
-			}
-		}
-	}
-	return "";
-}
-
-static void filter_parse_arg(struct config_filter *filter, const char *arg)
-{
-	const char *key, *value, *error;
-
-	value = strchr(arg, '=');
-	if (value != NULL)
-		key = t_strdup_until(arg, value++);
-	else {
-		key = arg;
-		value = "";
-	}
-
-	if (strcmp(key, "service") == 0)
-		filter->service = value;
-	else if (strcmp(key, "protocol") == 0)
-		filter->service = value;
-	else if (strcmp(key, "lname") == 0)
-		filter->local_name = value;
-	else if (strcmp(key, "local") == 0) {
-		if (config_parse_net(value, &filter->local_net,
-				     &filter->local_bits, &error) < 0)
-			i_fatal("local filter: %s", error);
-	} else if (strcmp(key, "remote") == 0) {
-		if (config_parse_net(value, &filter->remote_net,
-				     &filter->remote_bits, &error) < 0)
-			i_fatal("remote filter: %s", error);
-	} else {
-		i_fatal("Unknown filter argument: %s", arg);
-	}
 }
 
 struct hostname_format {
@@ -829,7 +807,9 @@ static void check_wrong_config(const char *config_path)
 {
 	const char *base_dir, *symlink_path, *prev_path, *error;
 
-	base_dir = get_setting("master", "base_dir");
+	base_dir = config_module_parsers_get_setting(
+			config_parsed_get_module_parsers(config),
+			"master_service", "base_dir");
 	symlink_path = t_strconcat(base_dir, "/"PACKAGE".conf", NULL);
 	if (t_readlink(symlink_path, &prev_path, &error) < 0) {
 		if (errno != ENOENT)
@@ -858,25 +838,23 @@ int main(int argc, char *argv[])
 		MASTER_SERVICE_FLAG_NO_INIT_DATASTACK_FRAME;
 	enum config_dump_scope scope = CONFIG_DUMP_SCOPE_ALL_WITHOUT_HIDDEN;
 	const char *orig_config_path, *config_path;
-	struct config_filter filter;
 	const char *import_environment, *error;
 	char **exec_args = NULL, **setting_name_filters = NULL;
 	unsigned int i;
 	int c, ret, ret2;
 	bool config_path_specified, expand_vars = FALSE, hide_key = FALSE;
-	bool simple_output = FALSE;
+	bool simple_output = FALSE, check_full_config = FALSE;
+	bool hide_obsolete_warnings = FALSE;
 	bool dump_defaults = FALSE, host_verify = FALSE, dump_full = FALSE;
 	bool print_plugin_banner = FALSE, hide_passwords = TRUE;
-	bool disable_check_settings = FALSE;
 
 	if (getenv("USE_SYSEXITS") != NULL) {
 		/* we're coming from (e.g.) LDA */
 		i_set_failure_exit_callback(failure_exit_callback);
 	}
 
-	i_zero(&filter);
 	master_service = master_service_init("config", master_service_flags,
-					     &argc, &argv, "adEf:FhHm:nNpPexsS");
+					     &argc, &argv, "aCdFhHm:nNpPwxs");
 	orig_config_path = t_strdup(master_service_get_config_path(master_service));
 
 	i_set_failure_prefix("doveconf: ");
@@ -884,14 +862,11 @@ int main(int argc, char *argv[])
 		switch (c) {
 		case 'a':
 			break;
+		case 'C':
+			check_full_config = TRUE;
+			break;
 		case 'd':
 			dump_defaults = TRUE;
-			break;
-		case 'E':
-			disable_check_settings = TRUE;
-			break;
-		case 'f':
-			filter_parse_arg(&filter, optarg);
 			break;
 		case 'F':
 			dump_full = TRUE;
@@ -920,8 +895,8 @@ int main(int argc, char *argv[])
 		case 's':
 			scope = CONFIG_DUMP_SCOPE_ALL_WITH_HIDDEN;
 			break;
-		case 'S':
-			simple_output = TRUE;
+		case 'w':
+			hide_obsolete_warnings = TRUE;
 			break;
 		case 'x':
 			expand_vars = TRUE;
@@ -969,17 +944,15 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	enum config_parse_flags flags = 0;
+	enum config_parse_flags flags = CONFIG_PARSE_FLAG_RETURN_BROKEN_CONFIG;
 	if (expand_vars)
 		flags |= CONFIG_PARSE_FLAG_EXPAND_VALUES;
-	if (disable_check_settings)
-		flags |= CONFIG_PARSE_FLAG_HIDE_ERRORS;
-	if (null_strcmp(getenv("DOVECONF_SERVICE"), "doveadm") == 0) {
-		/* FIXME: temporary kludge - remove later */
-		flags |= CONFIG_PARSE_FLAG_SKIP_SSL_SERVER;
-	}
+	if (dump_full && exec_args != NULL && !check_full_config)
+		flags |= CONFIG_PARSE_FLAG_DELAY_ERRORS;
+	if (hide_obsolete_warnings)
+		flags |= CONFIG_PARSE_FLAG_HIDE_OBSOLETE_WARNINGS;
 	if ((ret = config_parse_file(dump_defaults ? NULL : config_path,
-				     flags, &error)) == 0 &&
+				     flags, &config, &error)) == 0 &&
 	    access(EXAMPLE_CONFIG_DIR, X_OK) == 0) {
 		i_fatal("%s (copy example configs from "EXAMPLE_CONFIG_DIR"/)",
 			error);
@@ -988,16 +961,14 @@ int main(int argc, char *argv[])
 	if ((ret == -1 && exec_args != NULL) || ret == 0 || ret == -2)
 		i_fatal("%s", error);
 
-	enum config_dump_flags dump_flags = disable_check_settings ? 0 :
-		CONFIG_DUMP_FLAG_CHECK_SETTINGS;
 	if (dump_full && exec_args == NULL) {
-		ret2 = config_dump_full(CONFIG_DUMP_FULL_DEST_STDOUT,
-					dump_flags,
-					&import_environment);
+		ret2 = config_dump_full(config,
+					CONFIG_DUMP_FULL_DEST_STDOUT,
+					0, &import_environment);
 	} else if (dump_full) {
-		int temp_fd = config_dump_full(CONFIG_DUMP_FULL_DEST_TEMPDIR,
-					       dump_flags,
-					       &import_environment);
+		int temp_fd = config_dump_full(config,
+					       CONFIG_DUMP_FULL_DEST_TEMPDIR,
+					       0, &import_environment);
 		if (getenv(DOVECOT_PRESERVE_ENVS_ENV) != NULL) {
 			/* Standalone binary is getting its configuration via
 			   doveconf. Clean the environment before calling it.
@@ -1013,16 +984,6 @@ int main(int argc, char *argv[])
 			i_fatal("execvp(%s) failed: %m", exec_args[0]);
 		}
 		ret2 = -1;
-	} else if (simple_output) {
-		struct config_export_context *ctx;
-		unsigned int section_idx = 0;
-
-		ctx = config_export_init(scope,
-					 CONFIG_DUMP_FLAG_CHECK_SETTINGS,
-					 config_request_simple_stdout,
-					 setting_name_filters);
-		config_export_by_filter(ctx, &filter);
-		ret2 = config_export_finish(&ctx, &section_idx);
 	} else if (setting_name_filters != NULL) {
 		ret2 = 0;
 		/* ignore settings-check failures in configuration. this allows
@@ -1031,14 +992,16 @@ int main(int argc, char *argv[])
 		   (temporarily) not be fully usable */
 		ret = 0;
 		for (i = 0; setting_name_filters[i] != NULL; i++) {
-			if (config_dump_one(&filter, hide_key, scope,
-					    setting_name_filters[i], hide_passwords) < 0)
-				ret2 = -1;
+			(void)config_dump_human(scope, setting_name_filters[i],
+						hide_key, hide_passwords);
 		}
 	} else {
-		const char *info;
+		const char *info, *mail_location;
 
-		info = sysinfo_get(get_setting("mail", "mail_location"));
+		mail_location = config_module_parsers_get_setting(
+			config_parsed_get_module_parsers(config),
+			"mail_storage", "mail_location");
+		info = sysinfo_get(mail_location);
 		if (*info != '\0')
 			printf("# %s\n", info);
 		printf("# Hostname: %s\n", my_hostdomain());
@@ -1047,7 +1010,7 @@ int main(int argc, char *argv[])
 		if (scope == CONFIG_DUMP_SCOPE_ALL_WITHOUT_HIDDEN)
 			printf("# NOTE: Send doveconf -n output instead when asking for help.\n");
 		fflush(stdout);
-		ret2 = config_dump_human(&filter, scope, NULL, hide_passwords);
+		ret2 = config_dump_human(scope, NULL, hide_key, hide_passwords);
 	}
 
 	if (ret < 0) {
@@ -1057,7 +1020,7 @@ int main(int argc, char *argv[])
 	if (ret2 < 0)
 		i_fatal("Errors in configuration");
 
-	config_filter_deinit(&config_filter);
+	config_parsed_free(&config);
 	old_settings_deinit_global();
 	module_dir_unload(&modules);
 	config_parser_deinit();

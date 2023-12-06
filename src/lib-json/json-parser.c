@@ -2170,7 +2170,6 @@ static int json_parser_continue(struct json_parser *parser)
 		return JSON_PARSE_OK;
 	}
 
-	ret = 0;
 	do {
 		if (!json_parser_have_data(parser))
 			continue;
@@ -2301,8 +2300,8 @@ static ssize_t json_string_istream_read(struct istream_private *stream)
 	struct json_string_istream *jstream =
 		(struct json_string_istream *)stream;
 	struct json_parser *parser = jstream->parser;
-	bool read_data;
-	size_t old_pos;
+	bool stop_loop;
+	size_t old_pos, read_size, read_total;
 	int ret;
 
 	if (jstream->ended) {
@@ -2314,16 +2313,16 @@ static ssize_t json_string_istream_read(struct istream_private *stream)
 	i_assert(stream->pos == str_len(parser->buffer));
 	i_assert(stream->skip <= stream->pos);
 
-	read_data = FALSE;
+	read_total = 0;
 	do {
 		if (jstream->buffer_overflowed) {
-			stream->pos = str_len(parser->buffer);
-			if (stream->skip == stream->pos)
+			if (stream->skip == str_len(parser->buffer))
 				str_truncate(parser->buffer, 0);
 			else if (stream->skip > 0)
 				str_delete(parser->buffer, 0, stream->skip);
 			else
 				return -2;
+			stream->pos = str_len(parser->buffer);
 			stream->skip = 0;
 			jstream->buffer_overflowed = FALSE;
 		}
@@ -2331,7 +2330,9 @@ static ssize_t json_string_istream_read(struct istream_private *stream)
 		old_pos = str_len(parser->buffer);
 		ret = json_parser_continue(parser);
 		i_assert(str_len(parser->buffer) >= old_pos);
-		read_data = str_len(parser->buffer) > old_pos;
+		read_size = str_len(parser->buffer) - old_pos;
+		stop_loop = (read_size > 0);
+		read_total += read_size;
 		switch (ret) {
 		case JSON_PARSE_INTERRUPTED:
 			i_assert(stream->skip == 0 ||
@@ -2340,16 +2341,15 @@ static ssize_t json_string_istream_read(struct istream_private *stream)
 			break;
 		case JSON_PARSE_BOUNDARY:
 			jstream->ended = TRUE;
-			read_data = TRUE;
 			if (str_len(parser->buffer) == old_pos) {
 				stream->istream.eof = TRUE;
 				return -1;
 			}
+			stop_loop = TRUE;
 			break;
 		case JSON_PARSE_NO_DATA:
-			stream->buffer = str_data(parser->buffer);
-			stream->pos = str_len(parser->buffer);
-			return 0;
+			stop_loop = TRUE;
+			break;
 		case JSON_PARSE_ERROR:
 			io_stream_set_error(&stream->iostream,
 					    "%s", parser->error);
@@ -2363,11 +2363,11 @@ static ssize_t json_string_istream_read(struct istream_private *stream)
 		default:
 			i_unreached();
 		}
-	} while (jstream->buffer_overflowed && !read_data);
+	} while (jstream->buffer_overflowed && !stop_loop);
 
 	stream->pos = str_len(parser->buffer);
 	stream->buffer = str_data(parser->buffer);
-	return (ssize_t)(stream->pos - old_pos);
+	return (ssize_t)read_total;
 }
 
 static void

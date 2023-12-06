@@ -180,7 +180,10 @@ void master_service_set_die_callback(struct master_service *service,
    even called if the master service code knows that we're handling clients. */
 void master_service_set_idle_die_callback(struct master_service *service,
 					  bool (*callback)(void));
-/* Set a callback that gets called when the service is killed, but not dead yet. */
+/* Set a callback that gets called when the service is killed, but not dead yet.
+   The callback is currently called only when running in main ioloop and
+   receiving SIGINT or SIGTERM. Note that the ioloop is always stopped anyway
+   when this happens. */
 void master_service_set_killed_callback(struct master_service *service,
 					master_service_killed_callback_t *callback,
 					void *context);
@@ -233,10 +236,15 @@ const char *master_service_get_config_path(struct master_service *service);
 const char *master_service_get_version_string(struct master_service *service);
 /* Returns name of the service, as given in name parameter to _init(). */
 const char *master_service_get_name(struct master_service *service);
+/* Returns the root event created for the service. */
+struct event *master_service_get_event(struct master_service *service);
 /* Returns name of the service, as given in the configuration file. For example
    service name=auth, but configured_name=auth-worker. This is preferred in
    e.g. log prefixes. */
 const char *master_service_get_configured_name(struct master_service *service);
+/* Returns the settings root. */
+struct settings_root *
+master_service_get_settings_root(struct master_service *service);
 
 /* Start the service. Blocks until finished */
 void master_service_run(struct master_service *service,

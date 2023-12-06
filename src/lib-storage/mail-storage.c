@@ -19,6 +19,7 @@
 #include "mkdir-parents.h"
 #include "time-util.h"
 #include "var-expand.h"
+#include "settings.h"
 #include "dsasl-client.h"
 #include "imap-date.h"
 #include "mail-index-private.h"
@@ -288,13 +289,13 @@ mail_storage_create_root(struct mailbox_list *list,
 	}
 
 	if ((flags & MAIL_STORAGE_FLAG_NO_AUTOVERIFY) != 0) {
-		if (!event_want_debug_log(list->ns->user->event))
+		if (!event_want_debug_log(list->event))
 			return 0;
 
 		/* we don't need to verify, but since debugging is
 		   enabled, check and log if the root doesn't exist */
 		if (mail_storage_verify_root(root_dir, type_name, &error) < 0) {
-			e_debug(list->ns->user->event,
+			e_debug(list->event,
 				"Namespace %s: Creating storage despite: %s",
 				list->ns->prefix, error);
 		}
@@ -432,7 +433,7 @@ mail_storage_create_full_real(struct mail_namespace *ns, const char *driver,
 	   used for mails currently being saved. */
 	storage->last_internal_error_mail_uid = UINT32_MAX;
 
-	storage->event = event_create(ns->user->event);
+	storage->event = event_create(ns->list->event);
 	if (storage_class->event_category != NULL)
 		event_add_category(storage->event, storage_class->event_category);
 	event_set_append_log_prefix(
@@ -937,30 +938,6 @@ bool mail_storage_set_error_from_errno(struct mail_storage *storage)
 	return TRUE;
 }
 
-const struct mailbox_settings *
-mailbox_settings_find(struct mail_namespace *ns, const char *vname)
-{
-	struct mailbox_settings *box_set;
-
-	if (!array_is_created(&ns->set->mailboxes))
-		return NULL;
-
-	if (ns->prefix_len > 0 &&
-	    strncmp(ns->prefix, vname, ns->prefix_len-1) == 0) {
-		if (vname[ns->prefix_len-1] == mail_namespace_get_sep(ns))
-			vname += ns->prefix_len;
-		else if (vname[ns->prefix_len-1] == '\0') {
-			/* namespace prefix itself */
-			vname = "";
-		}
-	}
-	array_foreach_elem(&ns->set->mailboxes, box_set) {
-		if (strcmp(box_set->name, vname) == 0)
-			return box_set;
-	}
-	return NULL;
-}
-
 struct mailbox *mailbox_alloc(struct mailbox_list *list, const char *vname,
 			      enum mailbox_flags flags)
 {
@@ -1008,10 +985,16 @@ struct mailbox *mailbox_alloc(struct mailbox_list *list, const char *vname,
 		}
 
 		box = storage->v.mailbox_alloc(storage, new_list, vname, flags);
-		box->set = mailbox_settings_find(new_list->ns, vname);
-		box->open_error = open_error;
-		if (open_error != 0)
+		const char *error;
+		if (open_error != 0) {
+			box->open_error = open_error;
 			mail_storage_set_error(storage, open_error, errstr);
+		} else if (settings_get(box->event,
+					&mailbox_setting_parser_info, 0,
+					&box->set, &error) < 0) {
+			mailbox_set_critical(box, "%s", error);
+			box->open_error = box->storage->error;
+		}
 		if (strcmp(orig_vname, vname) != 0)
 			box->mailbox_not_original = TRUE;
 		hook_mailbox_allocated(box);
@@ -1047,7 +1030,7 @@ struct mailbox *mailbox_alloc_guid(struct mailbox_list *list,
 			/* successfully opened the correct mailbox */
 			return box;
 		}
-		e_error(list->ns->user->event, "mailbox_alloc_guid(%s): "
+		e_error(list->event, "mailbox_alloc_guid(%s): "
 			"Couldn't verify mailbox GUID: %s",
 			guid_128_to_string(guid),
 			mailbox_get_last_internal_error(box, NULL));
@@ -1097,7 +1080,7 @@ namespace_find_special_use(struct mail_namespace *ns, const char *special_use,
 	*vname_r = NULL;
 	*error_code_r = MAIL_ERROR_NONE;
 
-	if (!ns->special_use_mailboxes)
+	if (!ns->set->parsed_have_special_use_mailboxes)
 		return 0;
 	if (!HAS_ALL_BITS(ns->type, MAIL_NAMESPACE_TYPE_PRIVATE))
 		return 0;
@@ -1124,7 +1107,7 @@ namespace_find_special_use(struct mail_namespace *ns, const char *special_use,
 		const char *error;
 
 		error = mailbox_list_get_last_error(ns->list, error_code_r);
-		e_error(ns->user->event,
+		e_error(ns->list->event,
 			"Failed to find mailbox with SPECIAL-USE flag '%s' "
 			"in namespace '%s': %s",
 			special_use, ns->prefix, error);
@@ -1817,6 +1800,7 @@ void mailbox_free(struct mailbox **_box)
 
 	DLLIST_REMOVE(&box->storage->mailboxes, box);
 	mail_storage_obj_unref(box->storage);
+	settings_free(box->set);
 	pool_unref(&box->pool);
 }
 
@@ -2274,9 +2258,9 @@ mailbox_get_namespace(const struct mailbox *box)
 	return box->list->ns;
 }
 
-const struct mail_storage_settings *mailbox_get_settings(struct mailbox *box)
+const struct mailbox_settings *mailbox_get_settings(struct mailbox *box)
 {
-	return box->storage->set;
+	return box->set;
 }
 
 const char *mailbox_get_name(const struct mailbox *box)
@@ -2902,9 +2886,7 @@ int mailbox_save_begin(struct mail_save_context **ctx, struct istream *input)
 	}
 
 	/* make sure parts get parsed early on */
-	const struct mail_storage_settings *mail_set =
-		mailbox_get_settings(box);
-	if (mail_set->parsed_mail_attachment_detection_add_flags)
+	if (box->storage->set->parsed_mail_attachment_detection_add_flags)
 		mail_add_temp_wanted_fields((*ctx)->dest_mail,
 					    MAIL_FETCH_MESSAGE_PARTS, NULL);
 
@@ -3371,13 +3353,33 @@ mail_storage_settings_to_index_flags(const struct mail_storage_settings *set)
 	return index_flags;
 }
 
+static const char *
+mailbox_get_name_without_prefix(struct mail_namespace *ns,
+				const char *vname)
+{
+	if (ns->prefix_len > 0 &&
+	    strncmp(ns->prefix, vname, ns->prefix_len-1) == 0) {
+		if (vname[ns->prefix_len-1] == mail_namespace_get_sep(ns))
+			vname += ns->prefix_len;
+		else if (vname[ns->prefix_len-1] == '\0') {
+			/* namespace prefix itself */
+			vname = "";
+		}
+	}
+	return vname;
+}
 
 struct event *
-mail_storage_mailbox_create_event(struct event *parent, const char* vname)
+mail_storage_mailbox_create_event(struct event *parent,
+				  struct mailbox_list *list, const char *vname)
 {
 	struct event *event = event_create(parent);
 	event_add_category(event, &event_category_mailbox);
-	event_add_str(event, "mailbox", vname);
+	event_add_str(event, SETTINGS_EVENT_MAILBOX_NAME_WITH_PREFIX, vname);
+	event_add_str(event, SETTINGS_EVENT_MAILBOX_NAME_WITHOUT_PREFIX,
+		      mailbox_get_name_without_prefix(list->ns, vname));
+	event_add_str(event, "namespace", list->ns->set->name);
+
 	event_drop_parent_log_prefixes(event, 1);
 	event_set_append_log_prefix(event, t_strdup_printf(
 		"Mailbox %s: ", mailbox_name_sanitize(vname)));

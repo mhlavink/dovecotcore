@@ -16,12 +16,12 @@ struct dict_op_settings dict_op_settings = {
 static void test_setup(struct dict **dict_r)
 {
 	const char *error = NULL;
-	struct dict_settings set = {
+	struct dict_legacy_settings set = {
 		.base_dir = "."
 	};
 	struct dict *dict = NULL;
 
-	if (dict_init("mysql:" DICT_SRC_DIR "/dict.conf", &set, &dict, &error) < 0)
+	if (dict_init_legacy("mysql:" DICT_SRC_DIR "/dict.conf", &set, &dict, &error) < 0)
 		i_fatal("cannot initialize dict: %s", error);
 
 	*dict_r = dict;

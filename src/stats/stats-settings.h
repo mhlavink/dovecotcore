@@ -61,6 +61,8 @@ enum event_exporter_time_fmt {
 /* </settings checks> */
 
 struct stats_exporter_settings {
+	pool_t pool;
+
 	const char *name;
 	const char *transport;
 	const char *transport_args;
@@ -109,7 +111,9 @@ struct stats_metric_settings_group_by {
 /* </settings checks> */
 
 struct stats_metric_settings {
-	const char *metric_name;
+	pool_t pool;
+
+	const char *name;
 	const char *description;
 	const char *fields;
 	const char *group_by;
@@ -124,13 +128,15 @@ struct stats_metric_settings {
 };
 
 struct stats_settings {
+	pool_t pool;
 	const char *stats_http_rawlog_dir;
 
-	ARRAY(struct stats_exporter_settings *) exporters;
-	ARRAY(struct stats_metric_settings *) metrics;
+	ARRAY_TYPE(const_string) exporters;
+	ARRAY_TYPE(const_string) metrics;
 };
 
 extern const struct setting_parser_info stats_setting_parser_info;
 extern const struct setting_parser_info stats_metric_setting_parser_info;
+extern const struct setting_parser_info stats_exporter_setting_parser_info;
 
 #endif

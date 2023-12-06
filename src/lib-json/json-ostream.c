@@ -1114,7 +1114,7 @@ int json_ostream_write_tree(struct json_ostream *stream, const char *name,
 		stream->tree = jtree;
 		json_tree_ref(jtree);
 	}
-	return 1;
+	return (ret < 0 ? -1 : 1);
 }
 
 void json_ostream_nwrite_tree(struct json_ostream *stream, const char *name,
@@ -1284,6 +1284,8 @@ int json_ostream_open_string_stream(struct json_ostream *stream,
 				    struct ostream **ostream_r)
 {
 	int ret;
+
+	*ostream_r = NULL;
 
 	ret = json_ostream_write_init(stream, name, JSON_TYPE_NONE);
 	if (ret <= 0)

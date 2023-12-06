@@ -18,18 +18,12 @@ const struct fs_crypt_settings fs_crypt_default_settings = {
 	.plugin_envs = ARRAY_INIT
 };
 
-static const struct setting_parser_info *fs_crypt_setting_dependencies[] = {
-	NULL
-};
-
 const struct setting_parser_info fs_crypt_setting_parser_info = {
-	.module_name = "fs-crypt",
+	.name = "fs_crypt",
+
 	.defines = fs_crypt_setting_defines,
 	.defaults = &fs_crypt_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct fs_crypt_settings),
-
-	.parent_offset = SIZE_MAX,
-	.dependencies = fs_crypt_setting_dependencies
+	.pool_offset1 = 1 + offsetof(struct fs_crypt_settings, pool),
 };

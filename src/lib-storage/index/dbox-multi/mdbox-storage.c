@@ -4,7 +4,7 @@
 #include "array.h"
 #include "ioloop.h"
 #include "mkdir-parents.h"
-#include "master-service.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "mail-index-modseq.h"
 #include "mail-index-alloc-cache.h"
@@ -46,8 +46,10 @@ int mdbox_storage_create(struct mail_storage *_storage,
 	struct mdbox_storage *storage = MDBOX_STORAGE(_storage);
 	const char *dir;
 
-	storage->set = settings_parser_get_root_set(_storage->user->set_parser,
-		mdbox_get_setting_parser_info());
+	if (settings_get(_storage->event, &mdbox_setting_parser_info, 0,
+			 &storage->set, error_r) < 0)
+		return -1;
+
 	storage->preallocate_space = storage->set->mdbox_preallocate_space;
 
 	if (*ns->list->set.mailbox_dir_name == '\0') {
@@ -90,6 +92,7 @@ void mdbox_storage_destroy(struct mail_storage *_storage)
 		array_free(&storage->move_to_alt_map_uids);
 	array_free(&storage->open_files);
 	i_free(storage->corrupted_reason);
+	settings_free(storage->set);
 	dbox_storage_destroy(_storage);
 }
 
@@ -471,7 +474,6 @@ struct mail_storage mdbox_storage = {
 	.event_category = &event_category_mdbox,
 
 	.v = {
-                mdbox_get_setting_parser_info,
 		mdbox_storage_alloc,
 		mdbox_storage_create,
 		mdbox_storage_destroy,

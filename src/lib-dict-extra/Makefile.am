@@ -5,29 +5,42 @@ dict_drivers = @dict_drivers@
 AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib \
 	-I$(top_srcdir)/src/lib-test \
+	-I$(top_srcdir)/src/lib-master \
 	-I$(top_srcdir)/src/lib-dict \
 	-I$(top_srcdir)/src/lib-fs \
 	-I$(top_srcdir)/src/lib-settings
 
 libdict_extra_la_SOURCES = \
+	dict-client.c \
 	dict-fs.c \
 	dict-register.c
+
+noinst_HEADERS = \
+	dict-client.h
 
 NOPLUGIN_LDFLAGS =
 
 test_programs = \
 	test-dict-fs
 
-noinst_PROGRAMS = $(test_programs)
+noinst_PROGRAMS = $(test_programs) test-dict-client
 
 test_libs = \
+	../lib-master/libmaster.la \
+	../lib-ssl-iostream/libssl_iostream.la \
+	../lib-settings/libsettings.la \
 	../lib-test/libtest.la \
 	../lib-dict/libdict.la \
+	../lib-settings/libsettings.la \
 	../lib/liblib.la
 
 test_dict_fs_SOURCES = test-dict-fs.c
 test_dict_fs_LDADD = $(noinst_LTLIBRARIES) ../lib-fs/libfs.la $(test_libs) $(MODULE_LIBS)
 test_dict_fs_DEPENDENCIES = $(noinst_LTLIBRARIES) ../lib-fs/libfs.la $(test_libs)
+
+test_dict_client_SOURCES = test-dict-client.c
+test_dict_client_LDADD = $(noinst_LTLIBRARIES) ../lib-fs/libfs.la $(test_libs) $(MODULE_LIBS)
+test_dict_client_DEPENDENCIES = $(noinst_LTLIBRARIES) ../lib-fs/libfs.la $(test_libs)
 
 check-local:
 	for bin in $(test_programs) $(check_PROGRAMS); do \

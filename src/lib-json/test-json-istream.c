@@ -2726,7 +2726,7 @@ static void test_json_istream_read_into_tree(void)
 
 	/* sequence */
 	jtree = json_tree_create();
-	(void)json_tree_node_add_array(json_tree_get_root(jtree), NULL);
+	json_tree_node_add_array(json_tree_get_root(jtree), NULL);
 	text = "[\"frop\", {\"a\":1234, \"b\":[1, 2, 3, 4], "
 		"\"c\":1234}, \"frop\"]";
 	text_len = strlen(text);
@@ -2906,6 +2906,7 @@ static void test_json_istream_read_stream(void)
 	test_begin("json istream read stream (array)");
 
 	pos = 0; state = 0; ret = 0;
+	val_input = NULL;
 	while (ret >= 0 && state <= 2) {
 		if (pos <= text_len)
 			pos++;
@@ -2949,7 +2950,8 @@ static void test_json_istream_read_stream(void)
 	}
 	test_assert(state == 2);
 
-	if (!test_has_failed()) {
+	test_assert(val_input != NULL);
+	if (!test_has_failed() && val_input != NULL) {
 		const unsigned char *data;
 		size_t size;
 
@@ -2960,8 +2962,8 @@ static void test_json_istream_read_stream(void)
 		}
 		if (ret < 0) {
 			test_assert(!i_stream_have_bytes_left(val_input));
+			test_assert_cmp(val_input->stream_errno, ==, 0);
 			i_stream_unref(&val_input);
-			ret = 0;
 		}
 	}
 	test_out_quiet("stream output", strcmp(str_c(buffer), str_text) == 0);
@@ -2997,6 +2999,7 @@ static void test_json_istream_read_stream(void)
 	test_begin("json istream read stream (object)");
 
 	pos = 0; state = 0; ret = 0;
+	val_input = NULL;
 	while (ret >= 0 && state <= 8) {
 		if (pos <= text_len)
 			pos++;
@@ -3097,7 +3100,8 @@ static void test_json_istream_read_stream(void)
 	}
 	test_assert(state == 8);
 
-	if (!test_has_failed()) {
+	test_assert(val_input != NULL);
+	if (!test_has_failed() && val_input != NULL) {
 		const unsigned char *data;
 		size_t size;
 
@@ -3108,8 +3112,8 @@ static void test_json_istream_read_stream(void)
 		}
 		if (ret < 0) {
 			test_assert(!i_stream_have_bytes_left(val_input));
+			test_assert_cmp(val_input->stream_errno, ==, 0);
 			i_stream_unref(&val_input);
-			ret = 0;
 		}
 	}
 	test_out_quiet("stream output", strcmp(str_c(buffer), str_text) == 0);
@@ -3652,6 +3656,7 @@ static void test_json_istream_error(void)
 			      json_istream_get_error(jinput));
 	test_assert(json_node_is_array(&jnode));
 	ret = json_istream_read(jinput, &jnode);
+	test_assert(ret != 0);
 	ret = json_istream_read(jinput, &jnode);
 	error = json_istream_get_error(jinput);
 	test_out_reason("read failure", (ret < 0 && error != NULL), error);
@@ -3809,6 +3814,7 @@ static void test_json_istream_error(void)
 
 	ret = json_istream_read_stream(jinput, 0, IO_BLOCK_SIZE,
 					"/tmp/dovecot-test-json.", &jnode);
+	test_assert(ret != 0);
 	ret = json_istream_read(jinput, &jnode);	
 	error = json_istream_get_error(jinput);
 	test_out_reason("read failure", (ret < 0 && error != NULL), error);

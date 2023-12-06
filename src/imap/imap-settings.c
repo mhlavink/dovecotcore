@@ -9,45 +9,10 @@
 #include "smtp-submit-settings.h"
 #include "imap-settings.h"
 
-#include <stddef.h>
 #include <unistd.h>
 
 static bool imap_settings_verify(void *_set, pool_t pool,
 				 const char **error_r);
-
-/* <settings checks> */
-static struct file_listener_settings imap_unix_listeners_array[] = {
-	{
-		.path = "login/imap",
-		.type = "login",
-		.mode = 0666,
-		.user = "",
-		.group = "",
-	},
-	{
-		.path = "imap-master",
-		.type = "master",
-		.mode = 0600,
-		.user = "",
-		.group = "",
-	},
-	{
-		.path = "srv.imap/%{pid}",
-		.type = "admin",
-		.mode = 0600,
-		.user = "",
-		.group = "",
-	},
-};
-static struct file_listener_settings *imap_unix_listeners[] = {
-	&imap_unix_listeners_array[0],
-	&imap_unix_listeners_array[1],
-	&imap_unix_listeners_array[2],
-};
-static buffer_t imap_unix_listeners_buf = {
-	{ { imap_unix_listeners, sizeof(imap_unix_listeners) } }
-};
-/* </settings checks> */
 
 struct service_settings imap_service_settings = {
 	.name = "imap",
@@ -69,20 +34,32 @@ struct service_settings imap_service_settings = {
 	.idle_kill = 0,
 	.vsz_limit = UOFF_T_MAX,
 
-	.unix_listeners = { { &imap_unix_listeners_buf,
-			      sizeof(imap_unix_listeners[0]) } },
+	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
 	.inet_listeners = ARRAY_INIT
 };
 
+const struct setting_keyvalue imap_service_settings_defaults[] = {
+	{ "unix_listener", "imap-master login\\simap srv.imap\\s%{pid}" },
+
+	{ "unix_listener/imap-master/path", "imap-master" },
+	{ "unix_listener/imap-master/type", "master" },
+	{ "unix_listener/imap-master/mode", "0600" },
+
+	{ "unix_listener/login\\simap/path", "login/imap" },
+	{ "unix_listener/login\\simap/type", "login" },
+	{ "unix_listener/login\\simap/mode", "0666" },
+
+	{ "unix_listener/srv.imap\\s%{pid}/path", "srv.imap/%{pid}" },
+	{ "unix_listener/srv.imap\\s%{pid}/type", "admin" },
+	{ "unix_listener/srv.imap\\s%{pid}/mode", "0600" },
+
+	{ NULL, NULL }
+};
+
 #undef DEF
-#undef DEFLIST
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct imap_settings)
-#define DEFLIST(field, name, defines) \
-	{ .type = SET_DEFLIST, .key = name, \
-	  .offset = offsetof(struct imap_settings, field), \
-	  .list_info = defines }
 
 static const struct setting_define imap_setting_defines[] = {
 	DEF(BOOL, verbose_proctitle),
@@ -130,24 +107,15 @@ static const struct imap_settings imap_default_settings = {
 	.imap_urlauth_port = 143
 };
 
-static const struct setting_parser_info *imap_setting_dependencies[] = {
-	&mail_user_setting_parser_info,
-	&smtp_submit_setting_parser_info,
-	NULL
-};
-
 const struct setting_parser_info imap_setting_parser_info = {
-	.module_name = "imap",
+	.name = "imap",
+
 	.defines = imap_setting_defines,
 	.defaults = &imap_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct imap_settings),
-
-	.parent_offset = SIZE_MAX,
-
+	.pool_offset1 = 1 + offsetof(struct imap_settings, pool),
 	.check_func = imap_settings_verify,
-	.dependencies = imap_setting_dependencies
 };
 
 /* <settings checks> */

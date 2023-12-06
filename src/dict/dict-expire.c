@@ -7,6 +7,7 @@
 #include "process-title.h"
 #include "env-util.h"
 #include "module-dir.h"
+#include "settings.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "sql-api.h"
@@ -64,7 +65,7 @@ static void client_connected(struct master_service_connection *conn ATTR_UNUSED)
 
 static void dict_expire_init(void)
 {
-	struct dict_settings dict_set = {
+	struct dict_legacy_settings dict_set = {
 		.base_dir = dict_settings->base_dir,
 	};
 	struct dict *dict;
@@ -77,7 +78,7 @@ static void dict_expire_init(void)
 		const char *name = strlist[i];
 		const char *uri = strlist[i+1];
 
-		if (dict_init(uri, &dict_set, &dict, &error) < 0) {
+		if (dict_init_legacy(uri, &dict_set, &dict, &error) < 0) {
 			i_error("Failed to initialize dictionary '%s': %s - skipping",
 				name, error);
 		} else {
@@ -106,8 +107,9 @@ static void main_init(void)
 {
 	struct module_dir_load_settings mod_set;
 
-	dict_settings = master_service_settings_get_root_set(master_service,
-				&dict_setting_parser_info);
+	dict_settings =
+		settings_get_or_fatal(master_service_get_event(master_service),
+				      &dict_server_setting_parser_info);
 
 	i_zero(&mod_set);
 	mod_set.abi_version = DOVECOT_ABI_VERSION;
@@ -138,15 +140,12 @@ static void main_deinit(void)
 
 	sql_drivers_deinit();
 	timeout_remove(&to_expire);
+	settings_free(dict_settings);
 }
 
 int main(int argc, char *argv[])
 {
 	const enum master_service_flags service_flags = 0;
-	const struct setting_parser_info *set_roots[] = {
-		&dict_setting_parser_info,
-		NULL
-	};
 	const char *error;
 
 	master_service = master_service_init("dict-expire", service_flags,
@@ -154,13 +153,8 @@ int main(int argc, char *argv[])
 	if (master_getopt(master_service) > 0)
 		return FATAL_DEFAULT;
 
-	const struct master_service_settings_input set_input = {
-		.roots = set_roots,
-	};
-	struct master_service_settings_output output;
-	if (master_service_settings_read(master_service, &set_input,
-					 &output, &error) < 0)
-		i_fatal("Error reading configuration: %s", error);
+	if (master_service_settings_read_simple(master_service, &error) < 0)
+		i_fatal("%s", error);
 
 	master_service_init_log_with_pid(master_service);
 	main_preinit();

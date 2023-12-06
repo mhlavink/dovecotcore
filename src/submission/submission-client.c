@@ -11,9 +11,9 @@
 #include "ostream.h"
 #include "hostpid.h"
 #include "var-expand.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-service.h"
-#include "master-service-settings.h"
 #include "mail-namespace.h"
 #include "mail-storage.h"
 #include "mail-storage-service.h"
@@ -216,7 +216,7 @@ client_create(int fd_in, int fd_out, struct event *event,
 	smtp_set.max_message_size = set->submission_max_mail_size;
 	smtp_set.rawlog_dir = set->rawlog_dir;
 	smtp_set.no_greeting = no_greeting;
-	smtp_set.debug = user->mail_debug;
+	smtp_set.debug = event_want_debug(client->event);
 	smtp_set.event_parent = event;
 
 	if ((workarounds & SUBMISSION_WORKAROUND_WHITESPACE_BEFORE_PATH) != 0) {
@@ -331,6 +331,7 @@ client_default_destroy(struct client *client)
 
 	client_state_reset(client);
 
+	settings_free(client->set);
 	event_unref(&client->event);
 	pool_unref(&client->pool);
 

@@ -6,6 +6,7 @@
 #include "ostream.h"
 #include "restrict-access.h"
 #include "master-service.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "mailbox-list-private.h"
 #include "mbox-storage.h"
@@ -26,7 +27,6 @@
 
 struct mbox_mailbox_list {
 	union mailbox_list_module_context module_ctx;
-	const struct mbox_settings *set;
 };
 
 /* NOTE: must be sorted for istream-header-filter. Note that it's not such
@@ -185,8 +185,9 @@ mbox_storage_create(struct mail_storage *_storage, struct mail_namespace *ns,
 		return -1;
 	}
 
-	storage->set = settings_parser_get_root_set(_storage->user->set_parser,
-		mbox_get_setting_parser_info());
+	if (settings_get(_storage->event, &mbox_setting_parser_info, 0,
+			 &storage->set, error_r) < 0)
+		return -1;
 
 	if (mailbox_list_get_root_path(ns->list, MAILBOX_LIST_PATH_TYPE_INDEX, &dir)) {
 		_storage->temp_path_prefix = p_strconcat(_storage->pool, dir,
@@ -200,6 +201,14 @@ mbox_storage_create(struct mail_storage *_storage, struct mail_namespace *ns,
 		return -1;
 	}
 	return 0;
+}
+
+static void mbox_storage_destroy(struct mail_storage *_storage)
+{
+	struct mbox_storage *storage = MBOX_STORAGE(_storage);
+
+	settings_free(storage->set);
+	index_storage_destroy(_storage);
 }
 
 static void mbox_storage_get_list_settings(const struct mail_namespace *ns,
@@ -712,15 +721,13 @@ mbox_is_internal_name(struct mailbox_list *list ATTR_UNUSED,
 	return strcmp(name, MBOX_INDEX_DIR_NAME) == 0;
 }
 
-static void mbox_storage_add_list(struct mail_storage *storage,
+static void mbox_storage_add_list(struct mail_storage *storage ATTR_UNUSED,
 				  struct mailbox_list *list)
 {
 	struct mbox_mailbox_list *mlist;
 
 	mlist = p_new(list->pool, struct mbox_mailbox_list, 1);
 	mlist->module_ctx.super = list->v;
-	mlist->set = settings_parser_get_root_set(storage->user->set_parser,
-		mbox_get_setting_parser_info());
 
 	if (*list->set.maildir_name == '\0') {
 		/* have to use .imap/ directories */
@@ -826,10 +833,9 @@ struct mail_storage mbox_storage = {
 	.event_category = &event_category_mbox,
 
 	.v = {
-                mbox_get_setting_parser_info,
 		mbox_storage_alloc,
 		mbox_storage_create,
-		index_storage_destroy,
+		mbox_storage_destroy,
 		mbox_storage_add_list,
 		mbox_storage_get_list_settings,
 		mbox_storage_autodetect,

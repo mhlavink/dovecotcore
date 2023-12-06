@@ -22,6 +22,7 @@ enum imapc_features {
 	IMAPC_FEATURE_FETCH_EMPTY_IS_EXPUNGED	= 0x4000,
 	IMAPC_FEATURE_NO_MSN_UPDATES		= 0x8000,
 	IMAPC_FEATURE_NO_ACL 			= 0x10000,
+	IMAPC_FEATURE_NO_METADATA		= 0x20000,
 };
 /* </settings checks> */
 
@@ -30,6 +31,7 @@ enum imapc_features {
  * serialization of settings.
  */
 struct imapc_settings {
+	pool_t pool;
 	const char *imapc_host;
 	in_port_t imapc_port;
 
@@ -58,6 +60,6 @@ struct imapc_settings {
 	unsigned int throttle_shrink_min_msecs;
 };
 
-const struct setting_parser_info *imapc_get_setting_parser_info(void);
+extern const struct setting_parser_info imapc_setting_parser_info;
 
 #endif

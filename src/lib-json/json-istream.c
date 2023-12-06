@@ -412,7 +412,7 @@ json_istream_parse_value(void *context, void *parent_context, const char *name,
 			/* just starting; parent is not in the syntax tree */
 			parent = stream->tree_node;
 		}
-		(void)json_tree_node_add_value(parent, name, type, value);
+		json_tree_node_add_value(parent, name, type, value);
 		if (stream->node_level == stream->tree_node_level) {
 			stream->node_parsed = TRUE;
 			json_parser_interrupt(stream->parser);
@@ -765,7 +765,8 @@ json_istream_handle_stream(struct json_istream *stream,
 			    size_t max_buffer_size,
 			    struct json_node *node)
 {
-	if (node->value.content_type == JSON_CONTENT_TYPE_STREAM) {
+	if (node != NULL &&
+	    node->value.content_type == JSON_CONTENT_TYPE_STREAM) {
 		if (temp_path_prefix != NULL) {
 			struct istream *input[2] = { NULL, NULL };
 
@@ -805,7 +806,8 @@ int json_istream_read_stream(struct json_istream *stream,
 	if (stream->node_parsed) {
 		if (node_r != NULL)
 			*node_r = stream->node;
-		if (node_r->value.content_type == JSON_CONTENT_TYPE_STREAM &&
+		if (node_r != NULL &&
+		    node_r->value.content_type == JSON_CONTENT_TYPE_STREAM &&
 		    stream->seekable_stream != NULL)
 			node_r->value.content.stream = stream->seekable_stream;
 		return 1;
@@ -852,7 +854,8 @@ int json_istream_walk_stream(struct json_istream *stream,
 	if (stream->node_parsed) {
 		if (node_r != NULL)
 			*node_r = stream->node;
-		if (node_r->value.content_type == JSON_CONTENT_TYPE_STREAM &&
+		if (node_r != NULL &&
+		    node_r->value.content_type == JSON_CONTENT_TYPE_STREAM &&
 		    stream->seekable_stream != NULL)
 			node_r->value.content.stream = stream->seekable_stream;
 		return 1;
@@ -958,6 +961,10 @@ int json_istream_read_tree(struct json_istream *stream,
 	}
 
 	ret = json_istream_read_tree_common(stream);
+	if (ret < 0) {
+		stream->tree_node = NULL;
+		json_tree_unref(&stream->tree);
+	}
 	if (ret <= 0) {
 		*tree_r = NULL;
 		return ret;
@@ -969,6 +976,7 @@ int json_istream_read_tree(struct json_istream *stream,
 	}
 
 	*tree_r = stream->tree;
+	stream->tree_node = NULL;
 	stream->tree = NULL;
 	json_istream_skip(stream);
 	return 1;
@@ -1012,6 +1020,10 @@ int json_istream_read_into_tree_node(struct json_istream *stream,
 	}
 
 	ret = json_istream_read_tree_common(stream);
+	if (ret != 0) {
+		stream->tree_node = NULL;
+		json_tree_unref(&stream->tree);
+	}
 	if (ret <= 0)
 		return ret;
 

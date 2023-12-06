@@ -4,13 +4,11 @@
 
 #if defined(PASSDB_SQL) || defined(USERDB_SQL)
 
-#include "settings.h"
+#include "settings-legacy.h"
 #include "auth-request.h"
 #include "auth-worker-server.h"
 #include "auth-common.h"
 #include "db-sql.h"
-
-#include <stddef.h>
 
 #define DEF_STR(name) DEF_STRUCT_STR(name, db_sql_settings)
 #define DEF_INT(name) DEF_STRUCT_INT(name, db_sql_settings)

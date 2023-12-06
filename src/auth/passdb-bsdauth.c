@@ -30,7 +30,7 @@ bsdauth_verify_plain(struct auth_request *request, const char *password,
 		callback(PASSDB_RESULT_INTERNAL_FAILURE, request);
 		return;
 	case 0:
-		auth_request_log_unknown_user(request, AUTH_SUBSYS_DB);
+		auth_request_db_log_unknown_user(request);
 		callback(PASSDB_RESULT_USER_UNKNOWN, request);
 		return;
 	}
@@ -45,7 +45,7 @@ bsdauth_verify_plain(struct auth_request *request, const char *password,
 	safe_memset(pw.pw_passwd, 0, strlen(pw.pw_passwd));
 
 	if (result == 0) {
-		auth_request_log_password_mismatch(request, AUTH_SUBSYS_DB);
+		auth_request_db_log_password_mismatch(request);
 		callback(PASSDB_RESULT_PASSWORD_MISMATCH, request);
 		return;
 	}

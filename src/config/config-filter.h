@@ -3,9 +3,9 @@
 
 #include "net.h"
 
-struct master_service_settings_output;
-
 struct config_filter {
+	struct config_filter *parent;
+
 	const char *service;
 	/* local_name is for TLS SNI requests.
 	   both local_name and local_bits can't be set at the same time. */
@@ -14,35 +14,21 @@ struct config_filter {
 	const char *local_host, *remote_host;
 	struct ip_addr local_net, remote_net;
 	unsigned int local_bits, remote_bits;
+
+	/* named_filter { .. } */
+	const char *filter_name;
+	bool filter_name_array;
 };
 
 struct config_filter_parser {
+	struct config_filter_parser *children_head, *children_tail, *prev, *next;
+
 	struct config_filter filter;
 	const char *file_and_line;
 	/* NULL-terminated array of parsers */
-	struct config_module_parser *parsers;
+	struct config_module_parser *module_parsers;
+	bool filter_required_setting_seen;
 };
-ARRAY_DEFINE_TYPE(config_filter_parsers, struct config_filter_parser *);
-
-struct config_filter_context *config_filter_init(pool_t pool);
-void config_filter_deinit(struct config_filter_context **ctx);
-
-/* Replace filter's parsers with given parser list. */
-void config_filter_add_all(struct config_filter_context *ctx,
-			   struct config_filter_parser *const *parsers);
-
-/* Build new parsers from all existing ones matching the given filter. */
-int config_filter_parsers_get(struct config_filter_context *ctx, pool_t pool,
-			      const struct config_filter *filter,
-			      struct config_module_parser **parsers_r,
-			      struct master_service_settings_output *output_r,
-			      const char **error_r) ATTR_NULL(3);
-void config_filter_parsers_free(struct config_module_parser *parsers);
-
-/* Return a list of filters that are a subset of the given filter. */
-struct config_filter_parser *const *
-config_filter_find_subset(struct config_filter_context *ctx,
-			  const struct config_filter *filter);
 
 /* Returns TRUE if filter matches mask. */
 bool config_filter_match(const struct config_filter *mask,

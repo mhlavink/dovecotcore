@@ -75,7 +75,7 @@ ldap_lookup_finish(struct auth_request *auth_request,
 		passdb_result = PASSDB_RESULT_INTERNAL_FAILURE;
 	} else if (ldap_request->entries == 0) {
 		passdb_result = PASSDB_RESULT_USER_UNKNOWN;
-		auth_request_log_unknown_user(auth_request, AUTH_SUBSYS_DB);
+		auth_request_db_log_unknown_user(auth_request);
 	} else if (ldap_request->entries > 1) {
 		e_error(authdb_event(auth_request),
 			"pass_filter matched multiple objects, aborting");
@@ -101,10 +101,9 @@ ldap_lookup_finish(struct auth_request *auth_request,
 			auth_request);
 	} else {
 		if (password != NULL) {
-			passdb_result =
-				auth_request_password_verify(auth_request,
-					auth_request->mech_password,
-					password, scheme, AUTH_SUBSYS_DB);
+			passdb_result = auth_request_db_password_verify(
+				auth_request, auth_request->mech_password,
+				password, scheme);
 		}
 
 		ldap_request->callback.verify_plain(passdb_result,
@@ -150,14 +149,12 @@ ldap_auth_bind_callback(struct ldap_connection *conn,
 		if (ret == LDAP_SUCCESS)
 			passdb_result = PASSDB_RESULT_OK;
 		else if (ret == LDAP_INVALID_CREDENTIALS) {
-		  	auth_request_log_login_failure(auth_request,
-				AUTH_SUBSYS_DB,
+			auth_request_db_log_login_failure(auth_request,
 				AUTH_LOG_MSG_PASSWORD_MISMATCH" (for LDAP bind)");
 			passdb_result = PASSDB_RESULT_PASSWORD_MISMATCH;
 		} else if (ret == LDAP_NO_SUCH_OBJECT) {
 			passdb_result = PASSDB_RESULT_USER_UNKNOWN;
-			auth_request_log_unknown_user(auth_request,
-						      AUTH_SUBSYS_DB);
+			auth_request_db_log_unknown_user(auth_request);
 		} else {
 			e_error(authdb_event(auth_request),
 				"ldap_bind() failed: %s",
@@ -218,7 +215,7 @@ ldap_bind_lookup_dn_fail(struct auth_request *auth_request,
 		passdb_result = PASSDB_RESULT_INTERNAL_FAILURE;
 	else if (request->entries == 0) {
 		passdb_result = PASSDB_RESULT_USER_UNKNOWN;
-		auth_request_log_unknown_user(auth_request, AUTH_SUBSYS_DB);
+		auth_request_db_log_unknown_user(auth_request);
 	} else {
 		i_assert(request->entries > 1);
 		e_error(authdb_event(auth_request),

@@ -13,6 +13,7 @@ enum dsync_features {
 /* </settings checks> */
 
 struct doveadm_settings {
+	pool_t pool;
 	const char *base_dir;
 	const char *libexec_dir;
 	const char *mail_plugins;
@@ -38,29 +39,19 @@ struct doveadm_settings {
 	ARRAY(const char *) plugin_envs;
 };
 
-struct doveadm_setting_root {
-	const struct setting_parser_info *info;
-	void *settings;
-};
-ARRAY_DEFINE_TYPE(doveadm_setting_root, struct doveadm_setting_root);
 
 extern const struct setting_parser_info doveadm_setting_parser_info;
-extern struct doveadm_settings *doveadm_settings;
-extern const struct master_service_settings *service_set;
+extern const struct doveadm_settings *doveadm_settings;
 extern const struct master_service_ssl_settings *doveadm_ssl_set;
-extern ARRAY_TYPE(doveadm_setting_root) doveadm_setting_roots;
 extern bool doveadm_verbose_proctitle;
 
 void doveadm_get_ssl_settings(struct ssl_iostream_settings *set_r, pool_t pool);
-void doveadm_settings_expand(struct doveadm_settings *set, pool_t pool);
-
-void doveadm_setting_roots_add(const struct setting_parser_info *info);
-void *doveadm_setting_roots_get_settings(const struct setting_parser_info *info);
 
 void doveadm_read_settings(void);
+/* Returns the global binary config fd. Note that it may be -1 if doveadm was
+   called with -O parameter. */
 int doveadm_settings_get_config_fd(void);
 
-void doveadm_settings_init(void);
 void doveadm_settings_deinit(void);
 
 #endif

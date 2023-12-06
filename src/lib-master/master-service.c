@@ -17,6 +17,7 @@
 #include "process-title.h"
 #include "time-util.h"
 #include "restrict-access.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "syslog-util.h"
 #include "stats-client.h"
@@ -353,6 +354,11 @@ master_service_event_callback(struct event *event,
 		   to do it only for root events, because all other events
 		   inherit the category from them. */
 		event_add_category(event, &master_service_category);
+		if (master_service != NULL) {
+			/* Set settings root for created events */
+			event_set_ptr(event, SETTINGS_EVENT_ROOT,
+				      master_service->settings_root);
+		}
 	}
 	/* This callback may be called while still in master_service_init().
 	   In that case master_service is NULL. */
@@ -510,6 +516,7 @@ master_service_init(const char *name, enum master_service_flags flags,
 	service->argv = *argv;
 	service->name = i_strdup(name);
 	service->configured_name = i_strdup(service_configured_name);
+	service->settings_root = settings_root_init();
 
 	master_service_category_name =
 		i_strdup_printf("service:%s", service->configured_name);
@@ -517,6 +524,8 @@ master_service_init(const char *name, enum master_service_flags flags,
 	event_register_callback(master_service_event_callback);
 
 	service->event = event_create(NULL);
+	event_set_ptr(service->event, SETTINGS_EVENT_ROOT,
+		      service->settings_root);
 
 	/* keep getopt_str first in case it contains "+" */
 	service->getopt_str = *getopt_str == '\0' ?
@@ -1174,9 +1183,20 @@ const char *master_service_get_name(struct master_service *service)
 	return service->name;
 }
 
+struct event *master_service_get_event(struct master_service *service)
+{
+	return service->event;
+}
+
 const char *master_service_get_configured_name(struct master_service *service)
 {
 	return service->configured_name;
+}
+
+struct settings_root *
+master_service_get_settings_root(struct master_service *service)
+{
+	return service->settings_root;
 }
 
 void master_service_run(struct master_service *service,
@@ -1553,12 +1573,8 @@ static void master_service_refresh_login_state(struct master_service *service)
 		master_service_set_login_state(service, state);
 }
 
-static void master_service_deinit_real(struct master_service **_service)
+static void master_service_deinit_real(struct master_service *service)
 {
-	struct master_service *service = *_service;
-
-	*_service = NULL;
-
 	if (master_service_is_killed(service) &&
 	    (service->killed_signal != SIGINT ||
 	     (service->flags & MASTER_SERVICE_FLAG_STANDALONE) != 0))
@@ -1587,24 +1603,26 @@ static void master_service_deinit_real(struct master_service **_service)
 	if (array_is_created(&service->config_overrides))
 		array_free(&service->config_overrides);
 
-	if (service->set_parser != NULL) {
-		settings_parser_unref(&service->set_parser);
-		pool_unref(&service->set_pool);
-	}
-	if (service->config_mmap_base != NULL) {
-		if (munmap(service->config_mmap_base,
-			   service->config_mmap_size) < 0)
-			i_error("munmap(<config>) failed: %m");
-	}
+	settings_free(service->set);
 	i_free(master_service_category_name);
 	master_service_category.name = NULL;
 	event_unregister_callback(master_service_event_callback);
 	master_service_unset_process_shutdown_filter(service);
 }
 
-static void master_service_free(struct master_service *service)
+static void master_service_free(struct master_service **_service)
 {
+	struct master_service *service = *_service;
 	unsigned int i;
+
+	/* This usually sets the global master_service=NULL. Do it late enough
+	   so that code relying on the global master_service won't see it
+	   NULL. */
+	*_service = NULL;
+
+	/* Check for leaks only after lib_atexit() callbacks have been called,
+	   since they may also free settings. */
+	settings_root_deinit(&service->settings_root);
 
 	for (i = 0; i < service->socket_count; i++) {
 		i_free(service->listeners[i].name);
@@ -1625,14 +1643,14 @@ void master_service_deinit(struct master_service **_service)
 {
 	struct master_service *service = *_service;
 
-	master_service_deinit_real(_service);
+	master_service_deinit_real(service);
 
 	lib_signals_deinit();
 	/* run atexit callbacks before destroying ioloop */
 	lib_atexit_run();
 	io_loop_destroy(&service->ioloop);
 
-	master_service_free(service);
+	master_service_free(_service);
 	lib_deinit();
 }
 
@@ -1640,10 +1658,10 @@ void master_service_deinit_forked(struct master_service **_service)
 {
 	struct master_service *service = *_service;
 
-	master_service_deinit_real(_service);
+	master_service_deinit_real(service);
 	io_loop_destroy(&service->ioloop);
 
-	master_service_free(service);
+	master_service_free(_service);
 }
 
 static void master_service_overflow(struct master_service *service)

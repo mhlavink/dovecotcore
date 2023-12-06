@@ -17,6 +17,7 @@
 #include "rfc822-parser.h"
 #include "message-address.h"
 #include "smtp-address.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
@@ -155,8 +156,9 @@ lda_raw_mail_open(struct mail_deliver_input *dinput, const char *path)
 
 	struct mail_storage_service_ctx *storage_service =
 		mail_storage_service_user_get_service_ctx(dinput->rcpt_user->service_user);
-	raw_mail_user = raw_storage_create_from_set(storage_service,
-				dinput->rcpt_user->unexpanded_set_parser);
+	struct settings_instance *set_instance =
+		mail_storage_service_user_get_settings_instance(dinput->rcpt_user->service_user);
+	raw_mail_user = raw_storage_create_from_set(storage_service, set_instance);
 
 	mail_from = (dinput->mail_from != NULL ?
 		     dinput->mail_from : &default_envelope_sender);
@@ -286,12 +288,15 @@ lda_deliver(struct mail_deliver_input *dinput,
 	    bool stderr_rejection)
 {
 	struct mail_deliver_context ctx;
+	const char *error;
 	int ret;
 
-	dinput->set = settings_parser_get_root_set(dinput->rcpt_user->set_parser,
-						   &lda_setting_parser_info);
-	dinput->smtp_set = settings_parser_get_root_set(dinput->rcpt_user->set_parser,
-							&smtp_submit_setting_parser_info);
+	if (settings_get(dinput->rcpt_user->event, &lda_setting_parser_info, 0,
+			 &dinput->set, &error) < 0 ||
+	    settings_get(dinput->rcpt_user->event,
+			 &smtp_submit_setting_parser_info, 0,
+			 &dinput->smtp_set, &error) < 0)
+		i_fatal("%s", error);
 
 	dinput->src_mail = lda_raw_mail_open(dinput, path);
 	lda_set_rcpt_to(dinput, rcpt_to, user, rcpt_to_source);
@@ -339,14 +344,9 @@ static void print_help(void)
 
 int main(int argc, char *argv[])
 {
-	const struct setting_parser_info *set_roots[] = {
-		&smtp_submit_setting_parser_info,
-		&lda_setting_parser_info,
-		NULL
-	};
 	struct mail_deliver_input dinput;
 	enum mail_storage_service_flags service_flags = 0;
-	const char *user, *errstr, *path;
+	const char *user, *errstr, *path, *error;
 	struct smtp_address *rcpt_to, *final_rcpt_to, *mail_from;
 	struct mail_storage_service_ctx *storage_service;
 	struct mail_storage_service_input service_input;
@@ -472,6 +472,9 @@ int main(int argc, char *argv[])
 		i_fatal_status(EX_USAGE, "Unknown argument: %s", argv[optind]);
 	}
 
+	if (master_service_settings_read_simple(master_service, &error) < 0)
+		i_fatal("%s", error);
+
 	process_euid = geteuid();
 	if ((service_flags & MAIL_STORAGE_SERVICE_FLAG_USERDB_LOOKUP) != 0)
 		;
@@ -523,8 +526,7 @@ int main(int argc, char *argv[])
 	service_input.username = user;
 	service_input.event_parent = event;
 
-	service_flags |= MAIL_STORAGE_SERVICE_FLAG_USE_SYSEXITS;
-	storage_service = mail_storage_service_init(master_service, set_roots,
+	storage_service = mail_storage_service_init(master_service,
 						    service_flags);
 	mail_deliver_hooks_init();
 	/* set before looking up the user (or ideally we'd do this between
@@ -568,6 +570,8 @@ int main(int argc, char *argv[])
 	}
 
 	mail_deliver_session_deinit(&dinput.session);
+	settings_free(dinput.set);
+	settings_free(dinput.smtp_set);
 	mail_storage_service_deinit(&storage_service);
 
 	event_unref(&event);

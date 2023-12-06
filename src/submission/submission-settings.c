@@ -8,36 +8,10 @@
 #include "mail-storage-settings.h"
 #include "submission-settings.h"
 
-#include <stddef.h>
 #include <unistd.h>
 
 static bool submission_settings_verify(void *_set, pool_t pool,
 				       const char **error_r);
-
-/* <settings checks> */
-static struct file_listener_settings submission_unix_listeners_array[] = {
-	{
-		.path = "login/submission",
-		.mode = 0666,
-		.user = "",
-		.group = "",
-	},
-	{
-		.path = "srv.submission/%{pid}",
-		.type = "admin",
-		.mode = 0600,
-		.user = "",
-		.group = "",
-	},
-};
-static struct file_listener_settings *submission_unix_listeners[] = {
-	&submission_unix_listeners_array[0],
-	&submission_unix_listeners_array[1],
-};
-static buffer_t submission_unix_listeners_buf = {
-	{ { submission_unix_listeners, sizeof(submission_unix_listeners) } }
-};
-/* </settings checks> */
 
 struct service_settings submission_service_settings = {
 	.name = "submission",
@@ -59,10 +33,22 @@ struct service_settings submission_service_settings = {
 	.idle_kill = 0,
 	.vsz_limit = UOFF_T_MAX,
 
-	.unix_listeners = { { &submission_unix_listeners_buf,
-			      sizeof(submission_unix_listeners[0]) } },
+	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
 	.inet_listeners = ARRAY_INIT
+};
+
+const struct setting_keyvalue submission_service_settings_defaults[] = {
+	{ "unix_listener", "login\\ssubmission srv.submission\\s%{pid}" },
+
+	{ "unix_listener/login\\ssubmission/path", "login/submission" },
+	{ "unix_listener/login\\ssubmission/mode", "0666" },
+
+	{ "unix_listener/srv.submission\\s%{pid}/path", "srv.submission/%{pid}" },
+	{ "unix_listener/srv.submission\\s%{pid}/type", "admin" },
+	{ "unix_listener/srv.submission\\s%{pid}/mode", "0600" },
+
+	{ NULL, NULL }
 };
 
 #undef DEF
@@ -75,7 +61,7 @@ static const struct setting_define submission_setting_defines[] = {
 
 	DEF(STR, hostname),
 
-	DEF(STR, login_greeting),
+	DEF(STR_VARS, login_greeting),
 	DEF(STR, login_trusted_networks),
 
 	DEF(STR, recipient_delimiter),
@@ -151,23 +137,15 @@ static const struct submission_settings submission_default_settings = {
 	.imap_urlauth_port = 143,
 };
 
-static const struct setting_parser_info *submission_setting_dependencies[] = {
-	&mail_user_setting_parser_info,
-	NULL
-};
-
 const struct setting_parser_info submission_setting_parser_info = {
-	.module_name = "submission",
+	.name = "submission",
+
 	.defines = submission_setting_defines,
 	.defaults = &submission_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct submission_settings),
-
-	.parent_offset = SIZE_MAX,
-
+	.pool_offset1 = 1 + offsetof(struct submission_settings, pool),
 	.check_func = submission_settings_verify,
-	.dependencies = submission_setting_dependencies
 };
 
 /* <settings checks> */

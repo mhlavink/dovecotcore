@@ -115,10 +115,12 @@ static void client_connected(struct master_service_connection *conn)
 		t_strdup_printf("script-login(%s): ", input.username));
 
 	if (drop_to_userdb_privileges) {
-		service_ctx = mail_storage_service_init(master_service, NULL, flags);
+		if (master_service_settings_read_simple(master_service, &error) < 0)
+			i_fatal("%s", error);
+		service_ctx = mail_storage_service_init(master_service, flags);
 		if (mail_storage_service_lookup(service_ctx, &input, &user, &error) <= 0)
 			i_fatal("%s", error);
-		mail_storage_service_restrict_setenv(service_ctx, user);
+		mail_storage_service_restrict_setenv(user);
 		/* we can't exec anything in a chroot */
 		env_remove("RESTRICT_CHROOT");
 		restrict_access_by_env(0, getenv("HOME"));

@@ -13,6 +13,7 @@
 #include "time-util.h"
 #include "execv-const.h"
 #include "restrict-process-size.h"
+#include "settings.h"
 #include "master-instance.h"
 #include "master-service-private.h"
 #include "master-service-settings.h"
@@ -74,11 +75,6 @@ static ARRAY(struct master_delayed_error) delayed_errors;
 static pool_t delayed_errors_pool;
 static failure_callback_t *orig_fatal_callback;
 static failure_callback_t *orig_error_callback;
-
-static const struct setting_parser_info *set_roots[] = {
-	&master_setting_parser_info,
-	NULL
-};
 
 void process_exec(const char *cmd)
 {
@@ -417,29 +413,37 @@ sig_settings_reload(const siginfo_t *si ATTR_UNUSED,
 	}
 
 	i_zero(&input);
-	input.roots = set_roots;
 	input.config_path = services_get_config_socket_path(services);
+	input.no_service_filter = TRUE;
 	input.never_exec = TRUE;
 	input.reload_config = TRUE;
 	input.return_config_fd = TRUE;
 	if (master_service_settings_read(master_service, &input,
 					 &output, &error) < 0) {
-		i_error("Error reading configuration: %s", error);
+		i_error("%s", error);
+		i_sd_notify(0, "READY=1");
+		return;
+	}
+	if (settings_get(master_service_get_event(master_service),
+			 &master_setting_parser_info, 0,
+			 &set, &error) < 0) {
+		i_close_fd(&output.config_fd);
+		i_error("%s", error);
 		i_sd_notify(0, "READY=1");
 		return;
 	}
 	i_close_fd(&global_config_fd);
 	global_config_fd = output.config_fd;
 	fd_close_on_exec(global_config_fd, TRUE);
-	set = master_service_settings_get_root_set(master_service,
-						   &master_setting_parser_info);
 
 	if (services_create(set, &new_services, &error) < 0) {
 		/* new configuration is invalid, keep the old */
 		i_error("Config reload failed: %s", error);
 		i_sd_notify(0, "READY=1");
+		settings_free(set);
 		return;
 	}
+	settings_free(set);
 	new_services->config->config_file_path =
 		p_strdup(new_services->pool,
 			 services->config->config_file_path);
@@ -497,24 +501,25 @@ static void sig_die(const siginfo_t *si, void *context ATTR_UNUSED)
 	master_service_stop(master_service);
 }
 
-static struct master_settings *master_settings_read(void)
+static const struct master_settings *master_settings_read(void)
 {
 	struct master_service_settings_input input;
 	struct master_service_settings_output output;
 	const char *error;
 
 	i_zero(&input);
-	input.roots = set_roots;
+	input.no_service_filter = TRUE;
 	input.preserve_environment = TRUE;
+	input.check_full_config = TRUE;
 	input.always_exec = TRUE;
 	input.return_config_fd = TRUE;
 	if (master_service_settings_read(master_service, &input, &output,
 					 &error) < 0)
-		i_fatal("Error reading configuration: %s", error);
+		i_fatal("%s", error);
 	global_config_fd = output.config_fd;
 	fd_close_on_exec(global_config_fd, TRUE);
-	return master_service_settings_get_root_set(master_service,
-						    &master_setting_parser_info);
+	return settings_get_or_fatal(master_service_get_event(master_service),
+				     &master_setting_parser_info);
 }
 
 static void main_log_startup(char **protocols)
@@ -784,7 +789,7 @@ static void print_build_options(void)
 
 int main(int argc, char *argv[])
 {
-	struct master_settings *set;
+	const struct master_settings *set;
 	const char *error, *doveconf_arg = NULL;
 	failure_callback_t *orig_info_callback, *orig_debug_callback;
 	bool foreground = FALSE, ask_key_pass = FALSE;
@@ -924,7 +929,7 @@ int main(int argc, char *argv[])
 	fatal_log_check(set);
 
 	const struct master_service_settings *service_set =
-		master_service_settings_get(master_service);
+		master_service_get_service_settings(master_service);
 	master_service_import_environment(service_set->import_environment);
 	master_service_env_clean();
 
@@ -953,6 +958,7 @@ int main(int argc, char *argv[])
 
 	T_BEGIN {
 		main_init(set);
+		settings_free(set);
 	} T_END;
 	master_service_run(master_service, NULL);
 	main_deinit();

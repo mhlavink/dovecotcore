@@ -7,7 +7,7 @@
 #include "var-expand.h"
 #include "env-util.h"
 #include "var-expand.h"
-#include "settings.h"
+#include "settings-legacy.h"
 #include "oauth2.h"
 #include "http-client.h"
 #include "http-url.h"
@@ -20,8 +20,6 @@
 #include "db-oauth2.h"
 #include "dcrypt.h"
 #include "dict.h"
-
-#include <stddef.h>
 
 struct passdb_oauth2_settings {
 	/* tokeninfo endpoint, format https://endpoint/somewhere?token= */
@@ -291,12 +289,12 @@ struct db_oauth2 *db_oauth2_init(const char *config_path)
 	}
 
 	if (db->oauth2_set.introspection_mode == INTROSPECTION_MODE_LOCAL) {
-		struct dict_settings dict_set = {
+		struct dict_legacy_settings dict_set = {
 			.base_dir = global_auth_settings->base_dir,
 			.event_parent = auth_event,
 		};
-		if (dict_init(db->set.local_validation_key_dict, &dict_set,
-			      &db->oauth2_set.key_dict, &error) < 0)
+		if (dict_init_legacy(db->set.local_validation_key_dict, &dict_set,
+				     &db->oauth2_set.key_dict, &error) < 0)
 			i_fatal("Cannot initialize key dict: %s", error);
 		/* failure to initialize dcrypt is not fatal - we can still
 		   validate HMAC based keys */

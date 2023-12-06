@@ -6,8 +6,6 @@
 #include "master-service-ssl-settings.h"
 #include "iostream-ssl.h"
 
-#include <stddef.h>
-
 #undef DEF
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct master_service_ssl_settings)
@@ -60,14 +58,12 @@ static const struct master_service_ssl_settings master_service_ssl_default_setti
 };
 
 const struct setting_parser_info master_service_ssl_setting_parser_info = {
-	.module_name = "ssl",
+	.name = "master_service_ssl",
 	.defines = master_service_ssl_setting_defines,
 	.defaults = &master_service_ssl_default_settings,
 
-	.type_offset = SIZE_MAX,
+	.pool_offset1 = 1 + offsetof(struct master_service_ssl_settings, pool),
 	.struct_size = sizeof(struct master_service_ssl_settings),
-
-	.parent_offset = SIZE_MAX,
 	.check_func = master_service_ssl_settings_check
 };
 
@@ -95,21 +91,14 @@ static const struct master_service_ssl_server_settings master_service_ssl_server
 	.ssl_dh = "",
 };
 
-static const struct setting_parser_info *master_service_ssl_server_setting_dependencies[] = {
-	&master_service_ssl_setting_parser_info,
-	NULL
-};
-
 const struct setting_parser_info master_service_ssl_server_setting_parser_info = {
-	.module_name = "ssl-server",
+	.name = "master_service_ssl_server",
+
 	.defines = master_service_ssl_server_setting_defines,
 	.defaults = &master_service_ssl_server_default_settings,
 
-	.type_offset = SIZE_MAX,
+	.pool_offset1 = 1 + offsetof(struct master_service_ssl_server_settings, pool),
 	.struct_size = sizeof(struct master_service_ssl_server_settings),
-
-	.parent_offset = SIZE_MAX,
-	.dependencies = master_service_ssl_server_setting_dependencies,
 };
 
 /* <settings checks> */

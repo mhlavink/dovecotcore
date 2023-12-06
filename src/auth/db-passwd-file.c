@@ -271,8 +271,8 @@ static int passwd_file_sync(struct auth_request *request,
 			e_error(authdb_event(request),
 				"%s", eacces_error_get("stat", pw->path));
 		} else if (errno == ENOENT) {
-			auth_request_log_info(request, "passwd-file",
-					      "missing passwd file: %s", pw->path);
+			e_info(authdb_event(request),
+			       "missing passwd file: %s", pw->path);
 			ret = 0;
 		} else {
 			e_error(authdb_event(request),
@@ -484,7 +484,7 @@ int db_passwd_file_lookup(struct db_passwd_file *db,
 
 	*user_r = hash_table_lookup(pw->users, str_c(username));
 	if (*user_r == NULL) {
-		auth_request_log_unknown_user(request, AUTH_SUBSYS_DB);
+		auth_request_db_log_unknown_user(request);
 		return 0;
 	}
 	return 1;

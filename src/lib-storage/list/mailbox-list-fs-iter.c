@@ -2,11 +2,13 @@
 
 #include "lib.h"
 #include "array.h"
+#include "hash.h"
 #include "str.h"
 #include "unichar.h"
 #include "imap-match.h"
 #include "imap-utf7.h"
 #include "mail-storage.h"
+#include "mail-storage-private.h"
 #include "mailbox-tree.h"
 #include "mailbox-list-subscriptions.h"
 #include "mailbox-list-iter-private.h"
@@ -52,6 +54,7 @@ struct fs_list_iterate_context {
 	bool inbox_found:1;
 	bool inbox_has_children:1;
 	bool listed_prefix_inbox:1;
+	bool reverse_index_iteration:1;
 };
 
 static int
@@ -120,7 +123,7 @@ fs_list_rename_invalid(struct fs_list_iterate_context *ctx,
 	(void)imap_utf8_to_utf7(str_c(destname), dest);
 
 	if (rename(src, str_c(dest)) < 0 && errno != ENOENT)
-		e_error(ctx->ctx.list->ns->user->event,
+		e_error(ctx->ctx.list->event,
 			"rename(%s, %s) failed: %m", src, str_c(dest));
 }
 
@@ -257,12 +260,12 @@ fs_list_get_storage_path(struct fs_list_iterate_context *ctx,
 	if (*path != '/') {
 		/* non-absolute path. add the mailbox root dir as prefix. */
 		enum mailbox_list_path_type type =
-			ctx->ctx.list->set.iter_from_index_dir ?
+			ctx->ctx.iter_from_index_dir ?
 			MAILBOX_LIST_PATH_TYPE_INDEX :
 			MAILBOX_LIST_PATH_TYPE_MAILBOX;
 		if (!mailbox_list_get_root_path(ctx->ctx.list, type, &root))
 			return FALSE;
-		if (ctx->ctx.list->set.iter_from_index_dir &&
+		if (ctx->ctx.iter_from_index_dir &&
 		    ctx->ctx.list->set.mailbox_dir_name[0] != '\0') {
 			/* append "mailboxes/" to the index root */
 			root = t_strconcat(root, "/",
@@ -529,7 +532,13 @@ fs_list_iter_init(struct mailbox_list *_list, const char *const *patterns,
 	ctx->info_pool = pool_alloconly_create("fs list", 1024);
 	ctx->sep = mail_namespace_get_sep(_list->ns);
 	ctx->info.ns = _list->ns;
+	ctx->ctx.iter_from_index_dir = ctx->ctx.list->set.iter_from_index_dir;
 
+	if ((flags & MAILBOX_LIST_ITER_FORCE_RESYNC) != 0) {
+		i_assert(!hash_table_is_created(ctx->ctx.found_mailboxes));
+		hash_table_create(&ctx->ctx.found_mailboxes, ctx->ctx.pool, 8,
+				  str_hash, strcmp);
+	}
 	if (!fs_list_get_valid_patterns(ctx, patterns)) {
 		/* we've only invalid patterns (or INBOX). create a glob
 		   anyway to avoid any crashes due to glob being accessed
@@ -560,6 +569,7 @@ int fs_list_iter_deinit(struct mailbox_list_iterate_context *_ctx)
 		pool_unref(&dir->pool);
 	}
 
+	hash_table_destroy(&_ctx->found_mailboxes);
 	pool_unref(&ctx->info_pool);
 	pool_unref(&_ctx->pool);
 	return ret;
@@ -736,9 +746,18 @@ fs_list_entry(struct fs_list_iterate_context *ctx,
 		   doesn't */
 		return 0;
 	}
-	if (mailbox_list_iter_try_delete_noselect(&ctx->ctx, &ctx->info, storage_name))
+	if ((ctx->ctx.flags & MAILBOX_LIST_ITER_FORCE_RESYNC) == 0 &&
+	    mailbox_list_iter_try_delete_noselect(&ctx->ctx, &ctx->info, storage_name))
 		return 0;
-	return 1;
+       if ((ctx->info.flags & MAILBOX_NOINFERIORS) != 0 &&
+           ctx->ctx.iter_from_index_dir) {
+	       /* Index directory is only expected to contain child directories
+		  for mailboxes. Any files in there shouldn't be listed
+		  (e.g. especially various index files inside mbox format's
+		  .imap/ directory). */
+	       return 0;
+       }
+       return 1;
 }
 
 static int
@@ -794,6 +813,73 @@ fs_list_next(struct fs_list_iterate_context *ctx)
 	return 0;
 }
 
+static void
+fs_list_iter_reset(struct fs_list_iterate_context *ctx)
+{
+	i_assert(ctx->dir == NULL);
+	ctx->inbox_found = FALSE;
+	ctx->inbox_has_children = FALSE;
+	ctx->listed_prefix_inbox = FALSE;
+	/* reset root */
+	ctx->root_idx = 0;
+	fs_list_next_root(ctx);
+}
+
+static bool fs_list_iter_try_insert_unseen(struct fs_list_iterate_context *_ctx,
+					   const struct mailbox_info *info)
+{
+	struct mailbox_list_iterate_context *ctx = &_ctx->ctx;
+
+	if (hash_table_lookup(ctx->found_mailboxes, info->vname) == NULL) {
+		/* Insert unseen mailbox */
+		const char *vname = p_strdup(ctx->pool, info->vname);
+		hash_table_insert(ctx->found_mailboxes, vname, POINTER_CAST(1));
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static bool fs_list_iter_mkdir_missing(struct fs_list_iterate_context *ctx)
+{
+	struct mailbox_list_iterate_context *_ctx = &ctx->ctx;
+	bool unseen = fs_list_iter_try_insert_unseen(ctx, &ctx->info);
+
+	if (unseen && ctx->reverse_index_iteration) {
+		/* This mailbox was not found in the first iteration,
+		   recreate the directory for it */
+	} else if (!ctx->reverse_index_iteration) {
+		/* This is the first iteration of this mailbox, no directory
+		   must be recreated now */
+		return FALSE;
+	} else {
+		/* This mailbox was found in both iterations */
+		return TRUE;
+	}
+
+	/* This mailbox was listed the first time on the reverse index
+	   iteration but not on the second iteration.
+	   Create the missing directory for the first iteration. */
+	enum mailbox_list_path_type type = !_ctx->iter_from_index_dir ?
+					   MAILBOX_LIST_PATH_TYPE_INDEX :
+					   MAILBOX_LIST_PATH_TYPE_MAILBOX;
+	const char *path;
+	if (mailbox_list_get_path(ctx->info.ns->list, ctx->info.vname, type,
+				  &path) == 1) {
+		struct mailbox *box = mailbox_alloc(ctx->info.ns->list,
+						    ctx->info.vname, 0);
+		if (mailbox_mkdir(box, path, type) < 0)
+			e_error(box->event,
+				"Failed to create path: %s for mailbox %s: %s",
+				path, ctx->info.vname,
+				mailbox_get_last_internal_error(box, NULL));
+		mailbox_free(&box);
+	} else
+		e_error(ctx->ctx.list->ns->user->event,
+			"Failed to get mailbox path for %s",
+			ctx->info.vname);
+	return FALSE;
+}
+
 const struct mailbox_info *
 fs_list_iter_next(struct mailbox_list_iterate_context *_ctx)
 {
@@ -808,9 +894,21 @@ fs_list_iter_next(struct mailbox_list_iterate_context *_ctx)
 		ret = fs_list_next(ctx);
 	} T_END;
 
-	if (ret == 0)
+	if (ret > 0 && (_ctx->flags & MAILBOX_LIST_ITER_FORCE_RESYNC) != 0) {
+		if (fs_list_iter_mkdir_missing(ctx))
+			return fs_list_iter_next(_ctx);
+	}
+
+	if (ret == 0) {
+		if ((_ctx->flags & MAILBOX_LIST_ITER_FORCE_RESYNC) != 0 &&
+		    !ctx->reverse_index_iteration) {
+			ctx->reverse_index_iteration = TRUE;
+			_ctx->iter_from_index_dir = !_ctx->iter_from_index_dir;
+			fs_list_iter_reset(ctx);
+			return fs_list_iter_next(_ctx);
+		}
 		return mailbox_list_iter_default_next(_ctx);
-	else if (ret < 0)
+	} else if (ret < 0)
 		return NULL;
 
 	if (_ctx->list->ns->type == MAIL_NAMESPACE_TYPE_SHARED &&

@@ -15,6 +15,7 @@
 #include "hostpid.h"
 #include "file-dotlock.h"
 #include "var-expand.h"
+#include "settings.h"
 #include "master-service.h"
 #include "mail-storage.h"
 #include "mail-storage-service.h"
@@ -339,8 +340,6 @@ static void pop3_lock_session_refresh(struct client *client)
 
 int pop3_lock_session(struct client *client)
 {
-	const struct mail_storage_settings *mail_set =
-		mail_storage_service_user_get_mail_set(client->user->service_user);
 	struct dotlock_settings dotlock_set;
 	enum mailbox_list_path_type type;
 	const char *dir, *path;
@@ -367,8 +366,8 @@ int pop3_lock_session(struct client *client)
 	path = t_strdup_printf("%s/"POP3_LOCK_FNAME, dir);
 
 	dotlock_set = session_dotlock_set;
-	dotlock_set.use_excl_lock = mail_set->dotlock_use_excl;
-	dotlock_set.nfs_flush = mail_set->mail_nfs_storage;
+	dotlock_set.use_excl_lock = client->inbox_ns->mail_set->dotlock_use_excl;
+	dotlock_set.nfs_flush = client->inbox_ns->mail_set->mail_nfs_storage;
 
 	ret = file_dotlock_create(&dotlock_set, path, 0,
 				  &client->session_dotlock);
@@ -417,9 +416,10 @@ struct client *client_create(int fd_in, int fd_out,
 
 	client->user = user;
 
-	client->mail_set = mail_user_set_get_storage_set(user);
+	const struct mail_storage_settings *mail_set =
+		mail_user_set_get_storage_set(client->user);
 	client->uidl_keymask =
-		parse_uidl_keymask(client->mail_set->pop3_uidl_format);
+		parse_uidl_keymask(mail_set->pop3_uidl_format);
 	if (client->uidl_keymask == 0)
 		i_fatal("Invalid pop3_uidl_format");
 
@@ -650,6 +650,7 @@ static void client_default_destroy(struct client *client, const char *reason)
 	pop3_refresh_proctitle();
 	mail_user_autoexpunge(client->user);
 	mail_user_deinit(&client->user);
+	settings_free(client->set);
 
 	pop3_client_count--;
 	DLLIST_REMOVE(&pop3_clients, client);

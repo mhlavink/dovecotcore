@@ -11,8 +11,10 @@
 #include "str.h"
 #include "process-title.h"
 #include "restrict-access.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-service.h"
+#include "master-service-settings.h"
 #include "login-server.h"
 #include "master-interface.h"
 #include "master-admin-client.h"
@@ -146,8 +148,15 @@ client_create_from_input(const struct mail_storage_service_input *input,
 	}
 	restrict_access_allow_coredumps(TRUE);
 
-	set = settings_parser_get_root_set(mail_user->set_parser,
-			&pop3_setting_parser_info);
+	if (settings_get(mail_user->event, &pop3_setting_parser_info, 0,
+			 &set, error_r) < 0) {
+		if (write(fd_out, lookup_error_str, strlen(lookup_error_str)) < 0) {
+			/* ignored */
+		}
+		mail_user_deinit(&mail_user);
+		event_unref(&event);
+		return -1;
+	}
 	if (set->verbose_proctitle)
 		verbose_proctitle = TRUE;
 
@@ -357,14 +366,11 @@ static void client_connected(struct master_service_connection *conn)
 
 int main(int argc, char *argv[])
 {
-	static const struct setting_parser_info *set_roots[] = {
-		&pop3_setting_parser_info,
-		NULL
-	};
 	struct login_server_settings login_set;
 	enum master_service_flags service_flags = 0;
 	enum mail_storage_service_flags storage_service_flags = 0;
 	const char *username = NULL, *auth_socket_path = "auth-master";
+	const char *error;
 	int c;
 
 	i_zero(&login_set);
@@ -413,7 +419,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	const char *error;
+	if (master_service_settings_read_simple(master_service, &error) < 0)
+		i_fatal("%s", error);
+
 	if (t_abspath(auth_socket_path, &login_set.auth_socket_path, &error) < 0) {
 		i_fatal("t_abspath(%s) failed: %s", auth_socket_path, error);
 	}
@@ -435,7 +443,7 @@ int main(int argc, char *argv[])
 
 	storage_service =
 		mail_storage_service_init(master_service,
-					  set_roots, storage_service_flags);
+					  storage_service_flags);
 	master_service_init_finish(master_service);
 	/* NOTE: login_set.*_socket_path are now invalid due to data stack
 	   having been freed */

@@ -17,7 +17,7 @@ extern struct mailbox raw_mailbox;
 
 struct mail_user *
 raw_storage_create_from_set(struct mail_storage_service_ctx *ctx,
-			    struct setting_parser_context *unexpanded_set_parser)
+			    struct settings_instance *set_instance)
 {
 	struct mail_user *user;
 	struct mail_namespace *ns;
@@ -34,7 +34,7 @@ raw_storage_create_from_set(struct mail_storage_service_ctx *ctx,
 	event_disable_callbacks(event);
 
 	const struct master_service_settings *service_set =
-		master_service_settings_get(master_service);
+		master_service_get_service_settings(master_service);
 	const char *const userdb_fields[] = {
 		/* use unwritable home directory */
 		t_strdup_printf("home=%s/empty", service_set->base_dir),
@@ -45,7 +45,7 @@ raw_storage_create_from_set(struct mail_storage_service_ctx *ctx,
 	struct mail_storage_service_input input = {
 		.event_parent = event,
 		.username = "raw-mail-user",
-		.unexpanded_set_parser = unexpanded_set_parser,
+		.set_instance = set_instance,
 		.autocreated = TRUE,
 		.no_userdb_lookup = TRUE,
 		.userdb_fields = userdb_fields,
@@ -238,7 +238,6 @@ struct mail_storage raw_storage = {
 		MAIL_STORAGE_CLASS_FLAG_BINARY_DATA,
 
 	.v = {
-		NULL,
 		raw_storage_alloc,
 		NULL,
 		index_storage_destroy,

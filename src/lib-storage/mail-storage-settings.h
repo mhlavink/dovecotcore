@@ -12,6 +12,7 @@ struct smtp_address;
 struct setting_parser_context;
 
 struct mail_storage_settings {
+	pool_t pool;
 	const char *mail_location;
 	const char *mail_attachment_fs;
 	const char *mail_attachment_dir;
@@ -55,17 +56,18 @@ struct mail_storage_settings {
 	bool mailbox_list_index;
 	bool mailbox_list_index_very_dirty_syncs;
 	bool mailbox_list_index_include_inbox;
-	bool mail_debug;
 	bool mail_full_filesystem_access;
 	bool maildir_stat_dirs;
 	bool mail_shared_explicit_inbox;
 	const char *lock_method;
 	const char *pop3_uidl_format;
 
-	const char *hostname;
 	const char *recipient_delimiter;
 
 	const char *mail_attachment_detection_options;
+
+	ARRAY_TYPE(const_string) namespaces;
+	ARRAY(const char *) plugin_envs;
 
 	enum file_lock_method parsed_lock_method;
 	enum fsync_mode parsed_fsync_mode;
@@ -75,9 +77,11 @@ struct mail_storage_settings {
 	bool parsed_mail_attachment_exclude_inlined;
 	bool parsed_mail_attachment_detection_add_flags;
 	bool parsed_mail_attachment_detection_no_flags_on_fetch;
+	bool parsed_have_special_use_mailboxes;
 };
 
 struct mail_namespace_settings {
+	pool_t pool;
 	const char *name;
 	const char *type;
 	const char *separator;
@@ -93,9 +97,9 @@ struct mail_namespace_settings {
 	bool disabled;
 	unsigned int order;
 
-	ARRAY(struct mailbox_settings *) mailboxes;
-	struct mail_user_settings *user_set;
+	ARRAY_TYPE(const_string) mailboxes;
 	const char *unexpanded_location;
+	bool parsed_have_special_use_mailboxes;
 };
 
 /* <settings checks> */
@@ -104,6 +108,7 @@ struct mail_namespace_settings {
 #define MAILBOX_SET_AUTO_SUBSCRIBE "subscribe"
 /* </settings checks> */
 struct mailbox_settings {
+	pool_t pool;
 	const char *name;
 	const char *autocreate;
 	const char *special_use;
@@ -114,9 +119,11 @@ struct mailbox_settings {
 };
 
 struct mail_user_settings {
+	pool_t pool;
 	const char *base_dir;
 	const char *auth_socket_path;
 	const char *mail_temp_dir;
+	bool mail_debug;
 
 	const char *mail_uid;
 	const char *mail_gid;
@@ -137,9 +144,6 @@ struct mail_user_settings {
 	const char *hostname;
 	const char *postmaster_address;
 
-	ARRAY(struct mail_namespace_settings *) namespaces;
-	ARRAY(const char *) plugin_envs;
-
 	/* May be NULL - use mail_storage_get_postmaster_address() instead of
 	   directly accessing this. */
 	const struct message_address *_parsed_postmaster_address;
@@ -149,6 +153,7 @@ struct mail_user_settings {
 extern const struct setting_parser_info mail_user_setting_parser_info;
 extern const struct setting_parser_info mail_namespace_setting_parser_info;
 extern const struct setting_parser_info mail_storage_setting_parser_info;
+extern const struct setting_parser_info mailbox_setting_parser_info;
 extern const struct mail_namespace_settings mail_namespace_default_settings;
 extern const struct mailbox_settings mailbox_default_settings;
 

@@ -39,8 +39,7 @@ struct master_service {
 	const char *version_string;
 	char *config_path;
 	ARRAY_TYPE(const_string) config_overrides;
-	void *config_mmap_base;
-	size_t config_mmap_size;
+	struct settings_root *settings_root;
 	int syslog_facility;
 	data_stack_frame_t datastack_frame_id;
 
@@ -74,9 +73,7 @@ struct master_service {
 
 	master_service_connection_callback_t *callback;
 
-	pool_t set_pool;
 	const struct master_service_settings *set;
-	struct setting_parser_context *set_parser;
 
 	struct ssl_iostream_context *ssl_ctx;
 	time_t ssl_params_last_refresh;

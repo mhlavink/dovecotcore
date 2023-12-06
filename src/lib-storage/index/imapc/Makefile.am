@@ -4,6 +4,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib \
 	-I$(top_srcdir)/src/lib-test \
 	-I$(top_srcdir)/src/lib-settings \
+	-I$(top_srcdir)/src/lib-master \
 	-I$(top_srcdir)/src/lib-mail \
 	-I$(top_srcdir)/src/lib-imap \
 	-I$(top_srcdir)/src/lib-imap-client \
@@ -14,6 +15,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib-ssl-iostream
 
 libstorage_imapc_la_SOURCES = \
+	imapc-attribute.c \
 	imapc-list.c \
 	imapc-mail.c \
 	imapc-mail-fetch.c \
@@ -25,6 +27,7 @@ libstorage_imapc_la_SOURCES = \
 	imapc-storage.c
 
 headers = \
+	imapc-attribute.h \
 	imapc-list.h \
 	imapc-mail.h \
 	imapc-search.h \

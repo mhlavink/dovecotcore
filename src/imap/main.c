@@ -11,9 +11,11 @@
 #include "randgen.h"
 #include "restrict-access.h"
 #include "write-full.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-interface.h"
 #include "master-service.h"
+#include "master-service-settings.h"
 #include "master-admin-client.h"
 #include "login-server.h"
 #include "mail-user.h"
@@ -249,7 +251,7 @@ int client_create_from_input(const struct mail_storage_service_input *input,
 	struct mail_user *mail_user;
 	struct client *client;
 	struct imap_settings *imap_set;
-	struct smtp_submit_settings *smtp_set;
+	struct smtp_submit_settings *smtp_set = NULL;
 	struct event *event;
 
 	event = event_create(NULL);
@@ -280,10 +282,15 @@ int client_create_from_input(const struct mail_storage_service_input *input,
 
 	restrict_access_allow_coredumps(TRUE);
 
-	smtp_set = settings_parser_get_root_set(mail_user->set_parser,
-			&smtp_submit_setting_parser_info);
-	imap_set = settings_parser_get_root_set(mail_user->set_parser,
-			&imap_setting_parser_info);
+	if (settings_get(mail_user->event, &smtp_submit_setting_parser_info, 0,
+			 &smtp_set, error_r) < 0 ||
+	    settings_get(mail_user->event, &imap_setting_parser_info, 0,
+			 &imap_set, error_r) < 0) {
+		settings_free(smtp_set);
+		mail_user_deinit(&mail_user);
+		event_unref(&event);
+		return -1;
+	}
 	if (imap_set->verbose_proctitle)
 		verbose_proctitle = TRUE;
 
@@ -474,11 +481,6 @@ static void client_connected(struct master_service_connection *conn)
 
 int main(int argc, char *argv[])
 {
-	static const struct setting_parser_info *set_roots[] = {
-		&smtp_submit_setting_parser_info,
-		&imap_setting_parser_info,
-		NULL
-	};
 	struct login_server_settings login_set;
 	enum master_service_flags service_flags = 0;
 	enum mail_storage_service_flags storage_service_flags =
@@ -491,6 +493,7 @@ int main(int argc, char *argv[])
 		 */
 		MAIL_STORAGE_SERVICE_FLAG_NO_NAMESPACES;
 	const char *username = NULL, *auth_socket_path = "auth-master";
+	const char *error;
 	int c;
 
 	i_zero(&login_set);
@@ -538,6 +541,9 @@ int main(int argc, char *argv[])
 	master_admin_clients_init(&admin_callbacks);
 	master_service_set_die_callback(master_service, imap_die);
 
+	if (master_service_settings_read_simple(master_service, &error) < 0)
+		i_fatal("%s", error);
+
 	/* plugins may want to add commands, so this needs to be called early */
 	commands_init();
 	imap_fetch_handlers_init();
@@ -548,7 +554,6 @@ int main(int argc, char *argv[])
 	verbose_proctitle = !IS_STANDALONE() &&
 		getenv(MASTER_VERBOSE_PROCTITLE_ENV) != NULL;
 
-	const char *error;
 	if (t_abspath(auth_socket_path, &login_set.auth_socket_path, &error) < 0)
 		i_fatal("t_abspath(%s) failed: %s", auth_socket_path, error);
 
@@ -566,7 +571,7 @@ int main(int argc, char *argv[])
 
 	storage_service =
 		mail_storage_service_init(master_service,
-					  set_roots, storage_service_flags);
+					  storage_service_flags);
 	master_service_init_finish(master_service);
 	/* NOTE: login_set.*_socket_path are now invalid due to data stack
 	   having been freed */

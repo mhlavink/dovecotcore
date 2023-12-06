@@ -61,7 +61,7 @@ passdb_dict_lookup_key(struct auth_request *auth_request,
 	if (ret < 0)
 		return PASSDB_RESULT_INTERNAL_FAILURE;
 	else if (ret == 0) {
-		auth_request_log_unknown_user(auth_request, AUTH_SUBSYS_DB);
+		auth_request_db_log_unknown_user(auth_request);
 		return PASSDB_RESULT_USER_UNKNOWN;
 	} else {
 		if (dict_query_save_results(auth_request, module->conn, iter) < 0)
@@ -110,10 +110,9 @@ static void passdb_dict_lookup_pass(struct passdb_dict_request *dict_request)
 			auth_request);
 	} else {
 		if (password != NULL) {
-			passdb_result =
-				auth_request_password_verify(auth_request,
-					auth_request->mech_password,
-					password, scheme, AUTH_SUBSYS_DB);
+			passdb_result = auth_request_db_password_verify(
+				auth_request, auth_request->mech_password,
+				password, scheme);
 		}
 
 		dict_request->callback.verify_plain(passdb_result,

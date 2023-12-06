@@ -11,15 +11,12 @@
 #include "master-service.h"
 #include "auth-client.h"
 #include "client-common.h"
-#include "imap-urlauth-login-settings.h"
 
 #define IMAP_URLAUTH_PROTOCOL_MAJOR_VERSION 2
 #define IMAP_URLAUTH_PROTOCOL_MINOR_VERSION 0
 
 struct imap_urlauth_client {
 	struct client common;
-
-	const struct imap_urlauth_login_settings *set;
 
 	bool version_received:1;
 };
@@ -143,14 +140,10 @@ static struct client *imap_urlauth_client_alloc(pool_t pool)
 	return &uauth_client->common;
 }
 
-static void imap_urlauth_client_create
-(struct client *client, void **other_sets)
+static int imap_urlauth_client_create(struct client *client)
 {
-	struct imap_urlauth_client *uauth_client =
-		(struct imap_urlauth_client *)client;
-
-	uauth_client->set = other_sets[0];
 	client->io = io_add_istream(client->input, client_input, client);
+	return 0;
 }
 
 static void imap_urlauth_client_notify_auth_ready(struct client *client)
@@ -170,7 +163,6 @@ static void imap_urlauth_client_notify_auth_ready(struct client *client)
 
 static void imap_urlauth_login_preinit(void)
 {
-	login_set_roots = imap_urlauth_login_setting_roots;
 }
 
 static void imap_urlauth_login_init(void)

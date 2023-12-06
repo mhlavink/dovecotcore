@@ -1086,12 +1086,11 @@ event_strlist_append(struct event *event, const char *key, const char *value)
 {
 	struct event_field *field = event_get_field(event, key, FALSE);
 
-	if (field->value_type != EVENT_FIELD_VALUE_TYPE_STRLIST)
-		i_zero(&field->value);
-	field->value_type = EVENT_FIELD_VALUE_TYPE_STRLIST;
-
-	if (!array_is_created(&field->value.strlist))
+	if (field->value_type != EVENT_FIELD_VALUE_TYPE_STRLIST ||
+	    !array_is_created(&field->value.strlist)) {
+		field->value_type = EVENT_FIELD_VALUE_TYPE_STRLIST;
 		p_array_init(&field->value.strlist, event->pool, 1);
+	}
 
 	/* lets not add empty values there though */
 	if (value == NULL)
@@ -1221,6 +1220,11 @@ struct event *event_get_parent(const struct event *event)
 	return event->parent;
 }
 
+pool_t event_get_pool(const struct event *event)
+{
+	return event->pool;
+}
+
 void event_get_create_time(const struct event *event, struct timeval *tv_r)
 {
 	*tv_r = event->tv_created;
@@ -1324,6 +1328,7 @@ void event_categories_iterate_deinit(struct event_category_iterator **_iter)
 
 	hash_table_iterate_deinit(&iter->iter);
 	hash_table_destroy(&iter->hash);
+	i_free(iter);
 }
 
 void event_send(struct event *event, struct failure_context *ctx,

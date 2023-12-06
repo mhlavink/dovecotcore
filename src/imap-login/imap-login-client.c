@@ -7,6 +7,7 @@
 #include "ostream.h"
 #include "safe-memset.h"
 #include "str.h"
+#include "settings.h"
 #include "imap-parser.h"
 #include "imap-id.h"
 #include "imap-resp-code.h"
@@ -376,11 +377,17 @@ static struct client *imap_client_alloc(pool_t pool)
 	return &imap_client->common;
 }
 
-static void imap_client_create(struct client *client, void **other_sets)
+static int imap_client_create(struct client *client)
 {
 	struct imap_client *imap_client = (struct imap_client *)client;
+	const char *error;
 
-	imap_client->set = other_sets[0];
+	if (settings_get(client->event, &imap_login_setting_parser_info, 0,
+			 &imap_client->set, &error) < 0) {
+		e_error(client->event, "%s", error);
+		return -1;
+	}
+
 	imap_client->parser =
 		imap_parser_create(imap_client->common.input,
 				   imap_client->common.output,
@@ -388,6 +395,7 @@ static void imap_client_create(struct client *client, void **other_sets)
 	if (imap_client->set->imap_literal_minus)
 		imap_parser_enable_literal_minus(imap_client->parser);
 	client->io = io_add_istream(client->input, client_input, client);
+	return 0;
 }
 
 static void imap_client_destroy(struct client *client)
@@ -401,6 +409,7 @@ static void imap_client_destroy(struct client *client)
 		cmd_id_free(imap_client);
 	}
 
+	settings_free(imap_client->set);
 	i_free_and_null(imap_client->proxy_backend_capability);
 	imap_parser_unref(&imap_client->parser);
 }
@@ -513,7 +522,6 @@ imap_client_notify_disconnect(struct client *client,
 
 static void imap_login_preinit(void)
 {
-	login_set_roots = imap_login_setting_roots;
 }
 
 static const struct imap_login_command imap_login_commands[] = {

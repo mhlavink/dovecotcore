@@ -257,7 +257,7 @@ user_verify_restricted_uid(struct auth_request *auth_request)
 		return 0;
 	}
 
-	auth_request_log_error(auth_request, "userdb",
+	e_error(auth_request->event, "userdb: "
 		"client doesn't have lookup permissions for this user: %s "
 		"(to bypass this check, set: service auth { unix_listener %s { mode=0777 } })",
 		reason, conn->path);
@@ -297,6 +297,11 @@ user_callback(enum userdb_result result,
 	case USERDB_RESULT_OK:
 		str_printfa(str, "USER\t%u\t", auth_request->id);
 		str_append_tabescaped(str, auth_request->fields.user);
+		if (auth_request->fields.local_name != NULL) {
+			str_append(str, "\tlocal_name=");
+			str_append_tabescaped(str, auth_request->fields.local_name);
+			str_append_c(str, '\t');
+		}
 		auth_fields_append(auth_request->fields.userdb_reply, str,
 				   AUTH_FIELD_FLAG_HIDDEN, 0, TRUE);
 		if (*auth_request->set->anonymous_username != '\0' &&
@@ -332,7 +337,7 @@ master_input_user(struct auth_master_connection *conn, const char *args)
 	if (ret <= 0) {
 		if (ret < 0)
 			return FALSE;
-		auth_request_log_info(auth_request, "userdb", "%s", error);
+		e_info(auth_request->event, "userdb: %s", error);
 		user_callback(USERDB_RESULT_USER_UNKNOWN, auth_request);
 	} else {
 		auth_request_set_state(auth_request, AUTH_REQUEST_STATE_USERDB);
@@ -439,12 +444,12 @@ master_input_pass(struct auth_master_connection *conn, const char *args)
 	if (ret <= 0) {
 		if (ret < 0)
 			return FALSE;
-		auth_request_log_info(auth_request, "passdb", "%s", error);
+		e_info(auth_request->event, "passdb: %s", error);
 		pass_callback(PASSDB_RESULT_USER_UNKNOWN,
 			      uchar_empty_ptr, 0, auth_request);
 	} else if (conn->userdb_restricted_uid != 0) {
 		/* no permissions to do this lookup */
-		auth_request_log_error(auth_request, "passdb",
+		e_error(auth_request->event, "passdb: "
 			"Auth client doesn't have permissions to do "
 			"a PASS lookup: %s", auth_restricted_reason(conn));
 		pass_callback(PASSDB_RESULT_INTERNAL_FAILURE,

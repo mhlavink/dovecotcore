@@ -3,75 +3,15 @@
 #include "lib.h"
 #include "array.h"
 #include "hash-method.h"
+#include "settings.h"
 #include "settings-parser.h"
 #include "master-service-private.h"
 #include "master-service-settings.h"
 #include "service-settings.h"
 #include "auth-settings.h"
 
-#include <stddef.h>
-
-static bool auth_settings_check(void *_set, pool_t pool, const char **error_r);
+static bool auth_settings_ext_check(struct event *event, void *_set, pool_t pool, const char **error_r);
 static bool auth_passdb_settings_check(void *_set, pool_t pool, const char **error_r);
-static bool auth_userdb_settings_check(void *_set, pool_t pool, const char **error_r);
-
-/* <settings checks> */
-static struct file_listener_settings auth_unix_listeners_array[] = {
-	{
-		.path = "login/login",
-		.type = "login",
-		.mode = 0666,
-		.user = "",
-		.group = "",
-	},
-	{
-		.path = "token-login/tokenlogin",
-		.type = "token-login",
-		.mode = 0666,
-		.user = "",
-		.group = "",
-	},
-	{
-		.path = "auth-login",
-		.type = "login",
-		.mode = 0600,
-		.user = "$default_internal_user",
-		.group = "",
-	},
-	{
-		.path = "auth-client",
-		.type = "auth",
-		.mode = 0600,
-		.user = "$default_internal_user",
-		.group = "",
-	},
-	{
-		.path = "auth-userdb",
-		.type = "userdb",
-		.mode = 0666,
-		.user = "$default_internal_user",
-		.group = "",
-	},
-	{
-		.path = "auth-master",
-		.type = "master",
-		.mode = 0600,
-		.user = "",
-		.group = "",
-	},
-};
-static struct file_listener_settings *auth_unix_listeners[] = {
-	&auth_unix_listeners_array[0],
-	&auth_unix_listeners_array[1],
-	&auth_unix_listeners_array[2],
-	&auth_unix_listeners_array[3],
-	&auth_unix_listeners_array[4],
-	&auth_unix_listeners_array[5]
-};
-static buffer_t auth_unix_listeners_buf = {
-	{ { auth_unix_listeners, sizeof(auth_unix_listeners) } }
-};
-/* </settings checks> */
 
 struct service_settings auth_service_settings = {
 	.name = "auth",
@@ -93,30 +33,45 @@ struct service_settings auth_service_settings = {
 	.idle_kill = 0,
 	.vsz_limit = UOFF_T_MAX,
 
-	.unix_listeners = { { &auth_unix_listeners_buf,
-			      sizeof(auth_unix_listeners[0]) } },
+	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
 	.inet_listeners = ARRAY_INIT,
 
 	.process_limit_1 = TRUE
 };
 
-/* <settings checks> */
-static struct file_listener_settings auth_worker_unix_listeners_array[] = {
-	{
-		.path = "auth-worker",
-		.mode = 0600,
-		.user = "$default_internal_user",
-		.group = "",
-	},
+const struct setting_keyvalue auth_service_settings_defaults[] = {
+	{ "unix_listener", "auth-client auth-login auth-master auth-userdb login\\slogin token-login\\stokenlogin" },
+
+	{ "unix_listener/auth-client/path", "auth-client" },
+	{ "unix_listener/auth-client/type", "auth" },
+	{ "unix_listener/auth-client/mode", "0600" },
+	{ "unix_listener/auth-client/user", "$default_internal_user" },
+
+	{ "unix_listener/auth-login/path", "auth-login" },
+	{ "unix_listener/auth-login/type", "login" },
+	{ "unix_listener/auth-login/mode", "0600" },
+	{ "unix_listener/auth-login/user", "$default_internal_user" },
+
+	{ "unix_listener/auth-master/path", "auth-master" },
+	{ "unix_listener/auth-master/type", "master" },
+	{ "unix_listener/auth-master/mode", "0600" },
+
+	{ "unix_listener/auth-userdb/path", "auth-userdb" },
+	{ "unix_listener/auth-userdb/type", "userdb" },
+	{ "unix_listener/auth-userdb/mode", "0666" },
+	{ "unix_listener/auth-userdb/user", "$default_internal_user" },
+
+	{ "unix_listener/login\\slogin/path", "login/login" },
+	{ "unix_listener/login\\slogin/type", "login" },
+	{ "unix_listener/login\\slogin/mode", "0666" },
+
+	{ "unix_listener/token-login\\stokenlogin/path", "token-login/tokenlogin" },
+	{ "unix_listener/token-login\\stokenlogin/type", "token-login" },
+	{ "unix_listener/token-login\\stokenlogin/mode", "0666" },
+
+	{ NULL, NULL }
 };
-static struct file_listener_settings *auth_worker_unix_listeners[] = {
-	&auth_worker_unix_listeners_array[0]
-};
-static buffer_t auth_worker_unix_listeners_buf = {
-	{ { auth_worker_unix_listeners, sizeof(auth_worker_unix_listeners) } }
-};
-/* </settings checks> */
 
 struct service_settings auth_worker_service_settings = {
 	.name = "auth-worker",
@@ -138,15 +93,24 @@ struct service_settings auth_worker_service_settings = {
 	.idle_kill = 0,
 	.vsz_limit = UOFF_T_MAX,
 
-	.unix_listeners = { { &auth_worker_unix_listeners_buf,
-			      sizeof(auth_worker_unix_listeners[0]) } },
+	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
 	.inet_listeners = ARRAY_INIT
 };
 
+const struct setting_keyvalue auth_worker_service_settings_defaults[] = {
+	{ "unix_listener", "auth-worker" },
+
+	{ "unix_listener/auth-worker/path", "auth-worker" },
+	{ "unix_listener/auth-worker/mode", "0600" },
+	{ "unix_listener/auth-worker/user", "$default_internal_user" },
+
+	{ NULL, NULL }
+};
+
 #undef DEF
 #define DEF(type, name) \
-	SETTING_DEFINE_STRUCT_##type(#name, name, struct auth_passdb_settings)
+	SETTING_DEFINE_STRUCT_##type("passdb_"#name, name, struct auth_passdb_settings)
 
 static const struct setting_define auth_passdb_setting_defines[] = {
 	DEF(STR, name),
@@ -191,21 +155,20 @@ static const struct auth_passdb_settings auth_passdb_default_settings = {
 };
 
 const struct setting_parser_info auth_passdb_setting_parser_info = {
+	.name = "auth_passdb",
+
 	.defines = auth_passdb_setting_defines,
 	.defaults = &auth_passdb_default_settings,
 
-	.type_offset = offsetof(struct auth_passdb_settings, name),
 	.struct_size = sizeof(struct auth_passdb_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &auth_setting_parser_info,
+	.pool_offset1 = 1 + offsetof(struct auth_passdb_settings, pool),
 
 	.check_func = auth_passdb_settings_check
 };
 
 #undef DEF
 #define DEF(type, name) \
-	SETTING_DEFINE_STRUCT_##type(#name, name, struct auth_userdb_settings)
+	SETTING_DEFINE_STRUCT_##type("userdb_"#name, name, struct auth_userdb_settings)
 
 static const struct setting_define auth_userdb_setting_defines[] = {
 	DEF(STR, name),
@@ -241,30 +204,22 @@ static const struct auth_userdb_settings auth_userdb_default_settings = {
 };
 
 const struct setting_parser_info auth_userdb_setting_parser_info = {
+	.name = "auth_userdb",
+
 	.defines = auth_userdb_setting_defines,
 	.defaults = &auth_userdb_default_settings,
 
-	.type_offset = offsetof(struct auth_userdb_settings, name),
 	.struct_size = sizeof(struct auth_userdb_settings),
-
-	.parent_offset = SIZE_MAX,
-	.parent = &auth_setting_parser_info,
-
-	.check_func = auth_userdb_settings_check
+	.pool_offset1 = 1 + offsetof(struct auth_userdb_settings, pool),
 };
 
 /* we're kind of kludging here to avoid "auth_" prefix in the struct fields */
 #undef DEF
 #undef DEF_NOPREFIX
-#undef DEFLIST
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type("auth_"#name, name, struct auth_settings)
 #define DEF_NOPREFIX(type, name) \
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct auth_settings)
-#define DEFLIST(field, name, defines) \
-	{ .type = SET_DEFLIST, .key = name, \
-	  .offset = offsetof(struct auth_settings, field), \
-	  .list_info = defines }
 
 static const struct setting_define auth_setting_defines[] = {
 	DEF(STR, mechanisms),
@@ -307,8 +262,14 @@ static const struct setting_define auth_setting_defines[] = {
 	DEF(BOOL, ssl_username_from_cert),
 	DEF(BOOL, use_winbind),
 
-	DEFLIST(passdbs, "passdb", &auth_passdb_setting_parser_info),
-	DEFLIST(userdbs, "userdb", &auth_userdb_setting_parser_info),
+	{ .type = SET_FILTER_ARRAY, .key = "passdb",
+	  .offset = offsetof(struct auth_settings, passdbs),
+	  .filter_array_field_name = "name",
+	  .required_setting = "passdb_driver", },
+	{ .type = SET_FILTER_ARRAY, .key = "userdb",
+	  .offset = offsetof(struct auth_settings, userdbs),
+	  .filter_array_field_name = "name",
+	  .required_setting = "userdb_driver", },
 
 	DEF_NOPREFIX(STR, base_dir),
 	DEF_NOPREFIX(BOOL, verbose_proctitle),
@@ -379,16 +340,14 @@ static const struct auth_settings auth_default_settings = {
 };
 
 const struct setting_parser_info auth_setting_parser_info = {
-	.module_name = "auth",
+	.name = "auth",
+
 	.defines = auth_setting_defines,
 	.defaults = &auth_default_settings,
 
-	.type_offset = SIZE_MAX,
 	.struct_size = sizeof(struct auth_settings),
-
-	.parent_offset = SIZE_MAX,
-
-	.check_func = auth_settings_check
+	.pool_offset1 = 1 + offsetof(struct auth_settings, pool),
+	.ext_check_func = auth_settings_ext_check,
 };
 
 /* <settings checks> */
@@ -455,8 +414,62 @@ auth_verify_verbose_password(struct auth_settings *set,
 	}
 }
 
-static bool auth_settings_check(void *_set, pool_t pool,
-				const char **error_r)
+static bool
+auth_settings_get_passdbs(struct auth_settings *set, pool_t pool,
+			  struct event *event, const char **error_r)
+{
+	const struct auth_passdb_settings *passdb_set;
+	const char *passdb_name, *error;
+
+	if (!array_is_created(&set->passdbs))
+		return TRUE;
+
+	p_array_init(&set->parsed_passdbs, pool, array_count(&set->passdbs));
+	array_foreach_elem(&set->passdbs, passdb_name) {
+		if (settings_get_filter(event, "passdb", passdb_name,
+					&auth_passdb_setting_parser_info,
+					0, &passdb_set, &error) < 0) {
+			*error_r = t_strdup_printf("Failed to get passdb %s: %s",
+						   passdb_name, error);
+			return FALSE;
+		}
+
+		pool_add_external_ref(pool, passdb_set->pool);
+		array_push_back(&set->parsed_passdbs, &passdb_set);
+		settings_free(passdb_set);
+	}
+	return TRUE;
+}
+
+static bool
+auth_settings_get_userdbs(struct auth_settings *set, pool_t pool,
+			  struct event *event, const char **error_r)
+{
+	const struct auth_userdb_settings *userdb_set;
+	const char *userdb_name, *error;
+
+	if (!array_is_created(&set->userdbs))
+		return TRUE;
+
+	p_array_init(&set->parsed_userdbs, pool, array_count(&set->userdbs));
+	array_foreach_elem(&set->userdbs, userdb_name) {
+		if (settings_get_filter(event, "userdb", userdb_name,
+					&auth_userdb_setting_parser_info,
+					0, &userdb_set, &error) < 0) {
+			*error_r = t_strdup_printf("Failed to get userdb %s: %s",
+						   userdb_name, error);
+			return FALSE;
+		}
+
+		pool_add_external_ref(pool, userdb_set->pool);
+		array_push_back(&set->parsed_userdbs, &userdb_set);
+		settings_free(userdb_set);
+	}
+	return TRUE;
+}
+
+static bool auth_settings_ext_check(struct event *event, void *_set,
+				    pool_t pool, const char **error_r)
 {
 	struct auth_settings *set = _set;
 	const char *p;
@@ -516,6 +529,10 @@ static bool auth_settings_check(void *_set, pool_t pool,
 
 	if (!auth_settings_set_self_ips(set, pool, error_r))
 		return FALSE;
+	if (!auth_settings_get_passdbs(set, pool, event, error_r))
+		return FALSE;
+	if (!auth_settings_get_userdbs(set, pool, event, error_r))
+		return FALSE;
 	return TRUE;
 }
 
@@ -525,59 +542,36 @@ auth_passdb_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 {
 	struct auth_passdb_settings *set = _set;
 
-	if (set->driver == NULL || *set->driver == '\0') {
-		*error_r = "passdb is missing driver";
-		return FALSE;
-	}
+	if (*set->driver == '\0')
+		return TRUE;
 	if (set->pass && strcmp(set->result_success, "return-ok") != 0) {
 		*error_r = "Obsolete pass=yes setting mixed with non-default result_success";
 		return FALSE;
 	}
 	return TRUE;
 }
-
-static bool
-auth_userdb_settings_check(void *_set, pool_t pool ATTR_UNUSED,
-			   const char **error_r)
-{
-	struct auth_userdb_settings *set = _set;
-
-	if (set->driver == NULL || *set->driver == '\0') {
-		*error_r = "userdb is missing driver";
-		return FALSE;
-	}
-	return TRUE;
-}
 /* </settings checks> */
 
-struct auth_settings *global_auth_settings;
+const struct auth_settings *global_auth_settings;
 
-struct auth_settings *
-auth_settings_read(const char *service, pool_t pool,
-		   struct master_service_settings_output *output_r)
+void auth_settings_read(struct master_service_settings_output *output_r)
 {
-	static const struct setting_parser_info *set_roots[] = {
-		&auth_setting_parser_info,
-		NULL
+	struct master_service_settings_input input = {
+		.no_protocol_filter = TRUE,
 	};
-	struct master_service_settings_input input;
-	struct setting_parser_context *set_parser;
 	const char *error;
 
-	i_zero(&input);
-	input.roots = set_roots;
-	input.service = service;
 	if (master_service_settings_read(master_service, &input,
 					 output_r, &error) < 0)
-		i_fatal("Error reading configuration: %s", error);
+		i_fatal("%s", error);
+}
 
-	pool_ref(pool);
-	set_parser = settings_parser_dup(master_service->set_parser, pool);
-	if (!settings_parser_check(set_parser, pool, &error))
-		i_unreached();
-
-	struct auth_settings *set =
-		settings_parser_get_root_set(set_parser, &auth_setting_parser_info);
-	settings_parser_unref(&set_parser);
+const struct auth_settings *auth_settings_get(const char *service)
+{
+	struct event *event = event_create(NULL);
+	event_add_str(event, "protocol", service);
+	const struct auth_settings *set =
+		settings_get_or_fatal(event, &auth_setting_parser_info);
+	event_unref(&event);
 	return set;
 }

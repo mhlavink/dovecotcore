@@ -50,7 +50,7 @@ fs_dict_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	     const char **error_r)
 {
 	struct dict_fs *fs = (struct dict_fs *)_fs;
-	struct dict_settings dict_set;
+	struct dict_legacy_settings dict_set;
 	const char *p, *encoding_str, *error;
 
 	p = strchr(args, ':');
@@ -75,7 +75,7 @@ fs_dict_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	dict_set.base_dir = set->base_dir;
 	dict_set.event_parent = set->event_parent;
 
-	if (dict_init(p, &dict_set, &fs->dict, &error) < 0) {
+	if (dict_init_legacy(p, &dict_set, &fs->dict, &error) < 0) {
 		*error_r = t_strdup_printf("dict_init(%s) failed: %s",
 					   args, error);
 		return -1;

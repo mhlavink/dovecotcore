@@ -7,13 +7,11 @@
 #include "str.h"
 #include "str-sanitize.h"
 #include "json-istream.h"
-#include "settings.h"
+#include "settings-legacy.h"
 #include "dict.h"
 #include "auth-request.h"
 #include "auth-worker-server.h"
 #include "db-dict.h"
-
-#include <stddef.h>
 
 enum dict_settings_section {
 	DICT_SETTINGS_SECTION_ROOT = 0,
@@ -221,7 +219,7 @@ db_dict_settings_parse(struct db_dict_settings *set)
 
 struct dict_connection *db_dict_init(const char *config_path)
 {
-	struct dict_settings dict_set;
+	struct dict_legacy_settings dict_set;
 	struct dict_settings_parser_ctx ctx;
 	struct dict_connection *conn;
 	const char *error;
@@ -263,7 +261,7 @@ struct dict_connection *db_dict_init(const char *config_path)
 	i_zero(&dict_set);
 	dict_set.base_dir = global_auth_settings->base_dir;
 	dict_set.event_parent = auth_event;
-	if (dict_init(conn->set.uri, &dict_set, &conn->dict, &error) < 0)
+	if (dict_init_legacy(conn->set.uri, &dict_set, &conn->dict, &error) < 0)
 		i_fatal("dict %s: Failed to init dict: %s", config_path, error);
 
 	conn->next = connections;

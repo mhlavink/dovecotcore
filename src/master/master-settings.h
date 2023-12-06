@@ -4,6 +4,7 @@
 #include "service-settings.h"
 
 struct master_settings {
+	pool_t pool;
 	const char *base_dir;
 	const char *state_dir;
 	const char *libexec_dir;
@@ -24,7 +25,9 @@ struct master_settings {
 	unsigned int first_valid_uid, last_valid_uid;
 	unsigned int first_valid_gid, last_valid_gid;
 
-	ARRAY_TYPE(service_settings) services;
+	ARRAY_TYPE(const_string) services;
+
+	ARRAY_TYPE(service_settings) parsed_services;
 	char **protocols_split;
 };
 
