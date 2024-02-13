@@ -2,6 +2,7 @@
 
 #include "lib.h"
 #include "array.h"
+#include "cpu-count.h"
 #include "md5.h"
 #include "hash.h"
 #include "hex-binary.h"
@@ -17,6 +18,8 @@
 
 #include <unistd.h>
 #include <ctype.h>
+
+#define ENV_CPU_COUNT "NCPU"
 
 #define TABLE_LAST(t) \
 	((t)->key == '\0' && (t)->long_key == NULL)
@@ -377,6 +380,51 @@ var_expand_hash(struct var_expand_context *ctx,
 }
 
 static int
+var_expand_process(struct var_expand_context *ctx ATTR_UNUSED,
+		   const char *key, const char *field,
+		   const char **result_r, const char **error_r)
+{
+	i_assert(strcmp(key, "process") == 0);
+	if (strcmp(field, "pid") == 0)
+		*result_r = my_pid;
+	else if (strcmp(field, "uid") == 0)
+		*result_r = dec2str(geteuid());
+	else if (strcmp(field, "gid") == 0)
+		*result_r = dec2str(getegid());
+	else {
+		*error_r = t_strdup_printf("Unsupported process field '%s'",
+					   field);
+		return 0;
+	}
+	return 1;
+}
+
+static int
+var_expand_system(struct var_expand_context *ctx ATTR_UNUSED,
+		  const char *key, const char *field,
+		  const char **result_r, const char **error_r)
+{
+	i_assert(strcmp(key, "system") == 0);
+	if (strcmp(field, "cpu_count") == 0) {
+		int ncpus;
+		const char *cpuenv = getenv(ENV_CPU_COUNT);
+		if (cpuenv != NULL) {
+			*result_r = cpuenv;
+			return 1;
+		}
+		if (cpu_count_get(&ncpus, error_r) < 0)
+			return -1;
+		*result_r = dec2str(ncpus);
+		return 1;
+	} else if (strcmp(field, "hostname") == 0) {
+		*result_r = my_hostname;
+		return 1;
+	}
+	*error_r = t_strdup_printf("Unsupported system key '%s'", field);
+	return 0;
+}
+
+static int
 var_expand_func(const struct var_expand_func_table *func_table,
 		const char *key, const char *data, void *context,
 		const char **var_r, const char **error_r)
@@ -453,36 +501,18 @@ var_expand_long(struct var_expand_context *ctx,
 	}
 	key = t_strndup(key_start, key_len);
 
-	/* built-in variables: */
-	switch (key_len) {
-	case 3:
-		if (strcmp(key, "pid") == 0)
-			value = my_pid;
-		else if (strcmp(key, "uid") == 0)
-			value = dec2str(geteuid());
-		else if (strcmp(key, "gid") == 0)
-			value = dec2str(getegid());
-		break;
-	case 8:
-		if (strcmp(key, "hostname") == 0)
-			value = my_hostname;
-		break;
-	}
+	const char *data = strchr(key, ':');
 
-	if (value == NULL) {
-		const char *data = strchr(key, ':');
+	if (data != NULL)
+		key = t_strdup_until(key, data++);
+	else
+		data = "";
 
-		if (data != NULL)
-			key = t_strdup_until(key, data++);
-		else
-			data = "";
+	ret = var_expand_try_extension(ctx, key, data, &value, error_r);
 
-		ret = var_expand_try_extension(ctx, key, data, &value, error_r);
+	if (ret <= 0 && value == NULL)
+		value = "";
 
-		if (ret <= 0 && value == NULL) {
-			value = "";
-		}
-	}
 	*var_r = value;
 	return ret;
 }
@@ -805,6 +835,16 @@ void var_expand_extensions_init(void)
 	func = array_append_space(&var_expand_extensions);
 	func->key = "if";
 	func->func = var_expand_if;
+
+	/* system */
+	func = array_append_space(&var_expand_extensions);
+	func->key = "system";
+	func->func = var_expand_system;
+
+	/* process */
+	func = array_append_space(&var_expand_extensions);
+	func->key = "process";
+	func->func = var_expand_process;
 }
 
 void

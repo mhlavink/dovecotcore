@@ -4,17 +4,11 @@
 #include "login-interface.h"
 
 struct auth_client_connection {
-	struct auth_client_connection *prev, *next;
+	struct connection conn;
 	struct auth *auth;
 	struct event *event;
 	int refcount;
 
-	int fd;
-	struct io *io;
-	struct istream *input;
-	struct ostream *output;
-
-	unsigned int version_minor;
 	unsigned int pid;
 	unsigned int connect_uid;
 	uint8_t cookie[LOGIN_REQUEST_COOKIE_SIZE];
@@ -25,9 +19,8 @@ struct auth_client_connection {
 	bool token_auth:1;
 };
 
-void auth_client_connection_create(struct auth *auth, int fd,
+void auth_client_connection_create(struct auth *auth, int fd, const char *name,
 				   bool login_requests, bool token_auth);
-void auth_client_connection_destroy(struct auth_client_connection **conn);
 
 struct auth_client_connection *
 auth_client_connection_lookup(unsigned int pid);

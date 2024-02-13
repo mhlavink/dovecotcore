@@ -58,6 +58,7 @@ struct policy_lookup_ctx {
 	struct event *event;
 
 	bool parse_error;
+	bool have_status;
 };
 
 struct policy_template_keyvalue {
@@ -300,6 +301,7 @@ static void auth_policy_parse_response(struct policy_lookup_ctx *context)
 		if (strcmp(jnode.name, "status") == 0) {
 			if (json_node_get_int(&jnode, &context->result) != 0)
 				break;
+			context->have_status = TRUE;
 		} else if (strcmp(jnode.name, "msg") == 0) {
 			if (!json_node_is_string(&jnode))
 				break;
@@ -329,12 +331,15 @@ static void auth_policy_parse_response(struct policy_lookup_ctx *context)
 
 		ret = json_istream_finish(&context->json_input, &error);
 		i_assert(ret != 0);
-		if (ret > 0)
-			context->parse_error = FALSE;
-		else {
+		if (ret < 0) {
 			e_error(context->event,
 				"Policy server response JSON parse error: %s",
 				error);
+		} else if (!context->have_status) {
+			e_error(context->event,
+				"Policy server response is missing status field");
+		} else {
+			context->parse_error = FALSE;
 		}
 	}
 	json_istream_destroy(&context->json_input);
@@ -589,20 +594,18 @@ auth_policy_create_json(struct policy_lookup_ctx *context,
 		if (!context->request->failed &&
 		    context->request->fields.successful &&
 		    !context->request->internal_failure) {
-			json_ostream_nwrite_string(json_output,
-						   "success", "true");
+			json_ostream_nwrite_true(json_output,
+						   "success");
 		} else {
-			json_ostream_nwrite_string(json_output,
-						   "success", "false");
+			json_ostream_nwrite_false(json_output,
+						   "success");
 		}
-		json_ostream_nwrite_string(json_output, "policy_reject",
-					   (context->request->policy_refusal ?
-					    "true" : "false"));
+		json_ostream_nwrite_bool(json_output, "policy_reject",
+					 context->request->policy_refusal);
 	}
-	json_ostream_nwrite_string(
-		json_output, "tls",
-		(context->request->fields.conn_secured ==
-			AUTH_REQUEST_CONN_SECURED_TLS ? "true" : "false"));
+	json_ostream_nwrite_bool(json_output, "tls",
+				 context->request->fields.conn_secured ==
+				 AUTH_REQUEST_CONN_SECURED_TLS);
 	json_ostream_nascend_object(json_output);
 	json_ostream_nfinish_destroy(&json_output);
 

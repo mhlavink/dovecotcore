@@ -227,7 +227,7 @@ static void test_ostream_multiplex_hang(void)
 	o_stream_set_no_error_handling(file_output, TRUE);
 	struct ostream *channel = o_stream_create_multiplex(file_output, 4096);
 	struct ostream *channel2 = o_stream_multiplex_add_channel(channel, 1);
-	char buf[256];
+	char buf[257];
 
 	/* send multiplex output until the buffer is full */
 	ssize_t ret, ret2;
@@ -246,11 +246,10 @@ static void test_ostream_multiplex_hang(void)
 	test_assert(o_stream_finish(channel2) == 0);
 	o_stream_uncork(channel);
 	o_stream_uncork(channel2);
-	/* We expect the first channel to have data buffered */
-	test_assert(o_stream_get_buffer_used_size(channel) >=
+	/* The previous writes must leave some data buffered into channel 0.
+	   Otherwise the test isn't fully testing what it's supposed to be. */
+	test_assert(o_stream_get_buffer_used_size(channel) >
 		    o_stream_get_buffer_used_size(file_output));
-	test_assert(o_stream_get_buffer_used_size(channel) -
-		    o_stream_get_buffer_used_size(file_output) > 0);
 
 	/* read everything that was already sent */
 	struct istream *file_input = i_stream_create_fd(fd[0], 1024);
