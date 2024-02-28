@@ -89,7 +89,8 @@ static int block_sigterm(sigset_t *oldmask_r)
 static void
 log_killed_signal(struct master_service *service, const siginfo_t *si)
 {
-	if (service->killed_signal_logged)
+	if (service->killed_signal_logged ||
+	    master_service_is_user_kicked(service))
 		return;
 
 	e_warning(service->event,
@@ -240,6 +241,7 @@ static bool sig_term_try_kick(struct master_service *service)
 			ret = sig_term_try_kick_user(service, l->fd);
 			if (ret > 0) {
 				/* USER-KICK matched */
+				service->last_kick_signal_user_matched = 1;
 				return TRUE;
 			}
 			if (ret == 0) {
@@ -1288,6 +1290,11 @@ void master_service_get_kill_time(struct master_service *service,
 			e_error(service->event,
 				"sigprocmask(SIG_SETMASK) failed: %m");
 	}
+}
+
+bool master_service_is_user_kicked(struct master_service *service)
+{
+	return service->last_kick_signal_user_matched != 0;
 }
 
 bool master_service_is_master_stopped(struct master_service *service)
