@@ -8,7 +8,7 @@ Name: dovecot
 Epoch: 1
 Version: 2.4.0
 %global prever %{nil}
-Release: 4.20230913113311173660.main.12706.ga53f854fcc%{?dist}
+Release: 4.20240503125855663416.main.13954.g17f849c64d%{?dist}
 #dovecot itself is MIT, a few sources are PD, pigeonhole is LGPLv2
 License: MIT AND LGPL-2.1-only
 
@@ -71,6 +71,7 @@ BuildRequires: libzstd-devel
 %if %{?rhel}0 == 0
 BuildRequires: libsodium-devel
 BuildRequires: lua-devel
+BuildRequires: lua-json
 BuildRequires: libexttextcat-devel
 %endif
 BuildRequires: libicu-devel
@@ -526,9 +527,7 @@ make check
 %{_libdir}/%{name}/dict/libdriver_pgsql.so
 
 %changelog
-* Thu Aug 10 2023 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20230810231621841643.main.12679.gf3d4f2471b
+* Fri May 3 2024 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20240503125855663416.main.13954.g17f849c64d
 - New release ${PACKIT_PROJECT_VERSION}
 
-* Mon Jul 31 2023 Michal Hlavinka <mhlavink@redhat.com> - 1:2.2.20-4.20230731233539804152.main.12671.g34a18f5a79
-- dict-redis: Fix error handling for failed synchronous commits (Timo Sirainen)
 
