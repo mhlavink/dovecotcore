@@ -6,6 +6,7 @@
 #include "str-sanitize.h"
 #include "stats-dist.h"
 #include "time-util.h"
+#include "var-expand.h"
 #include "event-filter.h"
 #include "event-exporter.h"
 #include "settings.h"
@@ -502,17 +503,44 @@ stats_metric_sub_metric_alloc(struct metric *metric, const char *name, pool_t po
 	return sub_metric;
 }
 
+/* Handle string modifiers */
+static inline const char *
+label_by_mod_str(const struct stats_metric_settings_group_by *group_by,
+		 const char *value)
+{
+	const char *error;
+
+	if (group_by->discrete_modifier == NULL)
+		return value;
+
+	const struct var_expand_table table[] = {
+		{ 'v', value, "value" },
+		{ 'd', i_strchr_to_next(value, '@'), "domain" },
+		{ '\0', NULL, NULL }
+	};
+	string_t *str = t_str_new(128);
+	if (var_expand(str, group_by->discrete_modifier, table, &error) < 0) {
+		i_error("Failed to expand discrete modifier for %s: %s",
+			group_by->field, error);
+	}
+	return str_c(str);
+}
+
 static bool
 stats_metric_group_by_discrete(const struct event_field *field,
+			       const struct stats_metric_settings_group_by *group_by,
 			       struct metric_value *value_r)
 {
 	switch (field->value_type) {
 	case EVENT_FIELD_VALUE_TYPE_STR:
 		value_r->type = METRIC_VALUE_TYPE_STR;
-		/* use sha1 of value to avoid excessive memory usage in case the
-		   actual value is quite long */
-		sha1_get_digest(field->value.str, strlen(field->value.str),
-				value_r->hash);
+		T_BEGIN {
+			const char *str =
+				label_by_mod_str(group_by, field->value.str);
+			/* use sha1 of value to avoid excessive memory usage in
+			   case the actual value is quite long */
+			sha1_get_digest(str, strlen(str), value_r->hash);
+		} T_END;
 		return TRUE;
 	case EVENT_FIELD_VALUE_TYPE_INTMAX:
 		value_r->type = METRIC_VALUE_TYPE_INT;
@@ -600,7 +628,7 @@ stats_metric_group_by_get_value(const struct event_field *field,
 {
 	switch (group_by->func) {
 	case STATS_METRIC_GROUPBY_DISCRETE:
-		if (!stats_metric_group_by_discrete(field, value_r))
+		if (!stats_metric_group_by_discrete(field, group_by, value_r))
 			return FALSE;
 		return TRUE;
 	case STATS_METRIC_GROUPBY_QUANTIZED:
@@ -626,25 +654,6 @@ stats_metric_group_by_get_label(const struct event_field *field,
 	}
 
 	i_panic("unknown group-by function %d", group_by->func);
-}
-
-/* Handle string modifiers */
-static inline const char *
-label_by_mod_str(const struct stats_metric_settings_group_by *group_by,
-		 const char *value)
-{
-	if ((group_by->mod & STATS_METRICS_GROUPBY_DOMAIN) != 0) {
-		const char *domain = strrchr(value, '@');
-		if (domain != NULL)
-			value = domain+1;
-		else
-			value = "";
-	}
-	if ((group_by->mod & STATS_METRICS_GROUPBY_UPPERCASE) != 0)
-		value = t_str_ucase(value);
-	if ((group_by->mod & STATS_METRICS_GROUPBY_LOWERCASE) != 0)
-		value = t_str_lcase(value);
-	return value;
 }
 
 static const char *

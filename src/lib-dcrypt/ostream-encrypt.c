@@ -179,7 +179,7 @@ o_stream_encrypt_keydata_create_v1(struct encrypt_ostream *stream)
 	hash->init(hctx);
 	hash->loop(hctx, secret->data, secret->used);
 	hash->result(hctx, hres);
-	safe_memset(buffer_get_modifiable_data(secret, 0), 0, secret->used);
+	buffer_clear_safe(secret);
 
 	/* use it to encrypt the actual encryption key */
 	struct dcrypt_context_symmetric *dctx;
@@ -260,8 +260,8 @@ o_stream_encrypt_keydata_create_v1(struct encrypt_ostream *stream)
 
 static int
 o_stream_encrypt_key_for_pubkey_v2(struct encrypt_ostream *stream,
-				   const char *malg, const unsigned char *key,
-				   size_t key_len,
+				   const char *malg, const char *calg,
+				   const unsigned char *key, size_t key_len,
 				   struct dcrypt_public_key *pubkey,
 				   buffer_t *res)
 {
@@ -297,40 +297,48 @@ o_stream_encrypt_key_for_pubkey_v2(struct encrypt_ostream *stream,
 			return -1;
 		}
 
-		/* use shared secret and ephemeral key to generate encryption
-		   key/iv */
-		if (!dcrypt_pbkdf2(secret->data, secret->used,
-				   ephemeral_key->data, ephemeral_key->used,
-				   malg, IO_STREAM_ENCRYPT_ROUNDS, temp_key,
-				   48, &error)) {
-			safe_memset(buffer_get_modifiable_data(secret, 0),
-				    0, secret->used);
-			io_stream_set_error(&stream->ostream.iostream,
-					    "Cannot perform key encryption: %s",
-					    error);
-		}
-		safe_memset(buffer_get_modifiable_data(secret, 0),
-			    0, secret->used);
-
-		/* encrypt key with shared secret */
 		struct dcrypt_context_symmetric *dctx;
-		if (!dcrypt_ctx_sym_create("AES-256-CBC", DCRYPT_MODE_ENCRYPT,
+		if (!dcrypt_ctx_sym_create(calg, DCRYPT_MODE_ENCRYPT,
 					   &dctx, &error)) {
-			safe_memset(buffer_get_modifiable_data(temp_key, 0),
-				    0, temp_key->used);
+			buffer_clear_safe(temp_key);
 			io_stream_set_error(&stream->ostream.iostream,
 					    "Cannot perform key encryption: %s",
 					    error);
 			return -1;
 		}
 
-		const unsigned char *ptr = temp_key->data;
-		i_assert(temp_key->used == 48);
+		size_t ek_iv_len = dcrypt_ctx_sym_get_iv_length(dctx);
+		size_t ek_key_len = dcrypt_ctx_sym_get_key_length(dctx);
+		size_t ek_aad_len = 0;
+		if ((stream->flags & IO_STREAM_ENC_SAME_CALG) != 0 &&
+		    (stream->flags & IO_STREAM_ENC_INTEGRITY_AEAD) != 0)
+			ek_aad_len = IOSTREAM_TAG_SIZE;
 
-		dcrypt_ctx_sym_set_key(dctx, ptr, 32);
-		dcrypt_ctx_sym_set_iv(dctx, ptr+32, 16);
-		safe_memset(buffer_get_modifiable_data(temp_key, 0),
-			    0, temp_key->used);
+		/* use shared secret and ephemeral key to generate encryption
+		   key/iv */
+		if (!dcrypt_pbkdf2(secret->data, secret->used,
+				   ephemeral_key->data, ephemeral_key->used,
+				   malg, IO_STREAM_ENCRYPT_ROUNDS, temp_key,
+				   ek_key_len + ek_iv_len + ek_aad_len, &error)) {
+			buffer_clear_safe(secret);
+			io_stream_set_error(&stream->ostream.iostream,
+					    "Cannot perform key encryption: %s",
+					    error);
+			dcrypt_ctx_sym_destroy(&dctx);
+			return -1;
+		}
+		buffer_clear_safe(secret);
+
+		/* encrypt key with shared secret */
+		const unsigned char *ptr = temp_key->data;
+		i_assert(temp_key->used == ek_key_len + ek_iv_len + ek_aad_len);
+
+		if (ek_aad_len > 0)
+			dcrypt_ctx_sym_set_aad(dctx, ptr + ek_key_len + ek_iv_len,
+					       ek_aad_len);
+		dcrypt_ctx_sym_set_key(dctx, ptr, ek_key_len);
+		dcrypt_ctx_sym_set_iv(dctx, ptr + ek_key_len, ek_iv_len);
+		buffer_clear_safe(temp_key);
 
 		int ec = 0;
 		if (!dcrypt_ctx_sym_init(dctx, &error) ||
@@ -342,7 +350,12 @@ o_stream_encrypt_key_for_pubkey_v2(struct encrypt_ostream *stream,
 					    error);
 			ec = -1;
 		}
-
+		/* insert tag last */
+		if (ek_aad_len > 0) {
+			buffer_t *tag = t_buffer_create(ek_aad_len);
+			dcrypt_ctx_sym_get_tag(dctx, tag);
+			buffer_append(encrypted_key, tag->data, tag->used);
+		}
 		dcrypt_ctx_sym_destroy(&dctx);
 		if (ec != 0) return ec;
 	} else {
@@ -374,7 +387,7 @@ o_stream_encrypt_key_for_pubkey_v2(struct encrypt_ostream *stream,
 
 static int
 o_stream_encrypt_keydata_create_v2(struct encrypt_ostream *stream,
-				   const char *malg)
+				   const char *malg, const char *calg)
 {
 	const struct hash_method *hash = hash_method_lookup(malg);
 	const char *error;
@@ -417,8 +430,12 @@ o_stream_encrypt_keydata_create_v2(struct encrypt_ostream *stream,
 	/* store number of public key(s) */
 	buffer_append(res, "\1", 1); /* one key for now */
 
+	const char *ek_calg = "AES-256-CBC";
+	if ((stream->flags & IO_STREAM_ENC_SAME_CALG) != 0)
+		ek_calg = calg;
+
 	/* we can do multiple keys at this point, but do it only once now */
-	if (o_stream_encrypt_key_for_pubkey_v2(stream, malg, ptr, kl,
+	if (o_stream_encrypt_key_for_pubkey_v2(stream, malg, ek_calg, ptr, kl,
 					       stream->pub, res) != 0) {
 		buffer_free(&res);
 		return -1;
@@ -457,19 +474,22 @@ o_stream_encrypt_keydata_create_v2(struct encrypt_ostream *stream,
 			      dcrypt_ctx_sym_get_iv_length(stream->ctx_sym));
 	ptr += dcrypt_ctx_sym_get_iv_length(stream->ctx_sym);
 
+	error = NULL;
 	if ((stream->flags & IO_STREAM_ENC_INTEGRITY_HMAC) ==
 		IO_STREAM_ENC_INTEGRITY_HMAC) {
 		dcrypt_ctx_hmac_set_key(stream->ctx_mac, ptr, tagsize);
-		dcrypt_ctx_hmac_init(stream->ctx_mac, &error);
+		if (!dcrypt_ctx_hmac_init(stream->ctx_mac, &error))
+			i_assert(error != NULL);
 	} else if ((stream->flags & IO_STREAM_ENC_INTEGRITY_AEAD) ==
 		IO_STREAM_ENC_INTEGRITY_AEAD) {
 		dcrypt_ctx_sym_set_aad(stream->ctx_sym, ptr, tagsize);
 	}
 
 	/* clear out private key data */
-	safe_memset(buffer_get_modifiable_data(keydata, 0), 0, keydata->used);
+	buffer_clear_safe(keydata);
 
-	if (!dcrypt_ctx_sym_init(stream->ctx_sym, &error)) {
+	if (error != NULL ||
+	    !dcrypt_ctx_sym_init(stream->ctx_sym, &error)) {
 		io_stream_set_error(&stream->ostream.iostream,
 				    "Encryption init error: %s", error);
 		return -1;
@@ -729,7 +749,7 @@ o_stream_encrypt_init(struct encrypt_ostream *estream, const char *algorithm)
 		}
 
 		/* MAC algorithm is used for PBKDF2 and keydata hashing */
-		return o_stream_encrypt_keydata_create_v2(estream, malg);
+		return o_stream_encrypt_keydata_create_v2(estream, malg, calg);
 	}
 }
 

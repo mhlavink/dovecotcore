@@ -28,7 +28,9 @@ struct quota_settings {
 		struct quota_transaction_context *ctx, uoff_t size,
 		const char **error_r);
 
+	unsigned int max_mailbox_count;
 	uoff_t max_mail_size;
+	unsigned int max_messages_per_mailbox;
 	const char *quota_exceeded_msg;
 	bool debug:1;
 	bool initialized:1;
@@ -104,7 +106,6 @@ struct quota_root_settings {
 	struct quota_rule default_rule;
 	ARRAY(struct quota_rule) rules;
 	ARRAY(struct quota_warning_rule) warning_rules;
-	const char *limit_set;
 
 	/* If user is under quota before saving a mail, allow the last mail to
 	   bring the user over quota by this many bytes. */
@@ -123,7 +124,6 @@ struct quota_root {
 	struct quota_root_settings *set;
 	struct quota *quota;
 	struct quota_backend backend;
-	struct dict *limit_set_dict;
 
 	/* this quota root applies only to this namespace. it may also be
 	   a public namespace without an owner. */

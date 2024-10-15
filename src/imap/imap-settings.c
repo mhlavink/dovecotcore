@@ -1,12 +1,8 @@
 /* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
 
 #include "lib.h"
-#include "buffer.h"
-#include "hostpid.h"
 #include "settings-parser.h"
 #include "service-settings.h"
-#include "mail-storage-settings.h"
-#include "smtp-submit-settings.h"
 #include "imap-settings.h"
 
 #include <unistd.h>
@@ -65,8 +61,8 @@ static const struct setting_define imap_setting_defines[] = {
 	DEF(BOOL, verbose_proctitle),
 	DEF(STR_VARS, rawlog_dir),
 
-	DEF(SIZE, imap_max_line_length),
-	DEF(TIME, imap_idle_notify_interval),
+	DEF(SIZE_HIDDEN, imap_max_line_length),
+	DEF(TIME_HIDDEN, imap_idle_notify_interval),
 	DEF(STR, imap_capability),
 	DEF(STR, imap_client_workarounds),
 	DEF(STR, imap_logout_format),
@@ -101,7 +97,11 @@ static const struct imap_settings imap_default_settings = {
 	.imap_fetch_failure = "disconnect-immediately:disconnect-after:no-after",
 	.imap_metadata = FALSE,
 	.imap_literal_minus = FALSE,
+#ifdef DOVECOT_PRO_EDITION
+	.imap_hibernate_timeout = 30,
+#else
 	.imap_hibernate_timeout = 0,
+#endif
 
 	.imap_urlauth_host = "",
 	.imap_urlauth_port = 143

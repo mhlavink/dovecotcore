@@ -128,6 +128,11 @@
 	((nid) == NID_ED25519 || (nid) == NID_ED448)
 #endif
 
+#if !defined(OBJ_chacha20_poly1305) && defined(LN_chacha20_poly1305)
+#  define OBJ_CHACHA20_POLY1305_MISSING
+static ASN1_OBJECT *CHACHA20_POLY1305_OBJ = NULL;
+#endif
+
 struct dcrypt_context_symmetric {
 	pool_t pool;
 	const EVP_CIPHER *cipher;
@@ -248,14 +253,10 @@ static bool dcrypt_openssl_error(const char **error_r)
 			str_append(errstr, ", ");
 		str_append(errstr, ssl_err2str(err, data, flags));
 	}
-	if (err == 0) {
-		if (errno != 0)
-			final_error = strerror(errno);
-		else
-			final_error = "Unknown error";
-	} else {
+	if (err == 0)
+		final_error = "Unknown error";
+	else
 		final_error = ssl_err2str(err, data, flags);
-	}
 	if (errstr == NULL)
 		*error_r = final_error;
 	else {
@@ -682,6 +683,7 @@ dcrypt_openssl_ctx_hmac_init(struct dcrypt_context_hmac *ctx,
 {
 	int ec;
 
+	i_assert(ctx->ctx == NULL);
 	i_assert(ctx->md != NULL);
 #ifdef HAVE_HMAC_CTX_new
 	ctx->ctx = HMAC_CTX_new();
@@ -689,8 +691,11 @@ dcrypt_openssl_ctx_hmac_init(struct dcrypt_context_hmac *ctx,
 		return dcrypt_openssl_error(error_r);
 #endif
 	ec = HMAC_Init_ex(ctx->ctx, ctx->key, ctx->klen, ctx->md, NULL);
-	if (ec != 1)
+	if (ec != 1) {
+		HMAC_CTX_free(ctx->ctx);
+		ctx->ctx = NULL;
 		return dcrypt_openssl_error(error_r);
+	}
 	return TRUE;
 }
 
@@ -1321,7 +1326,7 @@ dcrypt_openssl_cipher_key_dovecot_v2(const char *cipher,
 		res = TRUE;
 	}
 	/* and ensure no data leaks */
-	safe_memset(buffer_get_modifiable_data(tmp, NULL), 0, tmp->used);
+	buffer_clear_safe(tmp);
 
 	dcrypt_openssl_ctx_sym_destroy(&dctx);
 	return res;
@@ -1461,8 +1466,7 @@ dcrypt_openssl_load_private_key_dovecot_v2(struct dcrypt_private_key **key_r,
 		if (rsa == NULL ||
 		    d2i_RSAPrivateKey(&rsa, &ptr, key_data->used) == NULL ||
 		    RSA_check_key(rsa) != 1) {
-			safe_memset(buffer_get_modifiable_data(key_data, NULL),
-				    0, key_data->used);
+			buffer_clear_safe(key_data);
 			RSA_free(rsa);
 			return dcrypt_openssl_error(error_r);
 		}
@@ -1495,8 +1499,7 @@ dcrypt_openssl_load_private_key_dovecot_v2(struct dcrypt_private_key **key_r,
 		BIGNUM *point = BN_secure_new();
 		if (point == NULL ||
 		    BN_mpi2bn(key_data->data, key_data->used, point) == NULL) {
-			safe_memset(buffer_get_modifiable_data(key_data, NULL),
-				    0, key_data->used);
+			buffer_clear_safe(key_data);
 			BN_free(point);
 			return dcrypt_openssl_error(error_r);
 		}
@@ -2427,7 +2430,8 @@ static bool store_jwk_ed_key(EVP_PKEY *pkey, bool is_private_key,
 		if (EVP_PKEY_get_raw_private_key(pkey, buf, &len) != 1)
 			return dcrypt_openssl_error(error_r);
 		i_assert(bd->used == len);
-	}
+	} else
+		bd = NULL;
 
 	int nid = EVP_PKEY_id(pkey);
 	const char *curve = nid_to_jwk_curve(nid);
@@ -2453,6 +2457,7 @@ static bool store_jwk_ed_key(EVP_PKEY *pkey, bool is_private_key,
 		json_ostream_nwrite_string(joutput, "kid", key_id);
 
 	if (is_private_key) {
+		i_assert(bd != NULL);
 		base64url_encode(BASE64_ENCODE_FLAG_NO_PADDING, 0, bd->data,
 				 bd->used, b64url_temp);
 		json_ostream_nwrite_string_buffer(joutput, "d", b64url_temp);
@@ -2777,7 +2782,7 @@ dcrypt_openssl_encrypt_private_key_dovecot(buffer_t *key, int enctype,
 		DCRYPT_MODE_ENCRYPT, key, secret, &saltbuf,
 		DCRYPT_DOVECOT_KEY_ENCRYPT_HASH,
 		DCRYPT_DOVECOT_KEY_ENCRYPT_ROUNDS, tmp, error_r);
-	safe_memset(buffer_get_modifiable_data(secret, NULL), 0, secret->used);
+	buffer_clear_safe(secret);
 	binary_to_hex_append(destination, tmp->data, tmp->used);
 
 	/* some additional fields or private key version */
@@ -3515,7 +3520,14 @@ dcrypt_openssl_oid2name(const unsigned char *oid, size_t oid_len,
 		dcrypt_openssl_error(error_r);
 		return NULL;
 	}
+#ifdef OBJ_CHACHA20_POLY1305_MISSING
+	if (OBJ_cmp(obj, CHACHA20_POLY1305_OBJ) == 0)
+		name = LN_chacha20_poly1305;
+	else
+		name = OBJ_nid2sn(OBJ_obj2nid(obj));
+#else
 	name = OBJ_nid2sn(OBJ_obj2nid(obj));
+#endif
 	ASN1_OBJECT_free(obj);
 	return name;
 }
@@ -3529,8 +3541,13 @@ dcrypt_openssl_name2oid(const char *name, buffer_t *oid, const char **error_r)
 		return dcrypt_openssl_error(error_r);
 
 	size_t len = OBJ_length(obj);
-	if (len == 0)
-	{
+#ifdef OBJ_CHACHA20_POLY1305_MISSING
+	if (len == 0 && strcasecmp(name, LN_chacha20_poly1305) == 0) {
+		ASN1_OBJECT_free(obj);
+		obj = OBJ_dup(CHACHA20_POLY1305_OBJ);
+	} else
+#endif
+	if (len == 0) {
 		*error_r = "Object has no OID assigned";
 		return FALSE;
 	}
@@ -3538,10 +3555,9 @@ dcrypt_openssl_name2oid(const char *name, buffer_t *oid, const char **error_r)
 	unsigned char *bufptr = buffer_append_space_unsafe(oid, len);
 	i2d_ASN1_OBJECT(obj, &bufptr);
 	ASN1_OBJECT_free(obj);
-	if (bufptr != NULL) {
-		return TRUE;
-	}
-	return dcrypt_openssl_error(error_r);
+	if (bufptr == NULL)
+		return dcrypt_openssl_error(error_r);
+	return TRUE;
 }
 
 static enum dcrypt_key_type
@@ -4435,11 +4451,17 @@ void dcrypt_openssl_init(struct module *module ATTR_UNUSED)
 {
 	dovecot_openssl_common_global_ref();
 	dcrypt_set_vfs(&dcrypt_openssl_vfs);
+#ifdef OBJ_CHACHA20_POLY1305_MISSING
+        CHACHA20_POLY1305_OBJ = OBJ_txt2obj("1.2.840.113549.1.9.16.3.18", 1);
+#endif
 }
 
 void dcrypt_openssl_deinit(void)
 {
 	dovecot_openssl_common_global_unref();
+#ifdef OBJ_CHACHA20_POLY1305_MISSING
+        ASN1_OBJECT_free(CHACHA20_POLY1305_OBJ);
+#endif
 }
 
 #endif

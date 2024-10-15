@@ -44,6 +44,21 @@ AS_HELP_STRING([--enable-asserts], [Enable asserts (default)]),
 		AC_DEFINE(DISABLE_ASSERTS,, [Disable asserts])
 	fi)
 
+AC_ARG_ENABLE([pro-build],
+  [AS_HELP_STRING([--enable-pro-build], [Enable pro build related defines])],
+  [is_pro_build=yes],
+  [is_pro_build=no]
+)
+
+experimental_capabilities=""
+AC_ARG_ENABLE(experimental-mail-utf8,
+AS_HELP_STRING([--enable-experimental-mail-utf8], [Enable experimental support for SMTPUTF8 and UTF8=ACCEPT]),
+	AS_IF([test x$enableval = xyes], [
+	       AC_DEFINE([EXPERIMENTAL_MAIL_UTF8],, [Build with SMTPUTF8 and UTF8=ACCEPT support])
+	       experimental_capabilities="${experimental_capabilities} UTF8=ACCEPT"
+	])
+)
+
 AC_ARG_WITH(shared-libs,
 AS_HELP_STRING([--with-shared-libs], [Link binaries using shared Dovecot libraries (default)]),
 	want_shared_libs=$withval,
@@ -249,13 +264,31 @@ AM_ICONV
 # SIZE_MAX is missing without this
 CXXFLAGS="$CXXFLAGS -D__STDC_LIMIT_MACROS"
 
-AC_DEFINE_UNQUOTED(DOVECOT_NAME, "$PACKAGE_NAME", [Dovecot name])
+if test "$is_pro_build" = "yes"; then
+  SET_PRO_DEFINES
+  DOVECOT_CONFIG_VERSION=3.0.0
+  AC_SUBST(DOVECOT_ASSET_URL, "doc.dovecotpro.com")
+  AC_SUBST(DOVECOT_PRO_BUILD, 1)
+else
+  AC_DEFINE_UNQUOTED(DOVECOT_NAME, "$PACKAGE_NAME", [Dovecot name])
+  AC_SUBST(DOVECOT_ASSET_URL, "doc.dovecot.org")
+  AC_SUBST(DOVECOT_PRO_BUILD, 0)
+  DOVECOT_CONFIG_VERSION=2.4.0
+fi
+AC_DEFINE_UNQUOTED(DOVECOT_CONFIG_VERSION, "$DOVECOT_CONFIG_VERSION", [Dovecot configuration version])
+AC_SUBST(DOVECOT_CONFIG_VERSION)
+
 AC_DEFINE_UNQUOTED(DOVECOT_STRING, "$PACKAGE_STRING", [Dovecot string])
 AC_DEFINE_UNQUOTED(DOVECOT_VERSION, "$PACKAGE_VERSION", [Dovecot version])
 
 AC_DEFINE([DOVECOT_VERSION_MAJOR], regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0-9]+\)], [\1]), [Dovecot major version])
 AC_DEFINE([DOVECOT_VERSION_MINOR], regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0-9]+\)], [\2]), [Dovecot minor version])
 AC_DEFINE([DOVECOT_VERSION_MICRO], regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0-9]+\).\([0-9]+\)], [\3]), [Dovecot micro version])
+
+AC_SUBST(DOVECOT_ASSET_VERSION, regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0-9]+\).\([0-9]+\)], [\1.\2.\3]))
+AS_IF([test $DOVECOT_ASSET_VERSION = "0.0.0"], [
+  AC_SUBST([DOVECOT_ASSET_VERSION], "main")
+])
 
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
 ],[
@@ -290,7 +323,7 @@ DOVECOT_LIBCAP
 DOVECOT_RANDOM
 DOVECOT_ARC4RANDOM
 
-AC_DEFINE(PACKAGE_WEBPAGE, "http://www.dovecot.org/", [Support URL])
+AC_DEFINE(PACKAGE_WEBPAGE, "https://www.dovecot.org/", [Support URL])
 
 AC_CHECK_FUNCS(flock pread setproctitle setresgid \
 	       getmntinfo setpriority quotactl getmntent kqueue kevent \
@@ -511,8 +544,6 @@ AC_SUBST(dict_drivers)
 
 AC_C_BIGENDIAN
 
-DOVECOT_IPV6
-
 dnl **
 dnl ** storage classes
 dnl **
@@ -556,18 +587,26 @@ LIBDOVECOT_LA_LIBS='\
 # so it needs to be in a single line.
 LIBDOVECOT_LA_LIBS=`echo "$LIBDOVECOT_LA_LIBS" | tr -d '\t\n\\\\'`
 
+LIBDOVECOT_LUA=''
+
 if test "$want_shared_libs" = "yes"; then
   LIBDOVECOT_DEPS='$(top_builddir)/src/lib-dovecot/libdovecot.la'
   LIBDOVECOT="$LIBDOVECOT_DEPS \$(MODULE_LIBS)"
   LIBDOVECOT_STORAGE_DEPS='$(top_builddir)/src/lib-storage/libdovecot-storage.la $(top_builddir)/src/lib-imap-storage/libimap-storage.la'
   LIBDOVECOT_LOGIN='$(top_builddir)/src/login-common/libdovecot-login.la'
   LIBDOVECOT_LDA='$(top_builddir)/src/lib-lda/libdovecot-lda.la'
+  if test $want_lua != no; then
+    LIBDOVECOT_LUA='$(top_builddir)/src/lib-lua/libdovecot-lua.la'
+  fi
 else
   LIBDOVECOT_DEPS="$LIBDOVECOT_LA_LIBS"
   LIBDOVECOT="$LIBDOVECOT_DEPS \$(LIBICONV) \$(MODULE_LIBS)"
   LIBDOVECOT_STORAGE_DEPS='$(top_builddir)/src/lib-storage/libstorage.la'
   LIBDOVECOT_LOGIN='$(top_builddir)/src/login-common/liblogin.la'
   LIBDOVECOT_LDA='$(top_builddir)/src/lib-lda/liblda.la'
+  if test $want_lua != no; then
+    LIBDOVECOT_LUA='$(top_builddir)/src/lib-lua/libdlua.la'
+  fi
 fi
 if test $want_ldap != no; then
   LIBDOVECOT_LDAP='$(top_builddir)/src/lib-ldap/libdovecot-ldap.la'
@@ -580,11 +619,8 @@ LIBDOVECOT_SQL='$(top_builddir)/src/lib-sql/libsql.la'
 LIBDOVECOT_COMPRESS='$(top_builddir)/src/lib-compression/libcompression.la'
 LIBDOVECOT_LIBFTS='$(top_builddir)/src/lib-fts/libfts.la'
 
-if test $want_lua != no; then
-  LIBDOVECOT_LUA='$(top_builddir)/src/lib-lua/libdovecot-lua.la'
-else
-  LIBDOVECOT_LUA=''
-fi
+LIBDOVECOT_OPENSSL='$(top_builddir)/src/lib-ssl-iostream/libssl_iostream_openssl.la'
+LIBDOVECOT_OPENSSL_DEPS="$LIBDOVECOT_OPENSSL"
 
 AC_SUBST(LIBDOVECOT)
 AC_SUBST(LIBDOVECOT_LA_LIBS)
@@ -601,6 +637,8 @@ AC_SUBST(LIBDOVECOT_LIBFTS)
 AC_SUBST(LIBDOVECOT_LIBFTS_DEPS)
 AC_SUBST(LIBDOVECOT_LUA)
 AC_SUBST(LIBDOVECOT_LUA_DEPS)
+AC_SUBST(LIBDOVECOT_OPENSSL)
+AC_SUBST(LIBDOVECOT_OPENSSL_DEPS)
 
 dnl **
 dnl ** SQL drivers
@@ -728,7 +766,7 @@ dnl **
 dnl IDLE doesn't really belong to banner. It's there just to make Blackberries
 dnl happy, because otherwise BIS server disables push email.
 capability_banner="IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE"
-capability="$capability_banner SORT SORT=DISPLAY THREAD=REFERENCES THREAD=REFS THREAD=ORDEREDSUBJECT MULTIAPPEND URL-PARTIAL CATENATE UNSELECT CHILDREN NAMESPACE UIDPLUS LIST-EXTENDED I18NLEVEL=1 CONDSTORE QRESYNC ESEARCH ESORT SEARCHRES WITHIN CONTEXT=SEARCH LIST-STATUS BINARY MOVE SNIPPET=FUZZY PREVIEW=FUZZY PREVIEW STATUS=SIZE SAVEDATE COMPRESS=DEFLATE INPROGRESS"
+capability="$capability_banner SORT SORT=DISPLAY THREAD=REFERENCES THREAD=REFS THREAD=ORDEREDSUBJECT MULTIAPPEND URL-PARTIAL CATENATE UNSELECT CHILDREN NAMESPACE UIDPLUS LIST-EXTENDED I18NLEVEL=1 CONDSTORE QRESYNC ESEARCH ESORT SEARCHRES WITHIN CONTEXT=SEARCH LIST-STATUS BINARY MOVE SNIPPET=FUZZY PREVIEW=FUZZY PREVIEW STATUS=SIZE SAVEDATE COMPRESS=DEFLATE INPROGRESS${experimental_capabilities}"
 AC_DEFINE_UNQUOTED(CAPABILITY_STRING, "$capability", [IMAP capabilities])
 AC_DEFINE_UNQUOTED(CAPABILITY_BANNER_STRING, "$capability_banner", [IMAP capabilities advertised in banner])
 

@@ -339,7 +339,7 @@ test_client_host_lookup_failed(const struct smtp_client_settings *client_set)
 	smtp_client = smtp_client_init(client_set);
 
 	sconn = smtp_client_connection_create(
-		smtp_client, SMTP_PROTOCOL_SMTP, "host.in-addr.arpa", 465,
+		smtp_client, SMTP_PROTOCOL_SMTP, "test.invalid.", 465,
 		SMTP_CLIENT_SSL_MODE_IMMEDIATE, NULL);
 	smtp_client_connection_connect(sconn, NULL, NULL);
 	scmd = smtp_client_command_new(
@@ -348,7 +348,7 @@ test_client_host_lookup_failed(const struct smtp_client_settings *client_set)
 	smtp_client_command_submit(scmd);
 
 	sconn = smtp_client_connection_create(
-		smtp_client, SMTP_PROTOCOL_SMTP, "host.in-addr.arpa", 465,
+		smtp_client, SMTP_PROTOCOL_SMTP, "test.invalid.", 465,
 		SMTP_CLIENT_SSL_MODE_IMMEDIATE, NULL);
 	smtp_client_connection_connect(sconn, NULL, NULL);
 	scmd = smtp_client_command_new(
@@ -2138,7 +2138,13 @@ test_client_early_data_reply_noop_cb(const struct smtp_reply *reply,
 
 	pctx->trans = NULL;
 	timeout_remove(&pctx->to);
-	o_stream_destroy(&pctx->output);
+	if (pctx->output != NULL) {
+		if (o_stream_finish(pctx->output) < 0) {
+			i_error("Failed to finish output: %s",
+				o_stream_get_error(pctx->output));
+		}
+		o_stream_destroy(&pctx->output);
+	}
 	smtp_client_connection_unref(&pctx->conn);
 	i_free(pctx);
 }
@@ -2822,7 +2828,7 @@ test_client_dns_service_failure(const struct smtp_client_settings *client_set)
 	smtp_client = smtp_client_init(client_set);
 
 	sconn = smtp_client_connection_create(
-		smtp_client, SMTP_PROTOCOL_SMTP, "host.in-addr.arpa", 465,
+		smtp_client, SMTP_PROTOCOL_SMTP, "test.invalid.", 465,
 		SMTP_CLIENT_SSL_MODE_IMMEDIATE, NULL);
 	smtp_client_connection_connect(sconn, NULL, NULL);
 	scmd = smtp_client_command_new(
@@ -2831,7 +2837,7 @@ test_client_dns_service_failure(const struct smtp_client_settings *client_set)
 	smtp_client_command_submit(scmd);
 
 	sconn = smtp_client_connection_create(
-		smtp_client, SMTP_PROTOCOL_SMTP, "host.in-addr.arpa", 465,
+		smtp_client, SMTP_PROTOCOL_SMTP, "test.invalid.", 465,
 		SMTP_CLIENT_SSL_MODE_IMMEDIATE, NULL);
 	smtp_client_connection_connect(sconn, NULL, NULL);
 	scmd = smtp_client_command_new(

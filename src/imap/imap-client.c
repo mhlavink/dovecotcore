@@ -11,6 +11,7 @@
 #include "istream.h"
 #include "istream-concat.h"
 #include "ostream.h"
+#include "ostream-multiplex.h"
 #include "time-util.h"
 #include "var-expand.h"
 #include "settings.h"
@@ -45,6 +46,7 @@ unsigned int imap_client_count = 0;
 
 unsigned int imap_feature_condstore = UINT_MAX;
 unsigned int imap_feature_qresync = UINT_MAX;
+unsigned int imap_feature_utf8accept = UINT_MAX;
 
 static const char *client_command_state_names[] = {
 	"wait-input",
@@ -90,7 +92,8 @@ static bool user_has_special_use_mailboxes(struct mail_user *user)
 	return mail_set->parsed_have_special_use_mailboxes;
 }
 
-struct client *client_create(int fd_in, int fd_out, bool unhibernated,
+struct client *client_create(int fd_in, int fd_out,
+			     enum client_create_flags flags,
 			     struct event *event, struct mail_user *user,
 			     const struct imap_settings *set,
 			     const struct smtp_submit_settings *smtp_set)
@@ -109,7 +112,7 @@ struct client *client_create(int fd_in, int fd_out, bool unhibernated,
 	client->v = imap_client_vfuncs;
 	client->event = event;
 	event_ref(client->event);
-	client->unhibernated = unhibernated;
+	client->unhibernated = (flags & CLIENT_CREATE_FLAG_UNHIBERNATED) != 0;
 	client->set = set;
 	client->smtp_set = smtp_set;
 	client->fd_in = fd_in;
@@ -117,6 +120,13 @@ struct client *client_create(int fd_in, int fd_out, bool unhibernated,
 	client->input = i_stream_create_fd(fd_in,
 					   set->imap_max_line_length);
 	client->output = o_stream_create_fd(fd_out, SIZE_MAX);
+	if ((flags & CLIENT_CREATE_FLAG_MULTIPLEX_OUTPUT) != 0) {
+		client->multiplex_output =
+			o_stream_create_multiplex(client->output, SIZE_MAX,
+				OSTREAM_MULTIPLEX_FORMAT_STREAM_CONTINUE);
+		o_stream_unref(&client->output);
+		client->output = client->multiplex_output;
+	}
 	o_stream_set_no_error_handling(client->output, TRUE);
 	i_stream_set_name(client->input, "<imap client>");
 	o_stream_set_name(client->output, "<imap client>");
@@ -466,6 +476,7 @@ static void client_default_destroy(struct client *client, const char *reason)
 
 	i_stream_close(client->input);
 	o_stream_close(client->output);
+	o_stream_close(client->side_channel_output);
 
 	/* finish off all the queued commands. */
 	if (client->output_cmd_lock != NULL)
@@ -502,6 +513,8 @@ static void client_default_destroy(struct client *client, const char *reason)
 	timeout_remove(&client->to_idle_output);
 	timeout_remove(&client->to_idle);
 
+	if (!client->hibernated && client->fd_in == client->fd_out)
+		(void)shutdown(client->fd_out, SHUT_RDWR);
 	/* i/ostreams are already closed at this stage, so fd can be closed */
 	fd_close_maybe_stdio(&client->fd_in, &client->fd_out);
 
@@ -523,6 +536,7 @@ static void client_default_destroy(struct client *client, const char *reason)
 
 	/* free the i/ostreams after mail_user_unref(), which could trigger
 	   mail_storage_callbacks notifications that write to the ostream. */
+	o_stream_destroy(&client->side_channel_output);
 	i_stream_destroy(&client->input);
 	o_stream_destroy(&client->output);
 
@@ -985,9 +999,11 @@ void client_command_free(struct client_command_context **_cmd)
 		client_send_tagline(cmd, "NO Command cancelled.");
 	}
 
-	i_free(client->last_cmd_name);
-	client->last_cmd_name = i_strdup(cmd->name);
-	client->last_cmd_stats = cmd->stats;
+	if (cmd->name != NULL) {
+		i_free(client->last_cmd_name);
+		client->last_cmd_name = i_strdup(cmd->name);
+		client->last_cmd_stats = cmd->stats;
+	}
 
 	if (!cmd->param_error)
 		client->bad_counter = 0;
@@ -1011,8 +1027,15 @@ void client_command_free(struct client_command_context **_cmd)
 	event_add_int(cmd->event, "net_in_bytes", cmd->stats.bytes_in);
 	event_add_int(cmd->event, "net_out_bytes", cmd->stats.bytes_out);
 
-	e_debug(cmd->event, "Command finished: %s %s", cmd->name,
-		cmd->human_args != NULL ? cmd->human_args : "");
+	if (cmd->name != NULL) {
+		string_t *str = t_str_new(128);
+		str_printfa(str, "Command finished: %s", cmd->name);
+		if (cmd->human_args != NULL)
+			str_printfa(str, " %s", cmd->human_args);
+		if (cmd->tagline_reply != NULL)
+			str_printfa(str, ": %s", cmd->tagline_reply);
+		e_debug(cmd->event, "%s", str_c(str));
+	}
 	event_unref(&cmd->event);
 	event_unref(&cmd->global_event);
 
@@ -1576,6 +1599,14 @@ static void imap_client_enable_qresync(struct client *client)
 	client_enable(client, imap_feature_condstore);
 }
 
+#ifdef EXPERIMENTAL_MAIL_UTF8
+static void imap_client_enable_utf8accept(struct client *client)
+{
+	if (client->mailbox != NULL)
+		mailbox_enable(client->mailbox, MAILBOX_FEATURE_UTF8ACCEPT);
+}
+#endif
+
 enum mailbox_feature client_enabled_mailbox_features(struct client *client)
 {
 	enum mailbox_feature mailbox_features = 0;
@@ -1652,6 +1683,11 @@ void clients_init(void)
 	imap_feature_qresync =
 		imap_feature_register("QRESYNC", MAILBOX_FEATURE_CONDSTORE,
 				      imap_client_enable_qresync);
+#ifdef EXPERIMENTAL_MAIL_UTF8
+	imap_feature_utf8accept =
+		imap_feature_register("UTF8=ACCEPT", MAILBOX_FEATURE_UTF8ACCEPT,
+				      imap_client_enable_utf8accept);
+#endif
 }
 
 void client_kick(struct client *client, bool shutdown)

@@ -1,12 +1,7 @@
 /* Copyright (c) 2005-2018 Dovecot authors, see the included COPYING file */
 
 #include "login-common.h"
-#include "hostpid.h"
-#include "var-expand.h"
 #include "settings-parser.h"
-#include "master-service.h"
-#include "master-service-settings.h"
-#include "master-service-ssl-settings.h"
 #include "login-settings.h"
 
 #include <unistd.h>
@@ -20,7 +15,7 @@ static bool login_settings_check(void *_set, pool_t pool, const char **error_r);
 static const struct setting_define login_setting_defines[] = {
 	DEF(STR, login_trusted_networks),
 	DEF(STR, login_source_ips),
-	DEF(STR_VARS, login_greeting),
+	DEF(STR_VARS_HIDDEN, login_greeting),
 	DEF(STR, login_log_format_elements),
 	DEF(STR, login_log_format),
 	DEF(STR_VARS, login_proxy_notify_path),

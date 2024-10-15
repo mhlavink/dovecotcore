@@ -18,6 +18,11 @@ struct imap_parser;
 struct imap_arg;
 struct imap_urlauth_context;
 
+enum client_create_flags {
+	CLIENT_CREATE_FLAG_UNHIBERNATED = BIT(0),
+	CLIENT_CREATE_FLAG_MULTIPLEX_OUTPUT = BIT(1),
+};
+
 struct mailbox_keywords {
 	/* All keyword names. The array itself exists in mail_index.
 	   Keywords are currently only appended, they're never removed. */
@@ -164,6 +169,7 @@ struct client {
 	struct io *io;
 	struct istream *input, *pre_rawlog_input, *post_rawlog_input;
 	struct ostream *output, *pre_rawlog_output, *post_rawlog_output;
+	struct ostream *multiplex_output, *side_channel_output;
 	struct timeout *to_idle, *to_idle_output, *to_delayed_input;
 	guid_128_t anvil_conn_guid;
 
@@ -267,10 +273,12 @@ extern unsigned int imap_client_count;
 
 extern unsigned int imap_feature_condstore;
 extern unsigned int imap_feature_qresync;
+extern unsigned int imap_feature_utf8accept;
 
 /* Create new client with specified input/output handles. socket specifies
    if the handle is a socket. */
-struct client *client_create(int fd_in, int fd_out, bool unhibernated,
+struct client *client_create(int fd_in, int fd_out,
+			     enum client_create_flags flags,
 			     struct event *event, struct mail_user *user,
 			     const struct imap_settings *set,
 			     const struct smtp_submit_settings *smtp_set);

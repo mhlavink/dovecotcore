@@ -7,7 +7,7 @@ See [INSTALL.md](INSTALL.md) file.
 Configuration
 =============
 
-See [doc/documentation.txt](doc/documentation.txt) or [https://doc.dovecot.org](https://doc.dovecot.org)
+See [https://doc.dovecot.org](https://doc.dovecot.org).
 
 
 RFCs conformed
@@ -26,7 +26,7 @@ email
 - [RFC2049 - Multipurpose Internet Mail Extensions (MIME) (part 5)](https://tools.ietf.org/html/rfc2049)
 
 Auth
-----         
+----
 
 - [RFC2245 - Anonymous SASL Mechanism.](https://tools.ietf.org/html/rfc2245)
 - [RFC2595 - Using TLS with IMAP, POP3 and ACAP](https://tools.ietf.org/html/rfc2595)
@@ -37,7 +37,7 @@ Auth
 - [Google XOAUTH2 protocol](https://developers.google.com/gmail/xoauth2_protocol)
 
 POP3
-----           
+----
 
 - [RFC1939 - Post Office Protocol - Version 3](https://tools.ietf.org/html/rfc1939)
 - [RFC2449 - POP3 Extension Mechanism](https://tools.ietf.org/html/rfc2449)
@@ -96,6 +96,7 @@ IMAP extensions
 - [RFC7888 - IMAP4 Non-synchronizing Literals (updated RFC2088)](https://tools.ietf.org/html/rfc7888)
 - [RFC8457 - IMAP "$Important" Keyword and "\Important" Special-Use Attribute](https://tools.ietf.org/html/rfc8457)
 - [RFC8970 - IMAP4 Extension: Message Preview Generation](https://tools.ietf.org/html/rfc8970)
+- [RFC9585 - IMAP Response Code for Command Progress Notifications](https://tools.ietf.org/html/rfc9585)
 
 SMTP/LMTP base
 --------------
@@ -123,4 +124,4 @@ Contact info
 
 [https://www.dovecot.org/](https://www.dovecot.org/)
 
-Please use the Dovecot mailing list dovecot@dovecot.org for questions about Dovecot. You can post to the list without subscribing, the mail then waits in a moderator queue for a while. See [https://www.dovecot.org/mailinglists.html](https://www.dovecot.org/mailinglists.html)
+Please use the Dovecot mailing list dovecot@dovecot.org for questions about Dovecot. You can post to the list without subscribing, the mail then waits in a moderator queue for a while. See [https://www.dovecot.org/mailing-lists](https://www.dovecot.org/mailing-lists)

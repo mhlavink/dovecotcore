@@ -771,7 +771,32 @@ void auth_request_userdb_lookup_end(struct auth_request *request,
 	array_pop_back(&request->authdb_event);
 }
 
-static bool
+static unsigned int
+auth_request_get_internal_failure_delay(struct auth_request *request)
+{
+	unsigned int delay_msecs = request->set->internal_failure_delay;
+
+	/* add 0..50% random delay to avoid thundering herd problems */
+	return delay_msecs +
+		(delay_msecs < 2 ? 0 : i_rand_limit(delay_msecs / 2));
+}
+
+static void auth_request_passdb_internal_failure(struct auth_request *request)
+{
+	timeout_remove(&request->to_penalty);
+
+	request->passdb_result = PASSDB_RESULT_INTERNAL_FAILURE;
+	if (request->wanted_credentials_scheme != NULL) {
+		request->private_callback.lookup_credentials(
+			request->passdb_result, &uchar_nul, 0, request);
+	} else {
+		request->private_callback.verify_plain(request->passdb_result,
+						       request);
+	}
+	auth_request_unref(&request);
+}
+
+static int
 auth_request_handle_passdb_callback(enum passdb_result *result,
 				    struct auth_request *request)
 {
@@ -796,7 +821,7 @@ auth_request_handle_passdb_callback(enum passdb_result *result,
 			       "User found from deny passdb");
 			*result = PASSDB_RESULT_USER_DISABLED;
 		}
-		return TRUE;
+		return 1;
 	}
 	if (request->failed) {
 		/* The passdb didn't fail, but something inside it failed
@@ -812,11 +837,11 @@ auth_request_handle_passdb_callback(enum passdb_result *result,
 	   any of the success/failure rules to them. they'll always fail. */
 	switch (*result) {
 	case PASSDB_RESULT_USER_DISABLED:
-		return TRUE;
+		return 1;
 	case PASSDB_RESULT_PASS_EXPIRED:
 		auth_request_set_field(request, "reason",
 					"Password expired", NULL);
-		return TRUE;
+		return 1;
 
 	case PASSDB_RESULT_OK:
 		result_rule = request->passdb->result_success;
@@ -917,7 +942,7 @@ auth_request_handle_passdb_callback(enum passdb_result *result,
 			   successfully login. */
 			request->passdbs_seen_internal_failure = TRUE;
 		}
-		return FALSE;
+		return 0;
 	} else if (*result == PASSDB_RESULT_NEXT) {
 		/* admin forgot to put proper passdb last */
 		e_error(request->event,
@@ -934,7 +959,19 @@ auth_request_handle_passdb_callback(enum passdb_result *result,
 		   instead of plain failure. */
 		*result = PASSDB_RESULT_INTERNAL_FAILURE;
 	}
-	return TRUE;
+
+	i_assert(request->to_penalty == NULL);
+	if (*result == PASSDB_RESULT_INTERNAL_FAILURE) {
+		unsigned int internal_failure_delay =
+			auth_request_get_internal_failure_delay(request);
+		if (internal_failure_delay > 0) {
+			auth_request_ref(request);
+			request->to_penalty = timeout_add(internal_failure_delay,
+				auth_request_passdb_internal_failure, request);
+			return -1;
+		}
+	}
+	return 1;
 }
 
 void
@@ -942,6 +979,7 @@ auth_request_verify_plain_callback_finish(enum passdb_result result,
 					  struct auth_request *request)
 {
 	const char *error;
+	int ret;
 
 	if (passdb_template_export(request->passdb->override_fields_tmpl,
 				   request, &error) < 0) {
@@ -949,11 +987,11 @@ auth_request_verify_plain_callback_finish(enum passdb_result result,
 			"Failed to expand override_fields: %s", error);
 		result = PASSDB_RESULT_INTERNAL_FAILURE;
 	}
-	if (!auth_request_handle_passdb_callback(&result, request)) {
+	if ((ret = auth_request_handle_passdb_callback(&result, request)) == 0) {
 		/* try next passdb */
 		auth_request_verify_plain(request, request->mech_password,
 			request->private_callback.verify_plain);
-	} else {
+	} else if (ret > 0) {
 		auth_request_ref(request);
 		request->passdb_result = result;
 		request->private_callback.verify_plain(request->passdb_result,
@@ -1054,6 +1092,8 @@ static void auth_request_policy_penalty_finish(void *context)
 static void auth_request_policy_check_callback(int result, void *context)
 {
 	struct auth_policy_check_ctx *ctx = context;
+
+	i_assert(ctx->request->to_penalty == NULL);
 
 	ctx->request->policy_processed = TRUE;
 	/* It's possible that multiple policy lookups return a penalty.
@@ -1180,6 +1220,7 @@ auth_request_lookup_credentials_finish(enum passdb_result result,
 				       struct auth_request *request)
 {
 	const char *error;
+	int ret;
 
 	if (passdb_template_export(request->passdb->override_fields_tmpl,
 				   request, &error) < 0) {
@@ -1187,7 +1228,7 @@ auth_request_lookup_credentials_finish(enum passdb_result result,
 			"Failed to expand override_fields: %s", error);
 		result = PASSDB_RESULT_INTERNAL_FAILURE;
 	}
-	if (!auth_request_handle_passdb_callback(&result, request)) {
+	if ((ret = auth_request_handle_passdb_callback(&result, request)) == 0) {
 		/* try next passdb */
 		if (request->fields.skip_password_check &&
 		    request->fields.delayed_credentials == NULL && size > 0) {
@@ -1199,7 +1240,7 @@ auth_request_lookup_credentials_finish(enum passdb_result result,
 		auth_request_lookup_credentials(request,
 			request->wanted_credentials_scheme,
 		  	request->private_callback.lookup_credentials);
-	} else {
+	} else if (ret > 0) {
 		if (request->fields.delayed_credentials != NULL && size == 0) {
 			/* we did multiple passdb lookups, but the last one
 			   didn't provide any credentials (e.g. just wanted to
@@ -1463,6 +1504,14 @@ auth_request_lookup_user_cache(struct auth_request *request, const char *key,
 	return TRUE;
 }
 
+static void auth_request_userdb_internal_failure(struct auth_request *request)
+{
+	timeout_remove(&request->to_penalty);
+	request->private_callback.userdb(USERDB_RESULT_INTERNAL_FAILURE,
+					 request);
+	auth_request_unref(&request);
+}
+
 void auth_request_userdb_callback(enum userdb_result result,
 				  struct auth_request *request)
 {
@@ -1574,6 +1623,7 @@ void auth_request_userdb_callback(enum userdb_result result,
 		result = USERDB_RESULT_USER_UNKNOWN;
 	}
 
+	unsigned int internal_failure_delay = 0;
 	if (request->userdb_lookup_tempfailed) {
 		/* userdb lookup succeeded, but it either returned tempfail
 		   or one of its fields was invalid. Looking up the user from
@@ -1590,10 +1640,23 @@ void auth_request_userdb_callback(enum userdb_result result,
 			e_info(request->event,
 			       "%sFalling back to expired data from cache",
 				auth_request_get_log_prefix_db(request));
+		} else {
+			internal_failure_delay =
+				auth_request_get_internal_failure_delay(request);
 		}
+	} else if (result == USERDB_RESULT_INTERNAL_FAILURE) {
+		internal_failure_delay =
+			auth_request_get_internal_failure_delay(request);
 	}
 
-	 request->private_callback.userdb(result, request);
+	i_assert(request->to_penalty == NULL);
+	if (internal_failure_delay > 0) {
+		auth_request_ref(request);
+		request->to_penalty = timeout_add(internal_failure_delay,
+			auth_request_userdb_internal_failure, request);
+	} else {
+		request->private_callback.userdb(result, request);
+	}
 }
 
 void auth_request_lookup_user(struct auth_request *request,
@@ -2148,6 +2211,24 @@ auth_request_proxy_finish_ip(struct auth_request *request,
 			     bool proxy_host_is_self)
 {
 	const struct auth_request_fields *fields = &request->fields;
+	const char *host = auth_fields_find(request->fields.extra_fields, "host");
+	const char *hostip = auth_fields_find(request->fields.extra_fields, "hostip");
+	struct ip_addr ip1, ip2;
+
+	/* This same check is repeated in login-common, since host might be set
+	   after authentication by some other process. */
+	if (host != NULL && hostip != NULL &&
+	    net_addr2ip(host, &ip1) == 0) {
+		/* hostip is already checked to be valid */
+		if (net_addr2ip(hostip, &ip2) == 0 &&
+		    !net_ip_compare(&ip1, &ip2)) {
+			e_error(request->event,
+				"host and hostip are both IPs, but they don't match");
+			request->internal_failure = TRUE;
+			auth_request_proxy_finish_failure(request);
+			return;
+		}
+	}
 
 	if (!auth_fields_exists(fields->extra_fields, "proxy_maybe")) {
 		/* proxying */
@@ -2214,8 +2295,9 @@ auth_request_proxy_dns_callback(const struct dns_lookup_result *result,
 		}
 		auth_request_proxy_finish_ip(request, proxy_host_is_self);
 	}
+	bool res = result->ret == 0 && !request->internal_failure;
 	if (ctx->callback != NULL)
-		ctx->callback(result->ret == 0, request);
+		ctx->callback(res, request);
 	event_unref(&ctx->event);
 	auth_request_unref(&request);
 }
@@ -2306,6 +2388,8 @@ int auth_request_proxy_finish(struct auth_request *request,
 	}
 
 	auth_request_proxy_finish_ip(request, proxy_host_is_self);
+	if (request->internal_failure)
+		return -1;
 	return 1;
 }
 
@@ -2316,6 +2400,7 @@ void auth_request_proxy_finish_failure(struct auth_request *request)
 	auth_fields_remove(request->fields.extra_fields, "proxy_maybe");
 	auth_fields_remove(request->fields.extra_fields, "proxy_always");
 	auth_fields_remove(request->fields.extra_fields, "host");
+	auth_fields_remove(request->fields.extra_fields, "hostip");
 	auth_fields_remove(request->fields.extra_fields, "port");
 	auth_fields_remove(request->fields.extra_fields, "destuser");
 }

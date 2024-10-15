@@ -5,21 +5,17 @@
 #include "md5.h"
 #include "sasl-server.h"
 #include "str.h"
-#include "base64.h"
 #include "buffer.h"
 #include "hex-binary.h"
 #include "ioloop.h"
 #include "istream.h"
 #include "strfuncs.h"
-#include "write-full.h"
 #include "strescape.h"
 #include "str-sanitize.h"
 #include "anvil-client.h"
 #include "auth-client.h"
 #include "iostream-ssl.h"
-#include "master-service.h"
 #include "master-service-ssl-settings.h"
-#include "master-interface.h"
 #include "login-client.h"
 #include "client-common.h"
 
@@ -182,6 +178,8 @@ static int master_send_request(struct anvil_request *anvil_request)
 	req.local_port = client->local_port;
 	req.remote_port = client->remote_port;
 	req.client_pid = getpid();
+	if (client->multiplex_output != NULL)
+		req.flags |= LOGIN_REQUEST_FLAG_MULTIPLEX_OUTPUT;
 	if (client->ssl_iostream != NULL &&
 	    ssl_iostream_get_compression(client->ssl_iostream) != NULL)
 		req.flags |= LOGIN_REQUEST_FLAG_TLS_COMPRESSION;

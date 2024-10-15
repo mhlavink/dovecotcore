@@ -39,7 +39,7 @@ static const char *imap_id_get_uname(const char *key)
 static const char *imap_id_get_default(const char *key)
 {
 	if (strcasecmp(key, "name") == 0)
-		return PACKAGE_NAME;
+		return DOVECOT_NAME;
 	if (strcasecmp(key, "version") == 0)
 		return PACKAGE_VERSION;
 	if (strcasecmp(key, "revision") == 0)
@@ -85,6 +85,11 @@ imap_id_reply_generate_from_imap_args(const struct imap_arg *args)
 			else {
 				if (strcmp(value, "*") == 0)
 					value = imap_id_get_default(key);
+#if defined(DOVECOT_EDITION)
+				else if (strcasecmp(key, "name") == 0 &&
+					 strcmp(DOVECOT_EDITION, "Pro") == 0)
+					value = imap_id_get_default(key);
+#endif
 			}
 			imap_append_nstring(str, value);
 		}

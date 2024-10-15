@@ -529,7 +529,7 @@ static const char *client_stats(struct client *client)
 {
 	const char *uidl_change = "";
 	if (var_has_key(client->set->pop3_logout_format,
-			'o', "uidl_change"))
+			'u', "uidl_change"))
 		uidl_change = client_build_uidl_change_string(client);
 
 	const struct var_expand_table logout_tab[] = {
@@ -640,6 +640,8 @@ static void client_default_destroy(struct client *client, const char *reason)
 	i_stream_destroy(&client->input);
 	o_stream_destroy(&client->output);
 
+	if (client->fd_in == client->fd_out)
+		(void)shutdown(client->fd_out, SHUT_RDWR);
 	fd_close_maybe_stdio(&client->fd_in, &client->fd_out);
 
 	/* Autoexpunging might run for a long time. Disconnect the client

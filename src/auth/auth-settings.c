@@ -230,15 +230,22 @@ static const struct setting_define auth_setting_defines[] = {
 	DEF(TIME, cache_negative_ttl),
 	DEF(BOOL, cache_verify_password_with_worker),
 	DEF(STR, username_chars),
-	DEF(STR, username_translation),
+	DEF(STR_HIDDEN, username_translation),
 	DEF(STR, username_format),
 	DEF(STR, master_user_separator),
 	DEF(STR, anonymous_username),
+#ifdef DOVECOT_PRO_EDITION
+	DEF(STR_HIDDEN, krb5_keytab),
+	DEF(STR_HIDDEN, gssapi_hostname),
+	DEF(STR_HIDDEN, winbind_helper_path),
+#else
 	DEF(STR, krb5_keytab),
 	DEF(STR, gssapi_hostname),
 	DEF(STR, winbind_helper_path),
+#endif
 	DEF(STR, proxy_self),
 	DEF(TIME, failure_delay),
+	DEF(TIME_MSECS, internal_failure_delay),
 
 	DEF(STR, policy_server_url),
 	DEF(STR, policy_server_api_header),
@@ -251,7 +258,7 @@ static const struct setting_define auth_setting_defines[] = {
 	DEF(BOOL, policy_check_after_auth),
 	DEF(BOOL, policy_report_after_auth),
 	DEF(BOOL, policy_log_only),
-	DEF(UINT, policy_hash_truncate),
+	DEF(UINT_HIDDEN, policy_hash_truncate),
 
 	DEF(BOOL, verbose),
 	DEF(BOOL, debug),
@@ -260,7 +267,11 @@ static const struct setting_define auth_setting_defines[] = {
 	DEF(STR, verbose_passwords),
 	DEF(BOOL, ssl_require_client_cert),
 	DEF(BOOL, ssl_username_from_cert),
+#ifdef DOVECOT_PRO_EDITION
+	DEF(BOOL_HIDDEN, use_winbind),
+#else
 	DEF(BOOL, use_winbind),
+#endif
 
 	{ .type = SET_FILTER_ARRAY, .key = "passdb",
 	  .offset = offsetof(struct auth_settings, passdbs),
@@ -271,7 +282,7 @@ static const struct setting_define auth_setting_defines[] = {
 	  .filter_array_field_name = "name",
 	  .required_setting = "userdb_driver", },
 
-	DEF_NOPREFIX(STR, base_dir),
+	DEF_NOPREFIX(STR_HIDDEN, base_dir),
 	DEF_NOPREFIX(BOOL, verbose_proctitle),
 	DEF_NOPREFIX(UINT, first_valid_uid),
 	DEF_NOPREFIX(UINT, last_valid_uid),
@@ -302,6 +313,7 @@ static const struct auth_settings auth_default_settings = {
 	.winbind_helper_path = "/usr/bin/ntlm_auth",
 	.proxy_self = "",
 	.failure_delay = 2,
+	.internal_failure_delay = 2000,
 
 	.policy_server_url = "",
 	.policy_server_api_header = "",

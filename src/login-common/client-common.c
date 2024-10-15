@@ -3,16 +3,16 @@
 #include "login-common.h"
 #include "hex-binary.h"
 #include "array.h"
-#include "hostpid.h"
 #include "llist.h"
 #include "istream.h"
 #include "md5.h"
 #include "ostream.h"
+#include "istream-multiplex.h"
+#include "ostream-multiplex.h"
 #include "iostream.h"
 #include "iostream-ssl.h"
 #include "iostream-proxy.h"
 #include "iostream-rawlog.h"
-#include "process-title.h"
 #include "hook-build.h"
 #include "buffer.h"
 #include "str.h"
@@ -27,7 +27,6 @@
 #include "master-service.h"
 #include "master-service-ssl-settings.h"
 #include "login-client.h"
-#include "anvil-client.h"
 #include "auth-client.h"
 #include "dsasl-client.h"
 #include "login-proxy.h"
@@ -350,17 +349,7 @@ int client_init(struct client *client)
 	return 0;
 }
 
-static void client_disconnected_log(struct event *event, const char *reason,
-				    bool add_disconnected_prefix)
-{
-	if (add_disconnected_prefix)
-		e_info(event, "Disconnected: %s", reason);
-	else
-		e_info(event, "%s", reason);
-}
-
-static void login_aborted_event(struct client *client, const char *reason,
-				bool add_disconnected_prefix)
+static void login_aborted_event(struct client *client, const char *reason)
 {
 	struct event *event = client->login_proxy == NULL ?
 		client->event :
@@ -372,10 +361,8 @@ static void login_aborted_event(struct client *client, const char *reason,
 	i_assert(reason != NULL);
 	if (client_get_extra_disconnect_reason(client, &human_reason, &event_reason))
 		reason = t_strdup_printf("%s (%s)", reason, human_reason);
-	else
-		event_reason = reason;
 
-	e->add_str("reason", event_reason);
+	e->add_str("reason", event_reason != NULL ? event_reason : reason);
 	e->add_int("auth_successes", client->auth_successes);
 	e->add_int("auth_attempts", client->auth_attempts);
 	e->add_int("auth_usecs", timeval_diff_usecs(&ioloop_timeval,
@@ -383,12 +370,15 @@ static void login_aborted_event(struct client *client, const char *reason,
 	e->add_int("connected_usecs", timeval_diff_usecs(&ioloop_timeval,
 							 &client->created));
 
-	client_disconnected_log(e->event(), reason,
-			        add_disconnected_prefix);
+	if (event_reason == NULL)
+		e_info(e->event(), "Login aborted: %s", reason);
+	else {
+		e_info(e->event(), "Login aborted: %s (%s)",
+		       reason, event_reason);
+	}
 }
 
-void client_disconnect(struct client *client, const char *reason,
-		       bool add_disconnected_prefix)
+void client_disconnect(struct client *client, const char *reason)
 {
 	if (client->disconnected)
 		return;
@@ -397,12 +387,11 @@ void client_disconnect(struct client *client, const char *reason,
 	if (reason == NULL) {
 		/* proxying started */
 	} else if (!client->login_success) {
-		login_aborted_event(client, reason, add_disconnected_prefix);
+		login_aborted_event(client, reason);
 	} else {
-		client_disconnected_log(client->login_proxy == NULL ?
-					client->event :
-					login_proxy_get_event(client->login_proxy),
-					reason, add_disconnected_prefix);
+		e_info(client->login_proxy == NULL ? client->event :
+		       login_proxy_get_event(client->login_proxy),
+		       "%s", reason);
 	}
 
 	if (client->output != NULL)
@@ -418,6 +407,8 @@ void client_disconnect(struct client *client, const char *reason,
 		}
 		i_stream_close(client->input);
 		o_stream_close(client->output);
+		(void)shutdown(client->fd, SHUT_RDWR);
+
 		i_close_fd(&client->fd);
 		if (unref) {
 			i_assert(client->refcount > 1);
@@ -456,7 +447,7 @@ void client_destroy(struct client *client, const char *reason)
 	client->list_type = CLIENT_LIST_TYPE_DESTROYED;
 	DLLIST_PREPEND(&destroyed_clients, client);
 
-	client_disconnect(client, reason, !client->login_success);
+	client_disconnect(client, reason);
 
 	pool_unref(&client->preproxy_pool);
 	i_zero(&client->forward_fields);
@@ -581,6 +572,7 @@ bool client_unref(struct client **_client)
 	client->list_type = CLIENT_LIST_TYPE_NONE;
 	i_stream_unref(&client->input);
 	o_stream_unref(&client->output);
+	o_stream_unref(&client->multiplex_orig_output);
 	i_close_fd(&client->fd);
 	event_unref(&client->event);
 	event_unref(&client->event_auth);
@@ -761,6 +753,13 @@ int client_init_ssl(struct client *client)
 
 static void client_start_tls(struct client *client)
 {
+	bool add_multiplex_ostream = FALSE;
+
+	if (client->multiplex_output != NULL) {
+		/* restart multiplexing after TLS iostreams are set up */
+		client_multiplex_output_stop(client);
+		add_multiplex_ostream = TRUE;
+	}
 	client->connection_used_starttls = TRUE;
 	if (client_init_ssl(client) < 0) {
 		client_notify_disconnect(client,
@@ -771,6 +770,8 @@ static void client_start_tls(struct client *client)
 	}
 	login_refresh_proctitle();
 
+	if (add_multiplex_ostream)
+		client_multiplex_output_start(client);
 	client->v.starttls(client);
 }
 
@@ -821,6 +822,39 @@ void client_cmd_starttls(struct client *client)
 	}
 }
 
+void client_multiplex_output_start(struct client *client)
+{
+	if (client->v.iostream_change_pre != NULL)
+		client->v.iostream_change_pre(client);
+
+	client->multiplex_output =
+		o_stream_create_multiplex(client->output, LOGIN_MAX_OUTBUF_SIZE,
+					  OSTREAM_MULTIPLEX_FORMAT_STREAM);
+	client->multiplex_orig_output = client->output;
+	client->output = client->multiplex_output;
+
+	if (client->v.iostream_change_post != NULL)
+		client->v.iostream_change_post(client);
+}
+
+void client_multiplex_output_stop(struct client *client)
+{
+	i_assert(client->multiplex_output != NULL);
+	i_assert(client->multiplex_orig_output != NULL);
+
+	if (client->v.iostream_change_pre != NULL)
+		client->v.iostream_change_pre(client);
+
+	i_assert(client->output == client->multiplex_output);
+	o_stream_unref(&client->output);
+	client->output = client->multiplex_orig_output;
+	client->multiplex_output = NULL;
+	client->multiplex_orig_output = NULL;
+
+	if (client->v.iostream_change_post != NULL)
+		client->v.iostream_change_post(client);
+}
+
 static void
 iostream_fd_proxy_finished(enum iostream_proxy_side side ATTR_UNUSED,
 			   enum iostream_proxy_status status ATTR_UNUSED,
@@ -861,11 +895,18 @@ int client_get_plaintext_fd(struct client *client, int *fd_r, bool *close_fd_r)
 	o_stream_set_no_error_handling(output, TRUE);
 
 	i_assert(client->io == NULL);
+	struct ostream *client_output = client->output;
+	if (client->multiplex_output != NULL) {
+		/* The post-login process takes over handling the multiplex
+		   stream. */
+		i_assert(client_output == client->multiplex_output);
+		client_output = client->multiplex_orig_output;
+	}
 
 	client_ref(client);
 	client->iostream_fd_proxy =
 		iostream_proxy_create(input, output,
-				      client->input, client->output);
+				      client->input, client_output);
 	i_stream_unref(&input);
 	o_stream_unref(&output);
 
@@ -1244,6 +1285,13 @@ bool client_get_extra_disconnect_reason(struct client *client,
 
 	*event_reason_r = NULL;
 
+	if (client->ssl_iostream != NULL &&
+	    !ssl_iostream_is_handshaked(client->ssl_iostream)) {
+		*event_reason_r = "tls_handshake_not_finished";
+		*human_reason_r = "disconnected during TLS handshake";
+		return TRUE;
+	}
+
 	if (!client->notified_auth_ready) {
 		*event_reason_r = "auth_process_not_ready";
 		*human_reason_r = t_strdup_printf(
@@ -1352,6 +1400,9 @@ bool client_get_extra_disconnect_reason(struct client *client,
 		/* Authentication to the next hop failed. */
 		*event_reason_r = t_strdup_printf("proxy_dest_%s", event_reason);
 		last_reason = t_strdup_printf("proxy dest %s", last_reason);
+	} else if (client->auth_login_limit_reached) {
+		*event_reason_r = "connection_limit";
+		last_reason = "connection limit reached";
 	} else {
 		*event_reason_r = client_auth_fail_code_event_reasons[client->last_auth_fail];
 		last_reason = client_auth_fail_code_reasons[client->last_auth_fail];

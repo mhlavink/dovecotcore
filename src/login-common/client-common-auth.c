@@ -180,6 +180,8 @@ static bool client_auth_parse_args(const struct client *client, bool success,
 					value, error);
 				return FALSE;
 			}
+		} else if (strcmp(key, "proxy_no_multiplex") == 0) {
+			reply_r->proxy_no_multiplex = TRUE;
 		} else if (strcmp(key, "proxy_refresh") == 0) {
 			if (str_to_uint(value, &reply_r->proxy_refresh_secs) < 0) {
 				e_error(client->event,
@@ -287,14 +289,7 @@ void client_proxy_finish_destroy_client(struct client *client)
 		return;
 	}
 
-	/* Include hostname in the log message in case it's different from the
-	   IP address in the prefix. */
-	const char *ip_str = login_proxy_get_ip_str(client->login_proxy);
-	const char *host = login_proxy_get_host(client->login_proxy);
-	str_printfa(str, "Started proxying to <%s>",
-		    login_proxy_get_ip_str(client->login_proxy));
-	if (strcmp(ip_str, host) != 0)
-		str_printfa(str, " (<%s>)", host);
+	str_printfa(str, "Started proxying to remote host");
 
 	client_proxy_append_conn_info(str, client);
 
@@ -340,7 +335,7 @@ static void proxy_input(struct client *client)
 	const char *line;
 	unsigned int duration;
 
-	input = login_proxy_get_istream(client->login_proxy);
+	input = login_proxy_get_server_istream(client->login_proxy);
 	switch (i_stream_read(input)) {
 	case -2:
 		login_proxy_failed(client->login_proxy,
@@ -569,6 +564,39 @@ void client_common_proxy_failed(struct client *client,
 	client_proxy_failed(client);
 }
 
+static bool proxy_check_ip_family(const struct client_auth_reply *reply,
+				  const char **error_r)
+{
+	 if (reply->proxy.host_ip.family != 0 &&
+	     reply->proxy.host_ip.family != AF_INET &&
+	     reply->proxy.host_ip.family != AF_INET6) {
+		 *error_r = t_strdup_printf(
+				 "Destination IP address family %u is unsupported",
+				 reply->proxy.host_ip.family);
+		 return FALSE;
+	 }
+
+	 if (reply->proxy.source_ip.family != 0 &&
+	     reply->proxy.source_ip.family != AF_INET &&
+	     reply->proxy.source_ip.family != AF_INET6) {
+		 *error_r = t_strdup_printf(
+				 "Source IP address family %u is unsupported",
+				 reply->proxy.source_ip.family);
+		 return FALSE;
+	}
+
+	 if (reply->proxy.source_ip.family != 0 &&
+	     reply->proxy.host_ip.family != 0 &&
+	     reply->proxy.source_ip.family != reply->proxy.host_ip.family) {
+		 *error_r = t_strdup_printf(
+				 "Source IP (%s) address family does not match destination",
+				 net_ip2addr(&reply->proxy.source_ip));
+		 return FALSE;
+	 }
+
+	return TRUE;
+}
+
 static bool
 proxy_check_start(struct client *client, struct event *event,
 		  const struct client_auth_reply *reply,
@@ -577,6 +605,8 @@ proxy_check_start(struct client *client, struct event *event,
 	i_assert(reply->proxy.password != NULL);
 	i_assert(reply->proxy.host != NULL && reply->proxy.host[0] != '\0');
 	i_assert(reply->proxy.host_ip.family != 0);
+	const char *error;
+	struct ip_addr ip;
 
 	if (reply->proxy.sasl_mechanism != NULL) {
 		*sasl_mech_r = dsasl_client_mech_find(reply->proxy.sasl_mechanism);
@@ -588,14 +618,51 @@ proxy_check_start(struct client *client, struct event *event,
 	} else if (reply->proxy.master_user != NULL) {
 		/* have to use PLAIN authentication with master user logins */
 		*sasl_mech_r = &dsasl_client_mech_plain;
+	} else if (!proxy_check_ip_family(reply, &error)) {
+		e_error(event, "%s", error);
+		return FALSE;
+	} else if (reply->proxy.host_ip.family != 0 &&
+		   net_addr2ip(reply->proxy.host, &ip) == 0 &&
+		   !net_ip_compare(&reply->proxy.host_ip, &ip)) {
+		e_error(event, "host and hostip are both IPs, but they don't match");
+		return FALSE;
 	}
 
-	if (login_proxy_is_ourself(client, reply->proxy.host, reply->proxy.port,
-				   reply->proxy.username)) {
+	if (login_proxy_is_ourself(client, reply->proxy.host, &reply->proxy.host_ip,
+				   reply->proxy.port, reply->proxy.username)) {
 		e_error(event, "Proxying loops to itself");
 		return FALSE;
 	}
 	return TRUE;
+}
+
+/* Sets ip_r to source address if one is found for given family,
+   and advances the index pointer to next potential address. */
+static void login_source_ip_get(sa_family_t family, struct ip_addr *ip_r)
+{
+	unsigned int *login_source_ips_idx;
+	unsigned int login_source_ips_count;
+	const struct ip_addr *login_source_ips;
+
+	if (family == AF_INET) {
+		login_source_ips_idx = &login_source_v4_ips_idx;
+		login_source_ips_count = login_source_v4_ips_count;
+		login_source_ips = login_source_v4_ips;
+	} else if (family == AF_INET6) {
+		login_source_ips_idx = &login_source_v6_ips_idx;
+		login_source_ips_count = login_source_v6_ips_count;
+		login_source_ips = login_source_v6_ips;
+	} else
+		i_unreached();
+
+	/* No source IP for this AF */
+	if (login_source_ips_count == 0)
+		return;
+
+	/* select the next source IP with round robin. */
+	*ip_r = login_source_ips[*login_source_ips_idx];
+	*login_source_ips_idx =
+		(*login_source_ips_idx + 1) % login_source_ips_count;
 }
 
 static int proxy_start(struct client *client,
@@ -627,14 +694,11 @@ static int proxy_start(struct client *client,
 	i_zero(&proxy_set);
 	proxy_set.host = reply->proxy.host;
 	proxy_set.ip = reply->proxy.host_ip;
-	if (reply->proxy.source_ip.family != 0) {
+	if (reply->proxy.source_ip.family != 0)
 		proxy_set.source_ip = reply->proxy.source_ip;
-	} else if (login_source_ips_count > 0) {
-		/* select the next source IP with round robin. */
-		proxy_set.source_ip = login_source_ips[login_source_ips_idx];
-		login_source_ips_idx =
-			(login_source_ips_idx + 1) % login_source_ips_count;
-	}
+	else
+		login_source_ip_get(proxy_set.ip.family, &proxy_set.source_ip);
+
 	proxy_set.port = reply->proxy.port;
 	proxy_set.connect_timeout_msecs = reply->proxy.timeout_msecs;
 	if (proxy_set.connect_timeout_msecs == 0)
@@ -653,8 +717,10 @@ static int proxy_start(struct client *client,
 	client->proxy_noauth = reply->proxy.noauth;
 	client->proxy_not_trusted = reply->proxy.remote_not_trusted;
 	client->proxy_redirect_reauth = reply->proxy.redirect_reauth;
+	client->proxy_no_multiplex = reply->proxy_no_multiplex;
 
 	if (login_proxy_new(client, event, &proxy_set, proxy_input,
+			    client->v.proxy_side_channel_input,
 			    client->v.proxy_failed, proxy_redirect) < 0) {
 		event_unref(&event);
 		return -1;
@@ -891,8 +957,9 @@ client_auth_reply_args(struct client *client, enum sasl_server_reply sasl_reply,
 		if (!client_auth_parse_args(client, success, FALSE, args,
 					    reply_r, &username)) {
 			client_auth_result(client,
-				CLIENT_AUTH_RESULT_AUTHFAILED, reply_r,
-				AUTH_FAILED_MSG);
+				CLIENT_AUTH_RESULT_TEMPFAIL, reply_r,
+				AUTH_TEMP_FAILED_MSG);
+			client_auth_failed(client);
 			return FALSE;
 		}
 		if (!success) {
@@ -930,7 +997,7 @@ sasl_callback(struct client *client, enum sasl_server_reply sasl_reply,
 
 		client_auth_result(client, CLIENT_AUTH_RESULT_SUCCESS,
 				   &reply, NULL);
-		client_destroy_success(client, "Login");
+		client_destroy_success(client, "Logged in");
 		break;
 	case SASL_SERVER_REPLY_AUTH_FAILED:
 	case SASL_SERVER_REPLY_AUTH_ABORTED:
@@ -966,6 +1033,7 @@ sasl_callback(struct client *client, enum sasl_server_reply sasl_reply,
 		} else {
 			client_auth_result(client,
 				CLIENT_AUTH_RESULT_LIMIT_REACHED, &reply, data);
+			client->auth_login_limit_reached = TRUE;
 		}
 
 		/* the fd may still be hanging somewhere in kernel or another

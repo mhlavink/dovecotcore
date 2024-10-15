@@ -39,7 +39,7 @@ struct module;
 
 /* Client logged out without having successfully authenticated. */
 #define CLIENT_UNAUTHENTICATED_LOGOUT_MSG \
-	"Aborted login by logging out"
+	"Logged out"
 
 #define CLIENT_TRANSPORT_TLS "TLS"
 #define CLIENT_TRANSPORT_INSECURE "insecure"
@@ -116,6 +116,7 @@ struct client_auth_reply {
 	const char *const *all_fields;
 
 	bool nologin:1;
+	bool proxy_no_multiplex:1;
 };
 
 struct client_vfuncs {
@@ -151,6 +152,9 @@ struct client_vfuncs {
 			    const char *text);
 	void (*proxy_reset)(struct client *client);
 	int (*proxy_parse_line)(struct client *client, const char *line);
+	int (*proxy_side_channel_input)(struct client *client,
+					const char *const *args,
+					const char **error_r);
 	void (*proxy_failed)(struct client *client,
 			     enum login_proxy_failure_type type,
 			     const char *reason, bool reconnecting);
@@ -196,6 +200,11 @@ struct client {
 	int fd;
 	struct istream *input;
 	struct ostream *output;
+	/* If non-NULL, this is the multiplex ostream. It is usually the same
+	   as the output pointer, but some plugins may make them different.
+	   This isn't holding a reference, so it must not be unreferenced. */
+	struct ostream *multiplex_output;
+	struct ostream *multiplex_orig_output;
 	struct io *io;
 	struct iostream_proxy *iostream_fd_proxy;
 	struct timeout *to_auth_waiting;
@@ -289,6 +298,8 @@ struct client {
 	/* Client asked for SASL authentication to be aborted by sending
 	   "*" line. */
 	bool auth_aborted_by_client:1;
+	/* Too many connections from user/ip */
+	bool auth_login_limit_reached:1;
 	bool auth_initializing:1;
 	bool auth_process_comm_fail:1;
 	bool auth_anonymous:1;
@@ -296,6 +307,8 @@ struct client {
 	bool proxy_failed:1;
 	bool proxy_noauth:1;
 	bool proxy_nopipelining:1;
+	/* Disable multiplex iostream to next nop */
+	bool proxy_no_multiplex;
 	bool proxy_not_trusted:1;
 	bool proxy_redirect_reauth:1;
 	bool notified_auth_ready:1;
@@ -326,8 +339,7 @@ void login_client_hooks_remove(const struct login_client_hooks *hooks);
 int client_alloc(int fd, const struct master_service_connection *conn,
 		 struct client **client_r);
 int client_init(struct client *client);
-void client_disconnect(struct client *client, const char *reason,
-		       bool add_disconnected_prefix);
+void client_disconnect(struct client *client, const char *reason);
 void client_destroy(struct client *client, const char *reason);
 void client_destroy_iostream_error(struct client *client);
 /* Destroy the client after a successful login. Either the client fd was
@@ -339,6 +351,9 @@ bool client_unref(struct client **client) ATTR_NOWARN_UNUSED_RESULT;
 
 int client_init_ssl(struct client *client);
 void client_cmd_starttls(struct client *client);
+
+void client_multiplex_output_start(struct client *client);
+void client_multiplex_output_stop(struct client *client);
 
 int client_get_plaintext_fd(struct client *client, int *fd_r, bool *close_fd_r);
 

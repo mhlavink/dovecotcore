@@ -25,6 +25,9 @@ libdict_backend_la_SOURCES = \
 	$(ldap_sources)
 libdict_backend_la_LIBADD =
 
+BUILT_SOURCES = \
+	dict-drivers-register.c
+
 nodist_libdict_backend_la_SOURCES = \
 	dict-drivers-register.c
 
@@ -87,9 +90,6 @@ dict-drivers-register.c: Makefile $(top_builddir)/config.h
 	done; \
 	echo '}' >>$@
 
-distclean-generic:
-	rm -f Makefile dict-drivers-register.c
-
 test_programs = \
 	test-dict-sql
 
@@ -103,12 +103,12 @@ test_dict_sql_LDADD = \
 	$(DICT_LIBS) \
 	../lib-sql/libdriver_test.la \
 	../lib-sql/libsql.la \
-	../lib-dovecot/libdovecot.la
+	$(LIBDOVECOT)
 test_dict_sql_DEPENDENCIES = \
 	$(noinst_LTLIBRARIES) \
 	../lib-sql/libdriver_test.la \
 	../lib-sql/libsql.la \
-	../lib-dovecot/libdovecot.la
+	$(LIBDOVECOT_DEPS)
 
 check-local:
 	for bin in $(test_programs) $(check_PROGRAMS); do \

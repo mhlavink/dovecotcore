@@ -46,6 +46,7 @@ struct config_parser_key {
 
 struct config_parsed {
 	pool_t pool;
+	const char *dovecot_config_version;
 	struct config_filter_parser *const *filter_parsers;
 	struct config_module_parser *module_parsers;
 	ARRAY_TYPE(const_string) errors;
@@ -381,7 +382,7 @@ int config_apply_line(struct config_parser_context *ctx,
 					 get_setting_full_path(ctx, key), NULL);
 		return -1;
 	}
-	return 0;
+	return ret < 0 ? -1 : 0;
 }
 
 static int
@@ -647,6 +648,8 @@ config_filter_add_new_filter(struct config_parser_context *ctx,
 					parent->filter_name, key, key, parent->filter_name);
 				return FALSE;
 			}
+			i_assert(parent->filter_name != NULL ||
+				 !parent->filter_name_array);
 			if (strcmp(key, "namespace") == 0 &&
 			    parent->filter_name_array &&
 			    (str_begins_with(parent->filter_name, "namespace/") ||
@@ -1178,6 +1181,7 @@ config_parse_finish(struct config_parser_context *ctx,
 	new_config = p_new(ctx->pool, struct config_parsed, 1);
 	new_config->pool = ctx->pool;
 	pool_ref(new_config->pool);
+	new_config->dovecot_config_version = ctx->dovecot_config_version;
 	p_array_init(&new_config->errors, ctx->pool, 1);
 
 	array_append_zero(&ctx->all_filter_parsers);
@@ -1361,6 +1365,55 @@ config_parser_check_warnings(struct config_parser_context *ctx, const char *key)
 	hash_table_insert(ctx->seen_settings, path, first_pos);
 }
 
+static bool config_version_find(const char *version, const char **error_r)
+{
+	/* FIXME: implement full version checking later */
+	if (strcmp(version, DOVECOT_CONFIG_VERSION) != 0) {
+		*error_r = t_strdup_printf("Only '%s' is supported currently",
+					   DOVECOT_CONFIG_VERSION);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static bool config_parser_get_version(struct config_parser_context *ctx,
+				      const struct config_line *line)
+{
+	const char *error;
+
+	if (line->type == CONFIG_LINE_TYPE_SKIP ||
+	    line->type == CONFIG_LINE_TYPE_ERROR)
+		return FALSE;
+
+	if (strcmp(line->key, "dovecot_config_version") == 0) {
+		if (ctx->dovecot_config_version == NULL)
+			;
+		else if (strcmp(ctx->dovecot_config_version, line->value) != 0) {
+			ctx->error = "dovecot_config_version value can't be changed once set";
+			return TRUE;
+		} else {
+			/* Same value, ignore. This is mainly helpful to allow
+			   config files to include other config files in
+			   testing. */
+			return TRUE;
+		}
+	} else {
+		if (ctx->dovecot_config_version == NULL)
+			ctx->error = "The first setting must be dovecot_config_version";
+		return FALSE;
+	}
+
+	if (line->type != CONFIG_LINE_TYPE_KEYVALUE)
+		ctx->error = "Invalid dovecot_config_version: value is not a string";
+	else if (!config_version_find(line->value, &error)) {
+		ctx->error = p_strdup_printf(ctx->pool,
+			"Invalid dovecot_config_version: %s", error);
+	} else {
+		ctx->dovecot_config_version = p_strdup(ctx->pool, line->value);
+	}
+	return TRUE;
+}
+
 void config_parser_apply_line(struct config_parser_context *ctx,
 			      const struct config_line *line)
 {
@@ -1474,7 +1527,7 @@ int config_parse_file(const char *path, enum config_parse_flags flags,
 	string_t *full_line;
 	char *line;
 	int fd, ret = 0;
-	bool handled;
+	bool handled, dump_defaults = (path == NULL);
 
 	*config_r = NULL;
 
@@ -1556,7 +1609,7 @@ prevfile:
 		if (config_line.type == CONFIG_LINE_TYPE_CONTINUE)
 			continue;
 
-		T_BEGIN {
+		if (!config_parser_get_version(&ctx, &config_line)) T_BEGIN {
 			handled = old_settings_handle(&ctx, &config_line);
 			if (!handled)
 				config_parser_apply_line(&ctx, &config_line);
@@ -1582,6 +1635,15 @@ prevfile:
 		i_stream_destroy(&ctx.cur_input->input);
 		ctx.cur_input = ctx.cur_input->prev;
 	}
+	if (ret == 0 && !dump_defaults &&
+	    (flags & CONFIG_PARSE_FLAG_NO_DEFAULTS) == 0) {
+		const char *version = config_module_parsers_get_setting(ctx.root_module_parsers,
+			"master_service", "dovecot_storage_version");
+		if (version[0] == '\0') {
+			*error_r = "dovecot_storage_version setting must be set";
+			ret = -2;
+		}
+	}
 
 	old_settings_handle_post(&ctx);
 	hash_table_destroy(&ctx.seen_settings);
@@ -1597,6 +1659,13 @@ prevfile:
 	}
 	pool_unref(&ctx.pool);
 	return ret < 0 ? ret : 1;
+}
+
+bool config_parsed_get_version(struct config_parsed *config,
+			       const char **version_r)
+{
+	*version_r = config->dovecot_config_version;
+	return config->dovecot_config_version != NULL;
 }
 
 const ARRAY_TYPE(const_string) *
