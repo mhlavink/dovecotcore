@@ -99,9 +99,9 @@ diff -up dovecot-2.3.20/src/auth/mech-scram.c.opensslhmac dovecot-2.3.20/src/aut
  
  	/* ClientProof     := ClientKey XOR ClientSignature */
  	const unsigned char *proof_data = request->proof->data;
-diff -up dovecot-2.3.20/src/auth/password-scheme.c.opensslhmac dovecot-2.3.20/src/auth/password-scheme.c
---- dovecot-2.3.20/src/auth/password-scheme.c.opensslhmac	2022-12-21 09:49:12.000000000 +0100
-+++ dovecot-2.3.20/src/auth/password-scheme.c	2023-05-31 11:58:47.001055153 +0200
+diff -up dovecot-2.3.20/src/lib-auth/password-scheme.c.opensslhmac dovecot-2.3.20/src/auth/password-scheme.c
+--- dovecot-2.3.20/src/lib-auth/password-scheme.c.opensslhmac	2022-12-21 09:49:12.000000000 +0100
++++ dovecot-2.3.20/src/lib-auth/password-scheme.c	2023-05-31 11:58:47.001055153 +0200
 @@ -639,11 +639,11 @@ static void
  cram_md5_generate(const char *plaintext, const struct password_generate_params *params ATTR_UNUSED,
  		  const unsigned char **raw_password_r, size_t *size_r)
@@ -116,9 +116,9 @@ diff -up dovecot-2.3.20/src/auth/password-scheme.c.opensslhmac dovecot-2.3.20/sr
  		  strlen(plaintext), &hash_method_md5);
  	hmac_md5_get_cram_context(&ctx, context_digest);
  
-diff -up dovecot-2.3.20/src/auth/password-scheme-scram.c.opensslhmac dovecot-2.3.20/src/auth/password-scheme-scram.c
---- dovecot-2.3.20/src/auth/password-scheme-scram.c.opensslhmac	2022-12-21 09:49:12.000000000 +0100
-+++ dovecot-2.3.20/src/auth/password-scheme-scram.c	2023-05-31 11:58:47.001055153 +0200
+diff -up dovecot-2.3.20/src/lib-auth/password-scheme-scram.c.opensslhmac dovecot-2.3.20/src/auth/password-scheme-scram.c
+--- dovecot-2.3.20/src/lib-auth/password-scheme-scram.c.opensslhmac	2022-12-21 09:49:12.000000000 +0100
++++ dovecot-2.3.20/src/lib-auth/password-scheme-scram.c	2023-05-31 11:58:47.001055153 +0200
 @@ -30,23 +30,23 @@ Hi(const struct hash_method *hmethod, co
     const unsigned char *salt, size_t salt_size, unsigned int i,
     unsigned char *result)
