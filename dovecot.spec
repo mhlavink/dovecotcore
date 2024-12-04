@@ -2,13 +2,14 @@
 %global __requires_exclude_from %{_docdir}
 %global with_pigeonhole 1
 %global with_check 1
+%global with_downstreamchanges 0
 
 Summary: Secure imap and pop3 server
 Name: dovecot
 Epoch: 1
 Version: 2.4.0
 %global prever %{nil}
-Release: 4.20240503125855663416.main.13954.g17f849c64d%{?dist}
+Release: 4.20241204071900956083.main.14307.g048962f210%{?dist}
 #dovecot itself is MIT, a few sources are PD, pigeonhole is LGPLv2
 License: MIT AND LGPL-2.1-only
 
@@ -156,14 +157,16 @@ This package provides the development files for dovecot.
 %patch -P8 -p1 -b .initbysystemd
 %patch -P9 -p1 -b .systemd_w_protectsystem
 %patch -P15 -p1 -b .bigkey
-#%patch -P16 -p1 -b .opensslhmac
-#%patch -P17 -p1 -b .fixvalcond
-#%patch -P18 -p1 -b .valbasherr
-#%patch -P20 -p1 -b .opensslv3
+%if 0%{?with_downstreamchanges}
+%patch -P16 -p1 -b .opensslhmac
+%patch -P17 -p1 -b .fixvalcond
+%patch -P18 -p1 -b .valbasherr
+%patch -P20 -p1 -b .opensslv3
 
-#%patch -P21 -p1 -b .7bad6a24
-#%patch -P22 -p1 -b .c99
-#%patch -P23 -p1 -b .nolibotp
+%patch -P21 -p1 -b .7bad6a24
+%patch -P22 -p1 -b .c99
+%patch -P23 -p1 -b .nolibotp
+%endif
 
 %if 0%{?with_pigeonhole}
 cp run-test-valgrind.supp dovecot-pigeonhole/
@@ -527,7 +530,5 @@ make check
 %{_libdir}/%{name}/dict/libdriver_pgsql.so
 
 %changelog
-* Fri May 3 2024 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20240503125855663416.main.13954.g17f849c64d
+* Wed Dec 4 2024 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20241204071900956083.main.14307.g048962f210
 - New release ${PACKIT_PROJECT_VERSION}
-
-
