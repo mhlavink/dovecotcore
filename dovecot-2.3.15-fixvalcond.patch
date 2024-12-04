@@ -1,6 +1,6 @@
-diff -up dovecot-2.3.17/dovecot-2.3-pigeonhole-0.5.19/src/lib-sieve/storage/dict/sieve-dict-script.c.fixvalcond dovecot-2.3.17/dovecot-2.3-pigeonhole-0.5.19/src/lib-sieve/storage/dict/sieve-dict-script.c
---- dovecot-2.3.17/dovecot-2.3-pigeonhole-0.5.20/src/lib-sieve/storage/dict/sieve-dict-script.c.fixvalcond	2021-11-02 21:51:36.109032050 +0100
-+++ dovecot-2.3.17/dovecot-2.3-pigeonhole-0.5.20/src/lib-sieve/storage/dict/sieve-dict-script.c	2021-11-02 21:52:28.409344118 +0100
+diff -up dovecot-2.3.17/dovecot-pigeonhole/src/lib-sieve/storage/dict/sieve-dict-script.c.fixvalcond dovecot-2.3.17/dovecot-pigeonhole/src/lib-sieve/storage/dict/sieve-dict-script.c
+--- dovecot-2.3.17/dovecot-pigeonhole/src/lib-sieve/storage/dict/sieve-dict-script.c.fixvalcond	2021-11-02 21:51:36.109032050 +0100
++++ dovecot-2.3.17/dovecot-pigeonhole/src/lib-sieve/storage/dict/sieve-dict-script.c	2021-11-02 21:52:28.409344118 +0100
 @@ -114,7 +114,7 @@ static int sieve_dict_script_get_stream
  		(struct sieve_dict_script *)script;
  	struct sieve_dict_storage *dstorage =

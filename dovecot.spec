@@ -9,7 +9,7 @@ Name: dovecot
 Epoch: 1
 Version: 2.4.0
 %global prever %{nil}
-Release: 4.20241204071900956083.main.14307.g048962f210%{?dist}
+Release: 4.20241204114847973373.main.14308.gb99f89934e%{?dist}
 #dovecot itself is MIT, a few sources are PD, pigeonhole is LGPLv2
 License: MIT AND LGPL-2.1-only
 
@@ -48,9 +48,6 @@ Patch16: dovecot-2.3.6-opensslhmac3.patch
 # FTBFS
 Patch17: dovecot-2.3.15-fixvalcond.patch
 Patch18: dovecot-2.3.15-valbasherr.patch
-Patch20: dovecot-2.3.14-opensslv3.patch
-Patch21: dovecot-2.3.19.1-7bad6a24.patch
-Patch22: dovecot-configure-c99.patch
 
 # Fedora/RHEL specific, drop OTP which uses SHA1 so we dont use SHA1 for crypto purposes
 Patch23: dovecot-2.3.20-nolibotp.patch
@@ -161,10 +158,7 @@ This package provides the development files for dovecot.
 %patch -P16 -p1 -b .opensslhmac
 %patch -P17 -p1 -b .fixvalcond
 %patch -P18 -p1 -b .valbasherr
-%patch -P20 -p1 -b .opensslv3
 
-%patch -P21 -p1 -b .7bad6a24
-%patch -P22 -p1 -b .c99
 %patch -P23 -p1 -b .nolibotp
 %endif
 
@@ -375,13 +369,12 @@ make check
 %endif
 
 %files
-%doc docinstall/* AUTHORS ChangeLog COPYING COPYING.LGPL COPYING.MIT NEWS 
-#README
+%doc docinstall/* AUTHORS ChangeLog COPYING COPYING.LGPL COPYING.MIT NEWS README.md
 %{_sbindir}/dovecot
 
 %{_bindir}/doveadm
 %{_bindir}/doveconf
-#%{_bindir}/dsync
+#{_bindir}/dsync
 %{_bindir}/dovecot-sysreport
 
 
@@ -395,7 +388,7 @@ make check
 %config(noreplace) %{_sysconfdir}/dovecot/dovecot.conf
 #list all so we'll be noticed if upstream changes anything
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/10-auth.conf
-#%config(noreplace) %{_sysconfdir}/dovecot/conf.d/10-director.conf
+# #config(noreplace) #{_sysconfdir}/dovecot/conf.d/10-director.conf
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/10-logging.conf
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/10-mail.conf
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/10-master.conf
@@ -410,7 +403,7 @@ make check
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/90-acl.conf
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/90-quota.conf
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/90-plugin.conf
-#%config(noreplace) %{_sysconfdir}/dovecot/conf.d/auth-checkpassword.conf.ext
+# #config(noreplace) #{_sysconfdir}/dovecot/conf.d/auth-checkpassword.conf.ext
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/auth-deny.conf.ext
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/auth-dict.conf.ext
 %config(noreplace) %{_sysconfdir}/dovecot/conf.d/auth-ldap.conf.ext
@@ -457,8 +450,8 @@ make check
 %{_libdir}/dovecot/libfs_mail_crypt.so
 %{_libdir}/dovecot/libdcrypt_openssl.so
 %{_libdir}/dovecot/lib20_var_expand_crypt.so
-#%{_libdir}/dovecot/old-stats/libold_stats_mail.so
-#%{_libdir}/dovecot/old-stats/libstats_auth.so
+# #{_libdir}/dovecot/old-stats/libold_stats_mail.so
+# #{_libdir}/dovecot/old-stats/libstats_auth.so
 
 %if 0%{?with_pigeonhole}
 %dir %{_libdir}/dovecot/settings
@@ -479,7 +472,7 @@ make check
 %{_mandir}/man1/doveadm*.1*
 %{_mandir}/man1/doveconf.1*
 %{_mandir}/man1/dovecot*.1*
-#%{_mandir}/man1/dsync.1*
+# #{_mandir}/man1/dsync.1*
 %{_mandir}/man5/dovecot.conf.5*
 %{_mandir}/man7/doveadm-search-query.7*
 
@@ -491,7 +484,7 @@ make check
 
 %if 0%{?with_pigeonhole}
 %files pigeonhole
-%doc README
+%doc dovecot-pigeonhole/README
 %{_bindir}/sieve-dump
 %{_bindir}/sieve-filter
 %{_bindir}/sieve-test
@@ -530,5 +523,6 @@ make check
 %{_libdir}/%{name}/dict/libdriver_pgsql.so
 
 %changelog
-* Wed Dec 4 2024 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20241204071900956083.main.14307.g048962f210
+* Wed Dec 4 2024 Michal Hlavinka <mhlavink@redhat.com> - 1:2.4.0-4.20241204114847973373.main.14308.gb99f89934e
 - New release ${PACKIT_PROJECT_VERSION}
+
