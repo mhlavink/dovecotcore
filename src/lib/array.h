@@ -31,17 +31,17 @@
 	struct foo *foo = array_idx(foos, 0);
    }
    struct foo_manager {
-        ARRAY_TYPE(foo) foos; // pedantically, ARRAY(struct foo) is a different type
+	ARRAY_TYPE(foo) foos; // pedantically, ARRAY(struct foo) is a different type
    };
    // ...
-        do_foo(&my_foo_manager->foos); // No compiler warning about mismatched types
+	do_foo(&my_foo_manager->foos); // No compiler warning about mismatched types
 
 */
 #include "array-decl.h"
 #include "buffer.h"
 
 #define p_array_init(array, pool, init_count) \
-	array_create(array, pool, sizeof(**(array)->v), init_count)
+	array_create(array, pool, sizeof(**(array)->v), init_count) // NOLINT(bugprone-sizeof-expression)
 #define i_array_init(array, init_count) \
 	p_array_init(array, default_pool, init_count)
 #define t_array_init(array, init_count) \
@@ -109,6 +109,7 @@
    } */
 #define array_foreach_elem(array, elem) \
 	for (const void *_foreach_end = \
+		/* NOLINTBEGIN(bugprone-sizeof-expression) */ \
 		CONST_PTR_OFFSET(*(array)->v, (array)->arr.buffer->used), \
 	     *_foreach_ptr = CONST_PTR_OFFSET(*(array)->v, ARRAY_TYPE_CHECK(array, &elem) + \
 		COMPILE_ERROR_IF_TRUE(sizeof(elem) > sizeof(void *))) \
@@ -116,7 +117,8 @@
 	     (_foreach_ptr != _foreach_end &&		\
 	     (memcpy(&elem, _foreach_ptr, sizeof(elem)), TRUE)) \
 		;							\
-	     _foreach_ptr = CONST_PTR_OFFSET(_foreach_ptr, sizeof(elem)))
+	     _foreach_ptr = CONST_PTR_OFFSET(_foreach_ptr, sizeof(elem))) \
+	     /* NOLINTEND(bugprone-sizeof-expression) */ \
 
 
 #define array_ptr_to_idx(array, elem) \
