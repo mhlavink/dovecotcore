@@ -1,33 +1,88 @@
-diff -up dovecot-2.4.0/doc/example-config/conf.d/10-mail.conf.default-settings dovecot-2.4.0/doc/example-config/conf.d/10-mail.conf
---- dovecot-2.4.0/doc/example-config/conf.d/10-mail.conf.default-settings	2023-08-10 22:48:36.000000000 +0200
-+++ dovecot-2.4.0/doc/example-config/conf.d/10-mail.conf	2023-08-10 22:48:59.096698558 +0200
-@@ -326,6 +326,7 @@ protocol !indexer-worker {
- # them simultaneously.
- #mbox_read_locks = fcntl
- #mbox_write_locks = dotlock fcntl
-+mbox_write_locks = fcntl
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/doc/dovecot.conf.in.default-settings dovecot-2.4.1-build/dovecot-2.4.1-4/doc/dovecot.conf.in
+--- dovecot-2.4.1-build/dovecot-2.4.1-4/doc/dovecot.conf.in.default-settings	2025-03-28 12:32:27.000000000 +0100
++++ dovecot-2.4.1-build/dovecot-2.4.1-4/doc/dovecot.conf.in	2025-06-03 16:50:19.632050332 +0200
+@@ -24,16 +24,13 @@ protocols {
+   lmtp = yes
+ }
  
- # Maximum time to wait for lock (all of them) before aborting.
- #mbox_lock_timeout = 5 mins
-diff -up dovecot-2.4.0/doc/example-config/conf.d/10-ssl.conf.default-settings dovecot-2.4.0/doc/example-config/conf.d/10-ssl.conf
---- dovecot-2.4.0/doc/example-config/conf.d/10-ssl.conf.default-settings	2023-08-10 22:48:36.000000000 +0200
-+++ dovecot-2.4.0/doc/example-config/conf.d/10-ssl.conf	2023-08-10 22:57:49.387203395 +0200
-@@ -3,7 +3,9 @@
- ##
+-mail_home = /srv/mail/%{user}
+-mail_driver = sdbox
++mail_home = /home/%{user}
++mail_driver = maildir
+ mail_path = ~/mail
  
- # SSL/TLS support: yes, no, required. https://doc.dovecot.org/admin_manual/ssl/
--#ssl = yes
-+# disable plain pop3 and imap, allowed are only pop3+TLS, pop3s, imap+TLS and imaps
-+# plain imap and pop3 are still allowed for local connections
+-mail_uid = vmail
+-mail_gid = vmail
+-
+-# By default first_valid_uid is 500. If your vmail user's UID is smaller,
++# By default first_valid_uid is 1000. If your vmail user's UID is smaller,
+ # you need to modify this:
+-#first_valid_uid = uid-number-of-vmail-user
++first_valid_uid = 1000
+ 
+ namespace inbox {
+   inbox = yes
+@@ -44,7 +41,13 @@ namespace inbox {
+ passdb pam {
+ }
+ 
++userdb passwd {
++}
++
 +ssl = required
- 
- # PEM encoded X.509 SSL/TLS certificate and private key. They're opened before
- # dropping root privileges, so keep the key file unreadable by anyone but
-@@ -64,6 +66,7 @@ ssl_key = </etc/ssl/private/dovecot.pem
- #ssl_cipher_list = ALL:!kRSA:!SRP:!kDHd:!DSS:!aNULL:!eNULL:!EXPORT:!DES:!3DES:!MD5:!PSK:!RC4:!ADH:!LOW@STRENGTH
- # To disable non-EC DH, use:
- #ssl_cipher_list = ALL:!DH:!kRSA:!SRP:!kDHd:!DSS:!aNULL:!eNULL:!EXPORT:!DES:!3DES:!MD5:!PSK:!RC4:!ADH:!LOW@STRENGTH
 +ssl_cipher_list = PROFILE=SYSTEM
++
+ ssl_server {
+-  cert_file = /etc/dovecot/ssl-cert.pem
+-  key_file = /etc/dovecot/ssl-key.pem
++  cert_file = /etc/pki/dovecot/certs/dovecot.pem
++  key_file = /etc/pki/dovecot/private/dovecot.pem
+ }
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/20-managesieve.conf.default-settings dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/20-managesieve.conf
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve.conf.default-settings dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve.conf
+--- dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve.conf.default-settings	2025-06-03 16:28:32.356717374 +0200
++++ dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve.conf	2025-06-03 16:29:15.924259043 +0200
+@@ -21,7 +21,6 @@
+ # file or directory. Refer to Pigeonhole wiki or INSTALL file for more
+ # information.
  
- # Colon separated list of elliptic curves to use. Empty value (the default)
- # means use the defaults from the SSL library. P-521:P-384:P-256 would be an
+-plugin {
+   # The location of the user's main Sieve script or script storage. The LDA
+   # Sieve plugin uses this to find the active script for Sieve filtering at
+   # delivery. The "include" extension uses this location for retrieving
+@@ -36,7 +35,10 @@ plugin {
+   # active script symlink is located.
+   # For other types: use the ';name=' parameter to specify the name of the
+   # default/active script.
+-  sieve = file:~/sieve;active=~/.dovecot.sieve
++sieve_script personal {
++  path = ~/sieve
++  active_path = ~/.dovecot.sieve
++}
+ 
+   # The default Sieve script when the user has none. This is the location of a
+   # global sieve script file, which gets executed ONLY if user's personal Sieve
+@@ -202,4 +204,3 @@ plugin {
+   # Enables showing byte code addresses in the trace output, rather than only
+   # the source line numbers.
+   #sieve_trace_addresses = no 
+-}
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve-extprograms.conf.default-settings dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve-extprograms.conf
+--- dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve-extprograms.conf.default-settings	2025-06-03 16:28:43.039733071 +0200
++++ dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-pigeonhole/doc/example-config/conf.d/90-sieve-extprograms.conf	2025-06-03 16:29:27.569868558 +0200
+@@ -6,7 +6,6 @@
+ # sieve_extensions or sieve_global_extensions settings. Restricting these
+ # extensions to a global context using sieve_global_extensions is recommended.
+ 
+-plugin {
+ 
+   # The directory where the program sockets are located for the
+   # vnd.dovecot.pipe, vnd.dovecot.filter and vnd.dovecot.execute extension
+@@ -23,7 +22,6 @@ plugin {
+   #sieve_pipe_bin_dir = /usr/lib/dovecot/sieve-pipe
+   #sieve_filter_bin_dir = /usr/lib/dovecot/sieve-filter
+   #sieve_execute_bin_dir = /usr/lib/dovecot/sieve-execute
+-}
+ 
+ # An example program service called 'do-something' to pipe messages to
+ #service do-something {

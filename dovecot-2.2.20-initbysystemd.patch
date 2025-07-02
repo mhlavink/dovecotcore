@@ -1,6 +1,6 @@
-diff -up dovecotcore/dovecot-init.service.initbysystemd dovecotcore/dovecot-init.service
---- dovecotcore/dovecot-init.service.initbysystemd	2024-12-03 23:26:27.694327778 +0100
-+++ dovecotcore/dovecot-init.service	2024-12-03 23:26:27.694327778 +0100
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-init.service.initbysystemd dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-init.service
+--- dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-init.service.initbysystemd	2025-06-02 23:32:10.685053915 +0200
++++ dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot-init.service	2025-06-02 23:32:10.685053915 +0200
 @@ -0,0 +1,13 @@
 +[Unit]
 +Description=One-time Dovecot init service
@@ -15,9 +15,9 @@ diff -up dovecotcore/dovecot-init.service.initbysystemd dovecotcore/dovecot-init
 +  SSLDIR=/etc/pki/dovecot/ OPENSSLCONFIG=/etc/pki/dovecot/dovecot-openssl.cnf /usr/libexec/dovecot/mkcert.sh /dev/null 2>&1;\
 +fi'
 +
-diff -up dovecotcore/dovecot.service.in.initbysystemd dovecotcore/dovecot.service.in
---- dovecotcore/dovecot.service.in.initbysystemd	2024-12-03 23:26:27.695327787 +0100
-+++ dovecotcore/dovecot.service.in	2024-12-03 23:27:24.466844738 +0100
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot.service.in.initbysystemd dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot.service.in
+--- dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot.service.in.initbysystemd	2025-06-02 23:32:10.685195261 +0200
++++ dovecot-2.4.1-build/dovecot-2.4.1-4/dovecot.service.in	2025-06-02 23:34:03.123174934 +0200
 @@ -11,7 +11,8 @@
  Description=Dovecot IMAP/POP3 email server
  Documentation=man:dovecot(1)
@@ -28,18 +28,18 @@ diff -up dovecotcore/dovecot.service.in.initbysystemd dovecotcore/dovecot.servic
  Wants=network-online.target
  
  [Service]
-diff -up dovecotcore/Makefile.am.initbysystemd dovecotcore/Makefile.am
---- dovecotcore/Makefile.am.initbysystemd	2024-10-15 14:46:51.987002649 +0200
-+++ dovecotcore/Makefile.am	2024-12-03 23:26:27.696327797 +0100
+diff -up dovecot-2.4.1-build/dovecot-2.4.1-4/Makefile.am.initbysystemd dovecot-2.4.1-build/dovecot-2.4.1-4/Makefile.am
+--- dovecot-2.4.1-build/dovecot-2.4.1-4/Makefile.am.initbysystemd	2025-03-28 12:32:27.000000000 +0100
++++ dovecot-2.4.1-build/dovecot-2.4.1-4/Makefile.am	2025-06-02 23:33:22.221675050 +0200
 @@ -19,6 +19,7 @@ EXTRA_DIST = \
+ 	update-version.sh \
  	run-test-valgrind.supp \
  	dovecot.service.in \
- 	dovecot.socket \
 +	dovecot-init.service \
+ 	dovecot.socket \
  	version \
- 	$(conf_DATA)
- 
-@@ -62,7 +63,8 @@ dovecot-config: dovecot-config.in Makefi
+ 	build-aux/git-abi-version-gen \
+@@ -67,7 +68,8 @@ dovecot-config: dovecot-config.in Makefi
  if WANT_SYSTEMD
  systemdsystemunit_DATA = \
          dovecot.socket \
