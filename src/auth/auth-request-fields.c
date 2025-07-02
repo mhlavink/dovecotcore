@@ -6,8 +6,8 @@
 #include "str.h"
 #include "strescape.h"
 #include "str-sanitize.h"
+#include "base64.h"
 #include "auth-request.h"
-#include "userdb-template.h"
 
 void auth_request_fields_init(struct auth_request *request)
 {
@@ -55,7 +55,7 @@ void auth_request_export(struct auth_request *request, string_t *dest)
 	str_append(dest, "user=");
 	str_append_tabescaped(dest, fields->user);
 
-	auth_str_add_keyvalue(dest, "service", fields->service);
+	auth_str_add_keyvalue(dest, "protocol", fields->protocol);
 
 	if (fields->master_user != NULL)
 		auth_str_add_keyvalue(dest, "master-user", fields->master_user);
@@ -80,6 +80,14 @@ void auth_request_export(struct auth_request *request, string_t *dest)
 		str_printfa(dest, "\trport=%u", fields->remote_port);
 	if (fields->ssl_ja3_hash != NULL)
 		auth_str_add_keyvalue(dest, "ssl_ja3_hash", fields->ssl_ja3_hash);
+	if (fields->ssl_client_cert_fp != NULL) {
+		auth_str_add_keyvalue(dest, "ssl_client_cert_fp",
+				      fields->ssl_client_cert_fp);
+	}
+	if (fields->ssl_client_cert_pubkey_fp != NULL) {
+		auth_str_add_keyvalue(dest, "ssl_client_cert_pubkey_fp",
+				      fields->ssl_client_cert_pubkey_fp);
+	}
 	if (fields->real_local_ip.family != 0) {
 		auth_str_add_keyvalue(dest, "real_lip",
 				      net_ip2addr(&fields->real_local_ip));
@@ -138,9 +146,10 @@ bool auth_request_import_info(struct auth_request *request,
 	i_assert(value != NULL);
 
 	/* authentication and user lookups may set these */
-	if (strcmp(key, "service") == 0) {
-		fields->service = p_strdup(request->pool, value);
-		event_add_str(event, "service", value);
+	if (strcmp(key, "protocol") == 0 ||
+	    strcmp(key, "service") == 0) { /* FIXME: backwards compatibility */
+		fields->protocol = p_strdup(request->pool, value);
+		event_add_str(event, "protocol", value);
 	} else if (strcmp(key, "lip") == 0) {
 		if (net_addr2ip(value, &fields->local_ip) < 0)
 			return TRUE;
@@ -167,6 +176,10 @@ bool auth_request_import_info(struct auth_request *request,
 			auth_request_import_info(request, "real_rport", value);
 	} else if (strcmp(key, "ssl_ja3_hash") == 0) {
 		fields->ssl_ja3_hash = p_strdup(request->pool, value);
+	} else if (strcmp(key, "ssl_client_cert_fp") == 0) {
+		fields->ssl_client_cert_fp = p_strdup(request->pool, value);
+	} else if (strcmp(key, "ssl_client_cert_pubkey_fp") == 0) {
+		fields->ssl_client_cert_pubkey_fp = p_strdup(request->pool, value);
 	} else if (strcmp(key, "real_lip") == 0) {
 		if (net_addr2ip(value, &fields->real_local_ip) == 0)
 			event_add_ip(event, "real_local_ip",
@@ -245,6 +258,32 @@ bool auth_request_import_auth(struct auth_request *request,
 	return TRUE;
 }
 
+static void
+auth_request_import_channel_binding(struct auth_request *request,
+				    const char *value)
+{
+	struct auth_request_fields *fields = &request->fields;
+
+	if (fields->channel_binding.type == NULL ||
+	    fields->channel_binding.data != NULL)
+		return;
+
+	size_t value_len = strlen(value);
+	fields->channel_binding.data = buffer_create_dynamic(
+		request->pool, MAX_BASE64_DECODED_SIZE(value_len));
+	(void)base64_decode(value, value_len,
+			    fields->channel_binding.data);
+}
+
+void auth_request_import_continue(struct auth_request *request,
+				  const char *key, const char *value)
+{
+	i_assert(value != NULL);
+
+	if (strcmp(key, "channel_binding") == 0)
+		auth_request_import_channel_binding(request, value);
+}
+
 bool auth_request_import(struct auth_request *request,
 			 const char *key, const char *value)
 {
@@ -291,6 +330,26 @@ bool auth_request_import(struct auth_request *request,
 	return TRUE;
 }
 
+void auth_request_start_channel_binding(struct auth_request *request,
+					const char *type)
+{
+	i_assert(type != NULL);
+	request->fields.channel_binding.type = p_strdup(request->pool, type);
+	event_add_str(request->event, "channel_binding", type);
+}
+
+int auth_request_accept_channel_binding(struct auth_request *request,
+					buffer_t **data_r)
+{
+	if (request->fields.channel_binding.type == NULL ||
+	    request->fields.channel_binding.data == NULL)
+		return -1;
+	*data_r = request->fields.channel_binding.data;
+	request->fields.channel_binding.type = NULL;
+	request->fields.channel_binding.data = NULL;
+	return 0;
+}
+
 static int
 auth_request_fix_username(struct auth_request *request, const char **username,
 			  const char **error_r)
@@ -330,10 +389,10 @@ auth_request_fix_username(struct auth_request *request, const char **username,
 		unsigned int count = 0;
 		const struct var_expand_table *table =
 			auth_request_get_var_expand_table_full(request,
-				user, NULL, &count);
+				user, &count);
 		if (auth_request_var_expand_with_table(dest,
 				set->username_format, request,
-				table, NULL, &error) <= 0) {
+				table, NULL, &error) < 0) {
 			*error_r = t_strdup_printf(
 				"Failed to expand username_format=%s: %s",
 				set->username_format, error);
@@ -458,9 +517,7 @@ bool auth_request_set_login_username(struct auth_request *request,
 	}
 	auth_request_set_login_username_forced(request, username);
 
-	e_debug(request->event,
-		"%sMaster user lookup for login: %s",
-		auth_request_get_log_prefix_db(request),
+	e_debug(request->event, "Master user lookup for login: %s",
 		request->fields.requested_login_user);
 	return TRUE;
 }

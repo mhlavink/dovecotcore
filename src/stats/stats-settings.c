@@ -3,9 +3,9 @@
 #include "stats-common.h"
 #include "buffer.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "service-settings.h"
 #include "stats-settings.h"
+#include "event-exporter.h"
 #include "array.h"
 #include "str.h"
 #include "var-expand.h"
@@ -24,20 +24,16 @@ struct service_settings stats_service_settings = {
 	.protocol = "",
 	.type = "",
 	.executable = "stats",
-	.user = "$default_internal_user",
+	.user = "$SET:default_internal_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
 	.process_limit = 1,
-	.client_limit = 0,
-	.service_count = 0,
-	.idle_kill = UINT_MAX,
-	.vsz_limit = UOFF_T_MAX,
+	.idle_kill_interval = SET_TIME_INFINITE,
 
 	.unix_listeners = ARRAY_INIT,
 	.inet_listeners = ARRAY_INIT,
@@ -49,7 +45,7 @@ const struct setting_keyvalue stats_service_settings_defaults[] = {
 	{ "unix_listener/login\\sstats-writer/path", "login/stats-writer" },
 	{ "unix_listener/login\\sstats-writer/type", "writer" },
 	{ "unix_listener/login\\sstats-writer/mode", "0600" },
-	{ "unix_listener/login\\sstats-writer/user", "$default_login_user" },
+	{ "unix_listener/login\\sstats-writer/user", "$SET:default_login_user" },
 
 	{ "unix_listener/stats-reader/path", "stats-reader" },
 	{ "unix_listener/stats-reader/type", "reader" },
@@ -58,7 +54,7 @@ const struct setting_keyvalue stats_service_settings_defaults[] = {
 	{ "unix_listener/stats-writer/path", "stats-writer" },
 	{ "unix_listener/stats-writer/type", "writer" },
 	{ "unix_listener/stats-writer/mode", "0660" },
-	{ "unix_listener/stats-writer/group", "$default_internal_group" },
+	{ "unix_listener/stats-writer/group", "$SET:default_internal_group" },
 
 	{ NULL, NULL }
 };
@@ -73,21 +69,17 @@ const struct setting_keyvalue stats_service_settings_defaults[] = {
 
 static const struct setting_define stats_exporter_setting_defines[] = {
 	DEF(STR, name),
-	DEF(STR, transport),
-	DEF(STR, transport_args),
-	DEF(TIME_MSECS, transport_timeout),
+	DEF(ENUM, driver),
 	DEF(STR, format),
-	DEF(STR, format_args),
+	DEF(ENUM, time_format),
 	SETTING_DEFINE_LIST_END
 };
 
 static const struct stats_exporter_settings stats_exporter_default_settings = {
 	.name = "",
-	.transport = "",
-	.transport_args = "",
-	.transport_timeout = 250, /* ms */
+	.driver = "log:file:unix:http-post:drop",
 	.format = "",
-	.format_args = "",
+	.time_format = "rfc3339:unix",
 };
 
 const struct setting_parser_info stats_exporter_setting_parser_info = {
@@ -102,6 +94,81 @@ const struct setting_parser_info stats_exporter_setting_parser_info = {
 };
 
 /*
+ * metric_group_by { } block settings
+ */
+
+#undef DEF
+#define DEF(type, name) \
+	SETTING_DEFINE_STRUCT_##type("metric_group_by_"#name, name, struct stats_metric_group_by_settings)
+
+static const struct setting_define stats_metric_group_by_setting_defines[] = {
+	DEF(STR, field),
+
+	{ .type = SET_FILTER_ARRAY, .key = "metric_group_by_method",
+	  .offset = offsetof(struct stats_metric_group_by_settings, method),
+	  .filter_array_field_name = "metric_group_by_method_method", },
+
+	SETTING_DEFINE_LIST_END
+};
+
+static const struct stats_metric_group_by_settings stats_metric_group_by_default_settings = {
+	.field = "",
+	.method = ARRAY_INIT,
+};
+
+const struct setting_parser_info stats_metric_group_by_setting_parser_info = {
+	.name = "stats_metric_group_by",
+
+	.defines = stats_metric_group_by_setting_defines,
+	.defaults = &stats_metric_group_by_default_settings,
+
+	.struct_size = sizeof(struct stats_metric_group_by_settings),
+	.pool_offset1 = 1 + offsetof(struct stats_metric_group_by_settings, pool),
+};
+
+/*
+ * metric_group_by_method { } block settings
+ */
+
+#undef DEF
+#define DEF(type, name) \
+	SETTING_DEFINE_STRUCT_##type("metric_group_by_method_"#name, name, struct stats_metric_group_by_method_settings)
+
+static const struct setting_define stats_metric_group_by_method_setting_defines[] = {
+	DEF(ENUM, method),
+	DEF(STR_NOVARS, discrete_modifier),
+	DEF(UINT, exponential_min_magnitude),
+	DEF(UINT, exponential_max_magnitude),
+	DEF(UINT, exponential_base),
+	DEF(UINTMAX, linear_min),
+	DEF(UINTMAX, linear_max),
+	DEF(UINTMAX, linear_step),
+
+	SETTING_DEFINE_LIST_END
+};
+
+static const struct stats_metric_group_by_method_settings stats_metric_group_by_method_default_settings = {
+	.method = "discrete:exponential:linear",
+	.discrete_modifier = "",
+	.exponential_min_magnitude = 0,
+	.exponential_max_magnitude = 0,
+	.exponential_base = 10,
+	.linear_min = 0,
+	.linear_max = 0,
+	.linear_step = 0,
+};
+
+const struct setting_parser_info stats_metric_group_by_method_setting_parser_info = {
+	.name = "stats_metric_group_by_",
+
+	.defines = stats_metric_group_by_method_setting_defines,
+	.defaults = &stats_metric_group_by_method_default_settings,
+
+	.struct_size = sizeof(struct stats_metric_group_by_method_settings),
+	.pool_offset1 = 1 + offsetof(struct stats_metric_group_by_method_settings, pool),
+};
+
+/*
  * metric { } block settings
  */
 
@@ -111,23 +178,31 @@ const struct setting_parser_info stats_exporter_setting_parser_info = {
 
 static const struct setting_define stats_metric_setting_defines[] = {
 	DEF(STR, name),
-	DEF(STR, fields),
-	DEF(STR, group_by),
+	DEF(BOOLLIST, fields),
 	DEF(STR, filter),
 	DEF(STR, exporter),
-	DEF(STR, exporter_include),
+	DEF(BOOLLIST, exporter_include),
 	DEF(STR, description),
+
+	{ .type = SET_FILTER_ARRAY, .key = "metric_group_by",
+	  .offset = offsetof(struct stats_metric_settings, group_by),
+	  .filter_array_field_name = "metric_group_by_field", },
+
 	SETTING_DEFINE_LIST_END
 };
 
-static const struct stats_metric_settings stats_metric_default_settings = {
+const struct stats_metric_settings stats_metric_default_settings = {
 	.name = "",
-	.fields = "",
+	.fields = ARRAY_INIT,
 	.filter = "",
 	.exporter = "",
-	.group_by = "",
-	.exporter_include = STATS_METRIC_SETTINGS_DEFAULT_EXPORTER_INCLUDE,
+	.group_by = ARRAY_INIT,
 	.description = "",
+};
+
+static const struct setting_keyvalue stats_metric_default_settings_keyvalue[] = {
+	{ "metric_exporter_include", STATS_METRIC_SETTINGS_DEFAULT_EXPORTER_INCLUDE },
+	{ NULL, NULL }
 };
 
 const struct setting_parser_info stats_metric_setting_parser_info = {
@@ -135,6 +210,7 @@ const struct setting_parser_info stats_metric_setting_parser_info = {
 
 	.defines = stats_metric_setting_defines,
 	.defaults = &stats_metric_default_settings,
+	.default_settings = stats_metric_default_settings_keyvalue,
 
 	.struct_size = sizeof(struct stats_metric_settings),
 	.pool_offset1 = 1 + offsetof(struct stats_metric_settings, pool),
@@ -150,22 +226,18 @@ const struct setting_parser_info stats_metric_setting_parser_info = {
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct stats_settings)
 
 static const struct setting_define stats_setting_defines[] = {
-	DEF(STR, stats_http_rawlog_dir),
-
+	{ .type = SET_FILTER_NAME, .key = STATS_SERVER_FILTER },
 	{ .type = SET_FILTER_ARRAY, .key = "metric",
 	  .offset = offsetof(struct stats_settings, metrics),
 	  .filter_array_field_name = "metric_name",
 	  .required_setting = "metric_filter", },
 	{ .type = SET_FILTER_ARRAY, .key = "event_exporter",
 	  .offset = offsetof(struct stats_settings, exporters),
-	  .filter_array_field_name = "event_exporter_name",
-	  .required_setting = "event_exporter_transport", },
+	  .filter_array_field_name = "event_exporter_name", },
 	SETTING_DEFINE_LIST_END
 };
 
 const struct stats_settings stats_default_settings = {
-	.stats_http_rawlog_dir = "",
-
 	.metrics = ARRAY_INIT,
 	.exporters = ARRAY_INIT,
 };
@@ -182,59 +254,6 @@ const struct setting_parser_info stats_setting_parser_info = {
 };
 
 /* <settings checks> */
-static bool parse_format_args_set_time(struct stats_exporter_settings *set,
-				       enum event_exporter_time_fmt fmt,
-				       const char **error_r)
-{
-	if ((set->parsed_time_format != EVENT_EXPORTER_TIME_FMT_NATIVE) &&
-	    (set->parsed_time_format != fmt)) {
-		*error_r = t_strdup_printf("Exporter '%s' specifies multiple "
-					   "time format args", set->name);
-		return FALSE;
-	}
-
-	set->parsed_time_format = fmt;
-
-	return TRUE;
-}
-
-static bool parse_format_args(struct stats_exporter_settings *set,
-			      const char **error_r)
-{
-	const char *const *tmp;
-
-	/* Defaults */
-	set->parsed_time_format = EVENT_EXPORTER_TIME_FMT_NATIVE;
-
-	tmp = t_strsplit_spaces(set->format_args, " ");
-
-	/*
-	 * If the config contains multiple types of the same type (e.g.,
-	 * both time-rfc3339 and time-unix) we fail the config check.
-	 *
-	 * Note: At the moment, we have only time-* tokens.  In the future
-	 * when we have other tokens, they should be parsed here.
-	 */
-	for (; *tmp != NULL; tmp++) {
-		enum event_exporter_time_fmt fmt;
-
-		if (strcmp(*tmp, "time-rfc3339") == 0) {
-			fmt = EVENT_EXPORTER_TIME_FMT_RFC3339;
-		} else if (strcmp(*tmp, "time-unix") == 0) {
-			fmt = EVENT_EXPORTER_TIME_FMT_UNIX;
-		} else {
-			*error_r = t_strdup_printf("Unknown exporter format "
-						   "arg: %s", *tmp);
-			return FALSE;
-		}
-
-		if (!parse_format_args_set_time(set, fmt, error_r))
-			return FALSE;
-	}
-
-	return TRUE;
-}
-
 static bool stats_exporter_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 					  const char **error_r)
 {
@@ -264,28 +283,12 @@ static bool stats_exporter_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 		return FALSE;
 	}
 
-	/* TODO: The following should be plugable.
-	 *
-	 * Note: Make sure to mirror any changes to the below code in
-	 * stats_exporters_add_set().
-	 */
-	if (set->transport[0] == '\0') {
-		*error_r = "Exporter transport name can't be empty";
-		return FALSE;
-	} else if (strcmp(set->transport, "drop") == 0 ||
-		   strcmp(set->transport, "http-post") == 0 ||
-		   strcmp(set->transport, "log") == 0 ||
-		   strcmp(set->transport, "file") == 0 ||
-		   strcmp(set->transport, "unix") == 0) {
-		/* no-op */
-	} else {
-		*error_r = t_strdup_printf("Unknown transport type '%s'",
-					   set->transport);
-		return FALSE;
-	}
-
-	if (!parse_format_args(set, error_r))
-		return FALSE;
+	if (strcmp(set->time_format, "rfc3339") == 0)
+		set->parsed_time_format = EVENT_EXPORTER_TIME_FMT_RFC3339;
+	else if (strcmp(set->time_format, "unix") == 0)
+		set->parsed_time_format = EVENT_EXPORTER_TIME_FMT_UNIX;
+	else
+		i_unreached();
 
 	/* Some formats don't have a native way of serializing time stamps */
 	if (time_fmt_required &&
@@ -297,6 +300,81 @@ static bool stats_exporter_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 
 	return TRUE;
 }
+
+#ifdef CONFIG_BINARY
+void metrics_group_by_exponential_init(struct stats_metric_settings_group_by *group_by,
+				       pool_t pool, unsigned int base,
+				       unsigned int min, unsigned int max);
+void metrics_group_by_linear_init(struct stats_metric_settings_group_by *group_by,
+				  pool_t pool, uint64_t min, uint64_t max,
+				  uint64_t step);
+#endif
+
+void metrics_group_by_exponential_init(struct stats_metric_settings_group_by *group_by,
+				       pool_t pool, unsigned int base,
+				       unsigned int min, unsigned int max)
+{
+	group_by->func = STATS_METRIC_GROUPBY_QUANTIZED;
+	/*
+	 * Allocate the bucket range array and fill it in
+	 *
+	 * The first bucket is special - it contains everything less than or
+	 * equal to 'base^min'.  The last bucket is also special - it
+	 * contains everything greater than 'base^max'.
+	 *
+	 * The second bucket begins at 'base^min + 1', the third bucket
+	 * begins at 'base^(min + 1) + 1', and so on.
+	 */
+	group_by->num_ranges = max - min + 2;
+	group_by->ranges = p_new(pool, struct stats_metric_settings_bucket_range,
+				 group_by->num_ranges);
+
+	/* set up min & max buckets */
+	group_by->ranges[0].min = INTMAX_MIN;
+	group_by->ranges[0].max = pow(base, min);
+	group_by->ranges[group_by->num_ranges - 1].min = pow(base, max);
+	group_by->ranges[group_by->num_ranges - 1].max = INTMAX_MAX;
+
+	/* remaining buckets */
+	for (unsigned int i = 1; i < group_by->num_ranges - 1; i++) {
+		group_by->ranges[i].min = pow(base, min + (i - 1));
+		group_by->ranges[i].max = pow(base, min + i);
+	}
+}
+
+void metrics_group_by_linear_init(struct stats_metric_settings_group_by *group_by,
+				  pool_t pool, uint64_t min, uint64_t max,
+				  uint64_t step)
+{
+	group_by->func = STATS_METRIC_GROUPBY_QUANTIZED;
+	/*
+	 * Allocate the bucket range array and fill it in
+	 *
+	 * The first bucket is special - it contains everything less than or
+	 * equal to 'min'.  The last bucket is also special - it contains
+	 * everything greater than 'max'.
+	 *
+	 * The second bucket begins at 'min + 1', the third bucket begins at
+	 * 'min + 1 * step + 1', the fourth at 'min + 2 * step + 1', and so on.
+	 */
+	i_assert(step > 0);
+	group_by->num_ranges = (max - min) / step + 2;
+	group_by->ranges = p_new(pool, struct stats_metric_settings_bucket_range,
+				 group_by->num_ranges);
+
+	/* set up min & max buckets */
+	group_by->ranges[0].min = INTMAX_MIN;
+	group_by->ranges[0].max = min;
+	group_by->ranges[group_by->num_ranges - 1].min = max;
+	group_by->ranges[group_by->num_ranges - 1].max = INTMAX_MAX;
+
+	/* remaining buckets */
+	for (unsigned int i = 1; i < group_by->num_ranges - 1; i++) {
+		group_by->ranges[i].min = min + (i - 1) * step;
+		group_by->ranges[i].max = min + i * step;
+	}
+}
+/* </settings checks> */
 
 static bool parse_metric_group_by_common(const char *func,
 					 const char *const *params,
@@ -351,34 +429,7 @@ static bool parse_metric_group_by_exp(pool_t pool, struct stats_metric_settings_
 		return FALSE;
 	}
 
-	group_by->func = STATS_METRIC_GROUPBY_QUANTIZED;
-
-	/*
-	 * Allocate the bucket range array and fill it in
-	 *
-	 * The first bucket is special - it contains everything less than or
-	 * equal to 'base^min'.  The last bucket is also special - it
-	 * contains everything greater than 'base^max'.
-	 *
-	 * The second bucket begins at 'base^min + 1', the third bucket
-	 * begins at 'base^(min + 1) + 1', and so on.
-	 */
-	group_by->num_ranges = max - min + 2;
-	group_by->ranges = p_new(pool, struct stats_metric_settings_bucket_range,
-				 group_by->num_ranges);
-
-	/* set up min & max buckets */
-	group_by->ranges[0].min = INTMAX_MIN;
-	group_by->ranges[0].max = pow(base, min);
-	group_by->ranges[group_by->num_ranges - 1].min = pow(base, max);
-	group_by->ranges[group_by->num_ranges - 1].max = INTMAX_MAX;
-
-	/* remaining buckets */
-	for (unsigned int i = 1; i < group_by->num_ranges - 1; i++) {
-		group_by->ranges[i].min = pow(base, min + (i - 1));
-		group_by->ranges[i].max = pow(base, min + i);
-	}
-
+	metrics_group_by_exponential_init(group_by, pool, base, min, max);
 	return TRUE;
 }
 
@@ -397,34 +448,7 @@ static bool parse_metric_group_by_lin(pool_t pool, struct stats_metric_settings_
 		return FALSE;
 	}
 
-	group_by->func = STATS_METRIC_GROUPBY_QUANTIZED;
-
-	/*
-	 * Allocate the bucket range array and fill it in
-	 *
-	 * The first bucket is special - it contains everything less than or
-	 * equal to 'min'.  The last bucket is also special - it contains
-	 * everything greater than 'max'.
-	 *
-	 * The second bucket begins at 'min + 1', the third bucket begins at
-	 * 'min + 1 * step + 1', the fourth at 'min + 2 * step + 1', and so on.
-	 */
-	group_by->num_ranges = (max - min) / step + 2;
-	group_by->ranges = p_new(pool, struct stats_metric_settings_bucket_range,
-				 group_by->num_ranges);
-
-	/* set up min & max buckets */
-	group_by->ranges[0].min = INTMAX_MIN;
-	group_by->ranges[0].max = min;
-	group_by->ranges[group_by->num_ranges - 1].min = max;
-	group_by->ranges[group_by->num_ranges - 1].max = INTMAX_MAX;
-
-	/* remaining buckets */
-	for (unsigned int i = 1; i < group_by->num_ranges - 1; i++) {
-		group_by->ranges[i].min = min + (i - 1) * step;
-		group_by->ranges[i].max = min + i * step;
-	}
-
+	metrics_group_by_linear_init(group_by, pool, min, max, step);
 	return TRUE;
 }
 
@@ -442,14 +466,16 @@ parse_metric_group_by_mod(pool_t pool,
 	group_by->discrete_modifier = p_strdup(pool, params[0]);
 
 	/* Check that the variables are valid */
-	const struct var_expand_table table[] = {
-		{ 'v', "", "value" },
-		{ 'd', "", "domain" },
-		{ '\0', NULL, NULL }
+	const struct var_expand_params vparams = {
+		.table = (const struct var_expand_table[]) {
+			{ .key ="value", .value = "" },
+			VAR_EXPAND_TABLE_END
+		},
+		.event = NULL,
 	};
 	const char *error;
 	string_t *str = t_str_new(128);
-	if (var_expand(str, group_by->discrete_modifier, table, &error) <= 0) {
+	if (var_expand(str, group_by->discrete_modifier, &vparams, &error) < 0) {
 		*error_r = t_strdup_printf(
 			"Failed to expand discrete modifier for %s: %s",
 			group_by->field, error);
@@ -458,15 +484,17 @@ parse_metric_group_by_mod(pool_t pool,
 	return TRUE;
 }
 
-static bool parse_metric_group_by(struct stats_metric_settings *set,
-				  pool_t pool, const char **error_r)
+bool parse_legacy_metric_group_by(pool_t pool, const char *group_by_str,
+				  ARRAY_TYPE(stats_metric_settings_group_by) *group_by_r,
+				  const char **error_r)
 {
-	const char *const *tmp = t_strsplit_spaces(set->group_by, " ");
+	const char *const *tmp = t_strsplit_spaces(group_by_str, " ");
 
+	i_zero(group_by_r);
 	if (tmp[0] == NULL)
 		return TRUE;
 
-	p_array_init(&set->parsed_group_by, pool, str_array_length(tmp));
+	p_array_init(group_by_r, pool, str_array_length(tmp));
 
 	/* For each group_by field */
 	for (; *tmp != NULL; tmp++) {
@@ -501,12 +529,13 @@ static bool parse_metric_group_by(struct stats_metric_settings *set,
 			return FALSE;
 		}
 
-		array_push_back(&set->parsed_group_by, &group_by);
+		array_push_back(group_by_r, &group_by);
 	}
 
 	return TRUE;
 }
 
+/* <settings checks> */
 static bool stats_metric_settings_check(void *_set, pool_t pool, const char **error_r)
 {
 	struct stats_metric_settings *set = _set;
@@ -522,9 +551,6 @@ static bool stats_metric_settings_check(void *_set, pool_t pool, const char **er
 
 	set->parsed_filter = event_filter_create_fragment(pool);
 	if (event_filter_parse(set->filter, set->parsed_filter, error_r) < 0)
-		return FALSE;
-
-	if (!parse_metric_group_by(set, pool, error_r))
 		return FALSE;
 
 	return TRUE;

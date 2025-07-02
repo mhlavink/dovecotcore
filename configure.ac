@@ -32,7 +32,6 @@ AC_ARG_ENABLE(devel-checks,
 AS_HELP_STRING([--enable-devel-checks], [Enable some extra expensive checks for developers]),
 	if test x$enableval = xyes; then
 		AC_DEFINE(DEBUG,, [Build with extra debugging checks])
-		want_devel_checks=yes
 	fi)
 
 AC_ARG_ENABLE(static-checker,
@@ -54,13 +53,30 @@ AC_ARG_ENABLE([pro-build],
 )
 
 experimental_capabilities=""
+have_mail_utf8=no
+have_imap4rev2=no
+
 AC_ARG_ENABLE(experimental-mail-utf8,
 AS_HELP_STRING([--enable-experimental-mail-utf8], [Enable experimental support for SMTPUTF8 and UTF8=ACCEPT]),
 	AS_IF([test x$enableval = xyes], [
 	       AC_DEFINE([EXPERIMENTAL_MAIL_UTF8],, [Build with SMTPUTF8 and UTF8=ACCEPT support])
 	       experimental_capabilities="${experimental_capabilities} UTF8=ACCEPT"
+	       have_mail_utf8=yes
 	])
 )
+
+AC_SUBST([DOVECOT_HAVE_MAIL_UTF8], $have_mail_utf8)
+
+AC_ARG_ENABLE(experimental-imap4rev2,
+AS_HELP_STRING([--enable-experimental-imap4rev2], [Enable experimental support for IMAP4REV2]),
+	AS_IF([test x$enableval = xyes], [
+		AC_DEFINE([EXPERIMENTAL_IMAP4REV2],, [Build with IMAP4REV2 support])
+		experimental_capabilities="${experimental_capabilities} IMAP4REV2"
+		have_imap4rev2=yes
+	])
+)
+
+AC_SUBST([DOVECOT_HAVE_IMAP4REV2], $have_imap4rev2)
 
 AC_ARG_WITH(shared-libs,
 AS_HELP_STRING([--with-shared-libs], [Link binaries using shared Dovecot libraries (default)]),
@@ -82,11 +98,6 @@ AC_ARG_WITH(notify,
 AS_HELP_STRING([--with-notify=NOTIFY], [Specify the file system notification method to use (inotify, kqueue, none; default is detected in the above order)]),
 	notify=$withval,
 	notify=)
-
-AC_ARG_WITH(nss,
-AS_HELP_STRING([--with-nss], [Build with NSS module support (auto)]),
-  TEST_WITH(nss, $withval),
-  want_nss=auto)
 
 AC_ARG_WITH(pam,
 AS_HELP_STRING([--with-pam], [Build with PAM support (auto)]),
@@ -146,17 +157,17 @@ AS_HELP_STRING([--with-cassandra], [Build with Cassandra driver support]),
   want_cassandra=no)
 
 AC_ARG_WITH(stemmer,
-AS_HELP_STRING([--with-stemmer], [Build with libstemmer support (for FTS) (auto)]),
+AS_HELP_STRING([--with-stemmer], [Build with libstemmer support (for lib-language) (auto)]),
   TEST_WITH(stemmer, $withval),
   want_stemmer=auto)
 
 AC_ARG_WITH(textcat,
-AS_HELP_STRING([--with-textcat], [Build with libtextcat support (for FTS) (auto)]),
+AS_HELP_STRING([--with-textcat], [Build with libtextcat support (for lib-language) (auto)]),
   TEST_WITH(textcat, $withval),
   want_textcat=auto)
 
 AC_ARG_WITH(icu,
-AS_HELP_STRING([--with-icu], [Build with libicu support (for FTS normalization) (auto)]),
+AS_HELP_STRING([--with-icu], [Build with libicu support (for lib-language normalization) (auto)]),
   want_icu=$withval,
   want_icu=auto)
 
@@ -243,6 +254,8 @@ AC_PROG_CXX # lucene plugin needs this
 AC_CHECK_TOOL([FLEX],[flex],[:])
 AC_CHECK_TOOL([BISON],[bison],[:])
 AM_MISSING_PROG([WGET], [wget])
+AM_MISSING_PROG([PYTHON], [python3])
+AM_MISSING_PROG([PERL], [perl])
 
 AS_IF([test "$BISON" = ":" && test ! -e "$srcdir/src/lib/event-filter-parser.h"],
   AC_MSG_ERROR([Bison is required when building from git])
@@ -252,22 +265,27 @@ AS_IF([test "$FLEX" = ":" && test ! -e "$srcdir/src/lib/event-filter-lexer.c"],
 ])
 AC_C_INLINE
 LT_INIT
-AM_ICONV
 
 # SIZE_MAX is missing without this
-CXXFLAGS="$CXXFLAGS -D__STDC_LIMIT_MACROS"
+AM_CXXFLAGS="$AM_CXXFLAGS -D__STDC_LIMIT_MACROS"
 
-# Use the first x.y.z numbers of the version.
-DOVECOT_CONFIG_VERSION=$(echo "$PACKAGE_VERSION" | $SED 's/^\([[0-9]]*\.[[0-9]]*\.[[0-9]]*\).*$/\1/')
-if test "$is_pro_build" = "yes"; then
+# Use the first x.y.z numbers of the version. Also allow x.y numbering.
+AS_IF([echo "$PACKAGE_VERSION" | grep '^[[0-9]]*\.[[0-9]]*\.[[0-9]]'], [
+  DOVECOT_CONFIG_VERSION=$(echo "$PACKAGE_VERSION" | $SED 's/^\([[0-9]]*\.[[0-9]]*\.[[0-9]]*\).*$/\1/')
+], [
+  DOVECOT_CONFIG_VERSION=$(echo "$PACKAGE_VERSION" | $SED 's/^\([[0-9]]*\.[[0-9]]*\).*$/\1/')
+])
+AS_IF([test "$is_pro_build" = "yes"], [
   SET_PRO_DEFINES
   AC_SUBST(DOVECOT_ASSET_URL, "doc.dovecotpro.com")
+  AC_DEFINE(DOVECOT_DOC_URL, "https://doc.dovecotpro.com/", [Documentation URL])
   AC_SUBST(DOVECOT_PRO_BUILD, 1)
-else
+], [
   AC_DEFINE_UNQUOTED(DOVECOT_NAME, "$PACKAGE_NAME", [Dovecot name])
   AC_SUBST(DOVECOT_ASSET_URL, "doc.dovecot.org")
+  AC_DEFINE(DOVECOT_DOC_URL, "https://doc.dovecot.org/", [Documentation URL])
   AC_SUBST(DOVECOT_PRO_BUILD, 0)
-fi
+])
 AC_DEFINE_UNQUOTED(DOVECOT_CONFIG_VERSION, "$DOVECOT_CONFIG_VERSION", [Dovecot configuration version])
 AC_SUBST(DOVECOT_CONFIG_VERSION)
 
@@ -279,7 +297,10 @@ AC_DEFINE([DOVECOT_VERSION_MINOR], regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0
 AC_DEFINE([DOVECOT_VERSION_MICRO], regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0-9]+\).\([0-9]+\)], [\3]), [Dovecot micro version])
 
 AC_SUBST(DOVECOT_ASSET_VERSION, regexp(AC_PACKAGE_VERSION, [^\([0-9]+\)\.\([0-9]+\).\([0-9]+\)], [\1.\2.\3]))
-AS_IF([test $DOVECOT_ASSET_VERSION = "0.0.0"], [
+AS_IF([test "$DOVECOT_ASSET_VERSION" = "0.0.0"], [
+  AC_SUBST([DOVECOT_ASSET_VERSION], "main")
+])
+AS_IF([test "$DOVECOT_ASSET_VERSION" = ""], [
   AC_SUBST([DOVECOT_ASSET_VERSION], "main")
 ])
 
@@ -425,8 +446,8 @@ dnl * find random source
 
 AC_ARG_WITH(random-source,
 AS_HELP_STRING([--with-random-source=file], [Device file to use as random source (default=/dev/urandom)]),
-        random_source=$withval,
-        random_source=/dev/urandom)
+	random_source=$withval,
+	random_source=/dev/urandom)
 
 AC_MSG_CHECKING([for $random_source])
 if test -c $random_source || test -s $random_source; then
@@ -519,20 +540,6 @@ DOVECOT_WANT_CASSANDRA
 
 DOVECOT_SQL
 
-if test $have_modules = yes; then
-  AC_DEFINE(HAVE_MODULES,, [Define if you have dynamic module support])
-  AC_SUBST(MODULE_LIBS)
-
-  # shrext_cmds comes from libtool.m4
-  module=yes eval MODULE_SUFFIX=$shrext_cmds
-  if test "$MODULE_SUFFIX" = ""; then
-    # too old libtool?
-    MODULE_SUFFIX=.so
-  fi
-  AC_DEFINE_UNQUOTED(MODULE_SUFFIX,"$MODULE_SUFFIX", [Dynamic module suffix])
-  AC_SUBST(MODULE_SUFFIX)
-fi
-
 AC_SUBST(AUTH_CFLAGS)
 AC_SUBST(AUTH_LIBS)
 AC_SUBST(SQL_CFLAGS)
@@ -564,6 +571,7 @@ LIBDOVECOT_LA_LIBS='\
 	$(top_builddir)/src/lib-oauth2/liboauth2.la \
 	$(top_builddir)/src/lib-smtp/libsmtp.la \
 	$(top_builddir)/src/lib-program-client/libprogram_client.la \
+	$(top_builddir)/src/lib-var-expand/libvar_expand.la \
 	$(top_builddir)/src/lib-master/libmaster.la \
 	$(top_builddir)/src/lib-login/liblogin.la \
 	$(top_builddir)/src/lib-settings/libsettings.la \
@@ -571,6 +579,7 @@ LIBDOVECOT_LA_LIBS='\
 	$(top_builddir)/src/lib-fs/libfs.la \
 	$(top_builddir)/src/lib-dict/libdict.la \
 	$(top_builddir)/src/lib-dns/libdns.la \
+	$(top_builddir)/src/lib-dns-client/libdns-client.la \
 	$(top_builddir)/src/lib-imap/libimap.la \
 	$(top_builddir)/src/lib-mail/libmail.la \
 	$(top_builddir)/src/lib-sasl/libsasl.la \
@@ -600,7 +609,7 @@ if test "$want_shared_libs" = "yes"; then
   fi
 else
   LIBDOVECOT_DEPS="$LIBDOVECOT_LA_LIBS"
-  LIBDOVECOT="$LIBDOVECOT_DEPS \$(LIBICONV) \$(MODULE_LIBS)"
+  LIBDOVECOT="$LIBDOVECOT_DEPS \$(MODULE_LIBS)"
   LIBDOVECOT_STORAGE_DEPS='$(top_builddir)/src/lib-storage/libstorage.la'
   LIBDOVECOT_LOGIN='$(top_builddir)/src/login-common/liblogin.la'
   LIBDOVECOT_LDA='$(top_builddir)/src/lib-lda/liblda.la'
@@ -609,7 +618,7 @@ else
   fi
 fi
 if test $want_ldap != no; then
-  LIBDOVECOT_LDAP='$(top_builddir)/src/lib-ldap/libdovecot-ldap.la'
+  LIBDOVECOT_LDAP='$(top_builddir)/src/lib-ldap/libdldap.la'
 else
   LIBDOVECOT_LDAP=''
 fi
@@ -617,7 +626,7 @@ LIBDOVECOT_STORAGE="$LIBDOVECOT_STORAGE_DEPS"
 LIBDOVECOT_DSYNC='$(top_builddir)/src/doveadm/dsync/libdovecot-dsync.la'
 LIBDOVECOT_SQL='$(top_builddir)/src/lib-sql/libsql.la'
 LIBDOVECOT_COMPRESS='$(top_builddir)/src/lib-compression/libcompression.la'
-LIBDOVECOT_LIBFTS='$(top_builddir)/src/lib-fts/libfts.la'
+LIBDOVECOT_LIBLANG='$(top_builddir)/src/lib-language/libdovecot-language.la'
 
 LIBDOVECOT_OPENSSL='$(top_builddir)/src/lib-ssl-iostream/libssl_iostream_openssl.la'
 LIBDOVECOT_OPENSSL_DEPS="$LIBDOVECOT_OPENSSL"
@@ -633,8 +642,8 @@ AC_SUBST(LIBDOVECOT_COMPRESS)
 AC_SUBST(LIBDOVECOT_DSYNC)
 AC_SUBST(LIBDOVECOT_LDA)
 AC_SUBST(LIBDOVECOT_LDAP)
-AC_SUBST(LIBDOVECOT_LIBFTS)
-AC_SUBST(LIBDOVECOT_LIBFTS_DEPS)
+AC_SUBST(LIBDOVECOT_LIBLANG)
+AC_SUBST(LIBDOVECOT_LIBLANG_DEPS)
 AC_SUBST(LIBDOVECOT_LUA)
 AC_SUBST(LIBDOVECOT_LUA_DEPS)
 AC_SUBST(LIBDOVECOT_OPENSSL)
@@ -764,19 +773,10 @@ SETTING_LINKED_FILES=`echo $libdovecot_c_files | $SED -e s,$srcdir/src,./src,g -
 AC_SUBST(SETTING_FILES)
 AC_SUBST(SETTING_LINKED_FILES)
 
-dnl **
-dnl ** capabilities
-dnl **
-
-dnl IDLE doesn't really belong to banner. It's there just to make Blackberries
-dnl happy, because otherwise BIS server disables push email.
-capability_banner="IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE"
-capability="$capability_banner SORT SORT=DISPLAY THREAD=REFERENCES THREAD=REFS THREAD=ORDEREDSUBJECT MULTIAPPEND URL-PARTIAL CATENATE UNSELECT CHILDREN NAMESPACE UIDPLUS LIST-EXTENDED I18NLEVEL=1 CONDSTORE QRESYNC ESEARCH ESORT SEARCHRES WITHIN CONTEXT=SEARCH LIST-STATUS BINARY MOVE SNIPPET=FUZZY PREVIEW=FUZZY PREVIEW STATUS=SIZE SAVEDATE COMPRESS=DEFLATE INPROGRESS${experimental_capabilities}"
-AC_DEFINE_UNQUOTED(CAPABILITY_STRING, "$capability", [IMAP capabilities])
-AC_DEFINE_UNQUOTED(CAPABILITY_BANNER_STRING, "$capability_banner", [IMAP capabilities advertised in banner])
-
-CFLAGS="$CFLAGS $EXTRA_CFLAGS"
-CXXFLAGS="$CXXFLAGS $EXTRA_CFLAGS"
+AM_CFLAGS="$AM_CFLAGS $EXTRA_CFLAGS"
+AM_CXXFLAGS="$AM_CXXFLAGS $EXTRA_CFLAGS"
+AC_SUBST([AM_CFLAGS])
+AC_SUBST([AM_CXXFLAGS])
 BINARY_LDFLAGS="$PIE_LDFLAGS $RELRO_LDFLAGS"
 BINARY_CFLAGS="$PIE_CFLAGS"
 
@@ -810,8 +810,7 @@ Makefile
 doc/Makefile
 doc/man/Makefile
 doc/index.html
-doc/example-config/Makefile
-doc/example-config/conf.d/Makefile
+doc/dovecot.conf
 src/Makefile
 src/lib/Makefile
 src/lib-sql/Makefile
@@ -824,9 +823,10 @@ src/lib-dict/Makefile
 src/lib-dict-backend/Makefile
 src/lib-dict-extra/Makefile
 src/lib-dns/Makefile
+src/lib-dns-client/Makefile
 src/lib-doveadm/Makefile
 src/lib-fs/Makefile
-src/lib-fts/Makefile
+src/lib-language/Makefile
 src/lib-http/Makefile
 src/lib-oauth2/Makefile
 src/lib-pop3/Makefile
@@ -862,6 +862,8 @@ src/lib-storage/index/dbox-multi/Makefile
 src/lib-storage/index/dbox-single/Makefile
 src/lib-storage/index/raw/Makefile
 src/lib-storage/index/shared/Makefile
+src/lib-var-expand/Makefile
+src/lib-var-expand-crypt/Makefile
 src/anvil/Makefile
 src/auth/Makefile
 src/config/Makefile
@@ -895,7 +897,6 @@ src/plugins/fts-flatcurve/Makefile
 src/plugins/fts-solr/Makefile
 src/plugins/last-login/Makefile
 src/plugins/lazy-expunge/Makefile
-src/plugins/listescape/Makefile
 src/plugins/mail-log/Makefile
 src/plugins/mail-lua/Makefile
 src/plugins/notify/Makefile
@@ -910,7 +911,6 @@ src/plugins/virtual/Makefile
 src/plugins/welcome/Makefile
 src/plugins/mail-compress/Makefile
 src/plugins/mail-crypt/Makefile
-src/plugins/var-expand-crypt/Makefile
 src/plugins/apparmor/Makefile
 src/plugins/charset-alias/Makefile
 stamp.h
@@ -943,7 +943,7 @@ echo "userdbs ........ :$userdb"
 if test "$not_userdb" != ""; then
   echo "                 :$not_userdb"
 fi
-echo "CFLAGS ......... : $CFLAGS"
+echo "AM_CFLAGS ...... : $AM_CFLAGS"
 
 if test "$systemdsystemunitdir" != ""; then
   echo "SYSTEMD ........ : $systemdservicetype - $systemdsystemunitdir/dovecot.service";

@@ -7,7 +7,6 @@
 #include "restrict-access.h"
 #include "master-service.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "mailbox-list-private.h"
 #include "mbox-storage.h"
 #include "mbox-lock.h"
@@ -16,6 +15,7 @@
 #include "istream-raw-mbox.h"
 #include "mail-copy.h"
 #include "index-mail.h"
+#include "doc.h"
 
 #include <sys/stat.h>
 
@@ -127,7 +127,7 @@ mbox_list_get_path(struct mailbox_list *list, const char *name,
 	case MAILBOX_LIST_PATH_TYPE_INDEX_CACHE:
 	case MAILBOX_LIST_PATH_TYPE_LIST_INDEX:
 		if (name == NULL && type == MAILBOX_LIST_PATH_TYPE_CONTROL &&
-		    list->set.control_dir != NULL) {
+		    list->mail_set->mail_control_path[0] != '\0') {
 			/* kind of a kludge for backwards compatibility:
 			   the subscriptions file is in the root control_dir
 			   without .imap/ suffix */
@@ -193,11 +193,12 @@ mbox_storage_create(struct mail_storage *_storage, struct mail_namespace *ns,
 		_storage->temp_path_prefix = p_strconcat(_storage->pool, dir,
 			"/", mailbox_list_get_temp_prefix(ns->list), NULL);
 	}
-	if (stat(ns->list->set.root_dir, &st) == 0 && !S_ISDIR(st.st_mode)) {
+	if (stat(ns->list->mail_set->mail_path, &st) == 0 &&
+	    !S_ISDIR(st.st_mode)) {
 		*error_r = t_strdup_printf(
 			"mbox root directory can't be a file: %s "
-			"(https://doc.dovecot.org/configuration_manual/mail_location/mbox/)",
-			ns->list->set.root_dir);
+			"(" DOC_LINK("core/config/mailbox/mail_location.html#mbox") ")",
+			ns->list->mail_set->mail_path);
 		return -1;
 	}
 	return 0;
@@ -209,22 +210,6 @@ static void mbox_storage_destroy(struct mail_storage *_storage)
 
 	settings_free(storage->set);
 	index_storage_destroy(_storage);
-}
-
-static void mbox_storage_get_list_settings(const struct mail_namespace *ns,
-					   struct mailbox_list_settings *set)
-{
-	struct event *event = ns->user->event;
-	if (set->layout == NULL)
-		set->layout = MAILBOX_LIST_NAME_FS;
-	if (set->subscription_fname == NULL)
-		set->subscription_fname = MBOX_SUBSCRIPTION_FILE_NAME;
-
-	if (set->inbox_path == NULL &&
-	    strcasecmp(set->layout, MAILBOX_LIST_NAME_FS) == 0) {
-		set->inbox_path = t_strconcat(set->root_dir, "/inbox", NULL);
-		e_debug(event, "mbox: INBOX defaulted to %s", set->inbox_path);
-	}
 }
 
 static bool mbox_is_file(const char *path, const char *name, struct event *event)
@@ -329,25 +314,27 @@ mbox_storage_find_inbox_file(struct mail_user *user, struct event *event)
 	return NULL;
 }
 
-static bool mbox_storage_autodetect(const struct mail_namespace *ns,
-				    struct mailbox_list_settings *set)
+static bool
+mbox_storage_autodetect(const struct mail_namespace *ns,
+			const struct mail_storage_settings *mail_set,
+			const char **root_path_r, const char **inbox_path_r)
 {
 	struct event *event = ns->user->event;
 	const char *root_dir, *inbox_path;
 
-	root_dir = set->root_dir;
-	inbox_path = set->inbox_path;
+	root_dir = mail_set->mail_path;
+	inbox_path = mail_set->mail_inbox_path;
 
-	if (root_dir != NULL) {
+	if (root_dir[0] != '\0') {
 		if (inbox_path == NULL &&
 		    mbox_is_file(root_dir, "INBOX file", event)) {
 			/* using location=<INBOX> */
 			inbox_path = root_dir;
-			root_dir = NULL;
+			root_dir = "";
 		} else if (!mbox_storage_is_root_dir(root_dir, event))
 			return FALSE;
 	}
-	if (root_dir == NULL) {
+	if (root_dir[0] == '\0') {
 		root_dir = mbox_storage_find_root_dir(ns);
 		if (root_dir == NULL) {
 			e_debug(event, "mbox autodetect: couldn't find root dir");
@@ -357,10 +344,8 @@ static bool mbox_storage_autodetect(const struct mail_namespace *ns,
 	if (inbox_path == NULL) {
 		inbox_path = mbox_storage_find_inbox_file(ns->user, event);
 	}
-	set->root_dir = root_dir;
-	set->inbox_path = inbox_path;
-
-	mbox_storage_get_list_settings(ns, set);
+	*root_path_r = root_dir;
+	*inbox_path_r = inbox_path;
 	return TRUE;
 }
 
@@ -729,7 +714,7 @@ static void mbox_storage_add_list(struct mail_storage *storage ATTR_UNUSED,
 	mlist = p_new(list->pool, struct mbox_mailbox_list, 1);
 	mlist->module_ctx.super = list->v;
 
-	if (*list->set.maildir_name == '\0') {
+	if (list->mail_set->mailbox_directory_name[0] == '\0') {
 		/* have to use .imap/ directories */
 		list->v.get_path = mbox_list_get_path;
 	}
@@ -831,13 +816,13 @@ struct mail_storage mbox_storage = {
 		MAIL_STORAGE_CLASS_FLAG_OPEN_STREAMS |
 		MAIL_STORAGE_CLASS_FLAG_HAVE_MAIL_GUIDS,
 	.event_category = &event_category_mbox,
+	.set_info = &mbox_setting_parser_info,
 
 	.v = {
 		mbox_storage_alloc,
 		mbox_storage_create,
 		mbox_storage_destroy,
 		mbox_storage_add_list,
-		mbox_storage_get_list_settings,
 		mbox_storage_autodetect,
 		mbox_mailbox_alloc,
 		NULL,

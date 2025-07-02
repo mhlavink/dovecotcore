@@ -3,9 +3,7 @@
 
 #include "net.h"
 #include "iostream-ssl.h"
-
-/* IMAP RFC defines this to be at least 30 minutes. */
-#define IMAPC_DEFAULT_MAX_IDLE_TIME (60*29)
+#include "imapc-settings.h"
 
 enum imapc_command_state {
 	IMAPC_COMMAND_STATE_OK = 0,
@@ -37,7 +35,8 @@ enum imapc_capability {
 	IMAPC_CAPABILITY_SAVEDATE	= 0x8000,
 	IMAPC_CAPABILITY_METADATA	= 0x10000,
 
-	IMAPC_CAPABILITY_IMAP4REV1	= 0x40000000
+	IMAPC_CAPABILITY_IMAP4REV2	= 0x20000000,
+	IMAPC_CAPABILITY_IMAP4REV1	= 0x40000000,
 };
 struct imapc_capability_name {
 	const char *name;
@@ -59,66 +58,6 @@ enum imapc_command_flags {
 	IMAPC_COMMAND_FLAG_LOGOUT	= 0x08,
 	/* Command is being resent after a reconnection. */
 	IMAPC_COMMAND_FLAG_RECONNECTED	= 0x10
-};
-
-enum imapc_client_ssl_mode {
-	IMAPC_CLIENT_SSL_MODE_NONE,
-	IMAPC_CLIENT_SSL_MODE_IMMEDIATE,
-	IMAPC_CLIENT_SSL_MODE_STARTTLS
-};
-
-#define IMAPC_DEFAULT_CONNECT_TIMEOUT_MSECS (1000*30)
-#define IMAPC_DEFAULT_COMMAND_TIMEOUT_MSECS (1000*60*5)
-#define IMAPC_DEFAULT_MAX_LINE_LENGTH (SIZE_MAX)
-
-struct imapc_throttling_settings {
-	unsigned int init_msecs;
-	unsigned int max_msecs;
-	unsigned int shrink_min_msecs;
-};
-
-struct imapc_client_settings {
-	const char *host;
-	in_port_t port;
-
-	const char *master_user;
-	const char *username;
-	const char *password;
-	/* Space-separated list of SASL mechanisms to try (in the specified
-	   order). The default is to use only LOGIN command or SASL PLAIN. */
-	const char *sasl_mechanisms;
-	bool use_proxyauth; /* Use Sun/Oracle PROXYAUTH command */
-	bool no_qresync; /* Don't use QRESYNC extension */
-	unsigned int max_idle_time;
-	/* If ID capability is advertised, send a unique "x-session-ext-id",
-	   which begins with this prefix. */
-	const char *session_id_prefix;
-
-	const char *dns_client_socket_path;
-	const char *temp_path_prefix;
-	struct ssl_iostream_settings ssl_set;
-
-	enum imapc_client_ssl_mode ssl_mode;
-
-	const char *rawlog_dir;
-	bool debug;
-
-	/* Timeout for logging in. 0 = default. */
-	unsigned int connect_timeout_msecs;
-	/* Number of retries, -1 = infinity */
-	unsigned int connect_retry_count;
-	/* Interval between retries, must be > 0 if retries > 0 */
-	unsigned int connect_retry_interval_msecs;
-
-	/* Timeout for IMAP commands. Reset every time more data is being
-	   sent or received. 0 = default. */
-	unsigned int cmd_timeout_msecs;
-
-	/* Maximum allowed line length (not including literals read as
-	   streams). 0 = unlimited. */
-	size_t max_line_length;
-
-	struct imapc_throttling_settings throttle_set;
 };
 
 struct imapc_command_reply {
@@ -166,6 +105,23 @@ struct imapc_untagged_reply {
 	void *untagged_box_context;
 };
 
+enum imapc_parameter_flags {
+	IMAPC_PARAMETER_CLIENT_DISABLED = BIT(1),
+};
+
+struct imapc_parameters {
+	const char *session_id_prefix;
+	const char *temp_path_prefix;
+
+	/* imapc-storage creates custom paths based on the namespace user,
+	   this cannot be read from the config directly. */
+	const char *override_dns_client_socket_path;
+	const char *override_rawlog_dir;
+	const char *override_password;
+
+	enum imapc_parameter_flags flags;
+};
+
 enum imapc_state_change_event {
 	IMAPC_STATE_CHANGE_AUTH_OK,
 	IMAPC_STATE_CHANGE_AUTH_FAILED,
@@ -182,7 +138,7 @@ typedef void imapc_state_change_callback_t(void *context,
 					   const char *error);
 
 struct imapc_client *
-imapc_client_init(const struct imapc_client_settings *set,
+imapc_client_init(const struct imapc_parameters *params,
 		  struct event *event_parent);
 void imapc_client_disconnect(struct imapc_client *client);
 void imapc_client_deinit(struct imapc_client **client);
@@ -243,6 +199,8 @@ imapc_client_mailbox_get_msgmap(struct imapc_client_mailbox *box);
 void imapc_client_mailbox_idle(struct imapc_client_mailbox *box);
 bool imapc_client_mailbox_is_opened(struct imapc_client_mailbox *box);
 
+/* Get the server capabilities. If it fails, the error is seen and handled by
+   the login callback. */
 int imapc_client_get_capabilities(struct imapc_client *client,
 				  enum imapc_capability *capabilities_r);
 
@@ -252,5 +210,7 @@ int imapc_client_create_temp_fd(struct imapc_client *client,
 void imapc_client_register_state_change_callback(struct imapc_client *client,
 						 imapc_state_change_callback_t *cb,
 						 void *context);
+
+bool imapc_client_is_ssl(struct imapc_client *client);
 
 #endif

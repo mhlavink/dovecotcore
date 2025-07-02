@@ -269,17 +269,23 @@ test_maibox_list_name_init(struct mailbox_list *list,
 			   const struct test_mailbox_list_name *test,
 			   bool mutf7)
 {
+	static char vname_escape_char[2], storage_escape_char[2];
+	static struct mail_storage_settings mail_set = {
+		.mailbox_list_visible_escape_char = vname_escape_char,
+		.mailbox_list_storage_escape_char = storage_escape_char,
+	};
+
+	list->mail_set = &mail_set;
 	list->ns->prefix = test->ns_prefix == NULL ? "" :
 		test->ns_prefix;
 	list->ns->prefix_len = strlen(list->ns->prefix);
 	list->ns->flags = test->ns_flags;
 	ns_sep[0] = test->ns_sep;
 	list_hierarchy_sep = test->list_sep;
-	list->set.utf8 = !mutf7;
-	list->set.vname_escape_char = test->vname_escape_char;
-	list->set.storage_name_escape_char =
-		test->storage_name_escape_char;
-	list->set.maildir_name = test->maildir_name == NULL ? "" :
+	mail_set.mailbox_list_utf8 = !mutf7;
+	vname_escape_char[0] = test->vname_escape_char;
+	storage_escape_char[0] = test->storage_name_escape_char;
+	mail_set.mailbox_directory_name = test->maildir_name == NULL ? "" :
 		test->maildir_name;
 }
 

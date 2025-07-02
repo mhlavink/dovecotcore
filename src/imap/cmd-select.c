@@ -312,12 +312,16 @@ select_open(struct imap_select_context *ctx, const char *mailbox, bool readonly)
 	client_update_mailbox_flags(client, status.keywords);
 	client_send_mailbox_flags(client, TRUE);
 
+	bool imap4rev2_enabled = (client_enabled_mailbox_features(client) &
+				  MAILBOX_FEATURE_IMAP4REV2) != 0;
 	client_send_line(client,
 		t_strdup_printf("* %u EXISTS", status.messages));
-	client_send_line(client,
-		t_strdup_printf("* %u RECENT", status.recent));
+	if (!imap4rev2_enabled) {
+		client_send_line(client,
+				t_strdup_printf("* %u RECENT", status.recent));
+	}
 
-	if (status.first_unseen_seq != 0) {
+	if (!imap4rev2_enabled && status.first_unseen_seq != 0) {
 		client_send_line(client,
 			t_strdup_printf("* OK [UNSEEN %u] First unseen.",
 					status.first_unseen_seq));
@@ -410,7 +414,7 @@ bool cmd_select_full(struct client_command_context *cmd, bool readonly)
 	if (ctx->condstore) {
 		/* Enable while no mailbox is opened to avoid sending
 		   HIGHESTMODSEQ for previously opened mailbox */
-		client_enable(client, imap_feature_condstore);
+		(void)client_enable(client, imap_feature_condstore);
 	}
 
 	ret = select_open(ctx, mailbox, readonly);

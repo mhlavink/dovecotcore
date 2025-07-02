@@ -3,6 +3,7 @@
 #include "submission-common.h"
 #include "str.h"
 #include "str-sanitize.h"
+#include "settings.h"
 #include "mail-user.h"
 #include "iostream-ssl.h"
 #include "smtp-client.h"
@@ -1077,7 +1078,6 @@ submission_backend_relay_create(
 {
 	struct submission_backend_relay *rbackend;
 	struct mail_user *user = client->user;
-	struct ssl_iostream_settings ssl_set;
 	struct smtp_client_settings smtp_set;
 	pool_t pool;
 
@@ -1088,17 +1088,11 @@ submission_backend_relay_create(
 
 	event_set_append_log_prefix(rbackend->backend.event, "relay: ");
 
-	ssl_set = *user->ssl_set;
-	if (set->ssl_verify)
-		ssl_set.verbose_invalid_cert = TRUE;
-	else
-		ssl_set.allow_invalid_cert = TRUE;
-
 	/* make relay connection */
 	i_zero(&smtp_set);
 	smtp_set.my_hostname = set->my_hostname;
 	smtp_set.extra_capabilities = set->extra_capabilities;
-	smtp_set.ssl = &ssl_set;
+	smtp_set.ssl_allow_invalid_cert = !set->ssl_verify;
 	smtp_set.debug = event_want_debug(rbackend->backend.event);
 	smtp_set.event_parent = rbackend->backend.event;
 

@@ -7,11 +7,9 @@
 #include "strescape.h"
 #include "time-util.h"
 #include "hostpid.h"
-#include "var-expand.h"
 #include "restrict-access.h"
 #include "anvil-client.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "mail-storage.h"
 #include "mail-storage-service.h"
 #include "mail-namespace.h"
@@ -262,7 +260,8 @@ lmtp_local_rcpt_anvil_finish(struct lmtp_local_recipient *llrcpt)
 }
 
 static void
-lmtp_local_rcpt_anvil_cb(const char *reply, struct lmtp_local_recipient *llrcpt)
+lmtp_local_rcpt_anvil_cb(const struct anvil_reply *reply,
+			 struct lmtp_local_recipient *llrcpt)
 {
 	struct client *client = llrcpt->rcpt->client;
 	struct smtp_server_recipient *rcpt = llrcpt->rcpt->rcpt;
@@ -270,10 +269,13 @@ lmtp_local_rcpt_anvil_cb(const char *reply, struct lmtp_local_recipient *llrcpt)
 	unsigned int parallel_count = 0;
 
 	llrcpt->anvil_query = NULL;
-	if (reply == NULL) {
-		/* lookup failed */
-	} else if (str_to_uint(reply, &parallel_count) < 0) {
-		e_error(rcpt->event, "Invalid reply from anvil: %s", reply);
+	if (reply->error != NULL) {
+		e_error(rcpt->event,
+			"lmtp_user_concurrency_limit lookup failed - skipping: %s",
+			reply->error);
+	} else if (str_to_uint(reply->reply, &parallel_count) < 0) {
+		e_error(rcpt->event, "Invalid reply from anvil: %s",
+			reply->reply);
 	}
 
 	if (parallel_count >= client->lmtp_set->lmtp_user_concurrency_limit) {
@@ -361,7 +363,7 @@ int lmtp_local_rcpt(struct client *client,
 		rcpt, SMTP_SERVER_RECIPIENT_HOOK_APPROVED,
 		lmtp_local_rcpt_approved, llrcpt);
 
-	if (client->lmtp_set->lmtp_user_concurrency_limit == 0) {
+	if (client->lmtp_set->lmtp_user_concurrency_limit == SET_UINT_UNLIMITED) {
 		(void)lmtp_local_rcpt_anvil_finish(llrcpt);
 	} else {
 		/* NOTE: username may change as the result of the userdb
@@ -433,7 +435,7 @@ lmtp_local_deliver(struct lmtp_local *local,
 	struct lmtp_local_deliver_context lldctx;
 	struct mail_user *rcpt_user;
 	const struct mail_storage_service_input *input;
-	const struct mail_storage_settings *mail_set;
+	const struct lmtp_pre_mail_settings *pre_mail_set;
 	struct smtp_proxy_data proxy_data;
 	struct mail_namespace *ns;
 	const char *error, *username;
@@ -443,9 +445,9 @@ lmtp_local_deliver(struct lmtp_local *local,
 	username = t_strdup(input->username);
 
 	if (settings_get(mail_storage_service_user_get_event(service_user),
-			 &mail_storage_setting_parser_info,
+			 &lmtp_pre_mail_setting_parser_info,
 			 SETTINGS_GET_FLAG_NO_EXPAND,
-			 &mail_set, &error) < 0) {
+			 &pre_mail_set, &error) < 0) {
 		e_error(rcpt->event, "%s", error);
 		smtp_server_recipient_reply(rcpt, 451, "4.3.0",
 					    "Temporary internal error");
@@ -455,8 +457,8 @@ lmtp_local_deliver(struct lmtp_local *local,
 	smtp_server_connection_get_proxy_data
 		(client->conn, &proxy_data);
 	if (proxy_data.timeout_secs > 0 &&
-	    (mail_set->mail_max_lock_timeout == 0 ||
-	     mail_set->mail_max_lock_timeout > proxy_data.timeout_secs)) {
+	    (pre_mail_set->mail_max_lock_timeout == 0 ||
+	     pre_mail_set->mail_max_lock_timeout > proxy_data.timeout_secs)) {
 		/* set lock timeout waits to be less than when proxy has
 		   advertised that it's going to timeout the connection.
 		   this avoids duplicate deliveries in case the delivery
@@ -466,10 +468,10 @@ lmtp_local_deliver(struct lmtp_local *local,
 		const char *value = t_strdup_printf("%us",
 				       proxy_data.timeout_secs <= 1 ? 1 :
 				       proxy_data.timeout_secs-1);
-		settings_override(set_instance, "mail_max_lock_timeout",
+		settings_override(set_instance, "*/mail_max_lock_timeout",
 				  value, SETTINGS_OVERRIDE_TYPE_CODE);
 	}
-	settings_free(mail_set);
+	settings_free(pre_mail_set);
 
 	i_zero(&lldctx);
 	lldctx.session_id = lrcpt->session_id;
@@ -577,7 +579,7 @@ int lmtp_local_default_deliver(struct client *client,
 	struct event *event;
 	int ret;
 
-	event = event_create(rcpt->event);
+	event = event_create(lldctx->rcpt_user->event);
 	event_drop_parent_log_prefixes(event, 3);
 
 	i_zero(&dinput);

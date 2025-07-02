@@ -9,9 +9,37 @@
 #include "auth-cache.h"
 #include "ipwd.h"
 #include "mycrypt.h"
+#include "settings.h"
 
 #include <login_cap.h>
 #include <bsd_auth.h>
+
+#define BSDAUTH_CACHE_KEY "%u"
+
+struct passdb_bsdauth_settings {
+	pool_t pool;
+};
+
+static const struct setting_define passdb_bsdauth_setting_defines[] = {
+	{ .type = SET_FILTER_NAME, .key = "passdb_bsdauth" },
+
+	SETTING_DEFINE_LIST_END,
+};
+
+static const struct setting_keyvalue passdb_bsdauth_settings_keyvalue[] = {
+	{ "passdb_bsdauth/passdb_use_worker", "yes"},
+	{ NULL, NULL }
+};
+
+const struct setting_parser_info passdb_bsdauth_setting_parser_info = {
+	.name = "auth_bsdauth",
+
+	.defines = passdb_bsdauth_setting_defines,
+	.default_settings = passdb_bsdauth_settings_keyvalue,
+
+	.struct_size = sizeof(struct passdb_bsdauth_settings),
+	.pool_offset1 = 1 + offsetof(struct passdb_bsdauth_settings, pool),
+};
 
 static void
 bsdauth_verify_plain(struct auth_request *request, const char *password,
@@ -22,6 +50,11 @@ bsdauth_verify_plain(struct auth_request *request, const char *password,
 	int result;
 
 	e_debug(authdb_event(request), "lookup");
+
+	if (auth_request_set_passdb_fields(request, NULL) < 0) {
+		callback(PASSDB_RESULT_INTERNAL_FAILURE, request);
+		return;
+	}
 
 	switch (i_getpwnam(request->fields.user, &pw)) {
 	case -1:
@@ -36,7 +69,7 @@ bsdauth_verify_plain(struct auth_request *request, const char *password,
 	}
 
 	/* check if the password is valid */
-	type = t_strdup_printf("auth-%s", request->fields.service);
+	type = t_strdup_printf("auth-%s", request->fields.protocol);
 	result = auth_userokay(request->fields.user, NULL,
 			       t_strdup_noconst(type),
 			       t_strdup_noconst(password));
@@ -56,23 +89,26 @@ bsdauth_verify_plain(struct auth_request *request, const char *password,
 	callback(PASSDB_RESULT_OK, request);
 }
 
-static struct passdb_module *
-bsdauth_preinit(pool_t pool, const char *args)
+static int
+bsdauth_preinit(pool_t pool, struct event *event,
+		struct passdb_module **module_r,
+		const char **error_r)
 {
+	const struct auth_passdb_post_settings *post_set;
 	struct passdb_module *module;
-	const char *value;
 
 	module = p_new(pool, struct passdb_module, 1);
-	module->default_pass_scheme = "PLAIN"; /* same reason as PAM */
-	module->blocking = TRUE;
+	if (settings_get(event, &auth_passdb_post_setting_parser_info,
+			 SETTINGS_GET_FLAG_NO_CHECK |
+			 SETTINGS_GET_FLAG_NO_EXPAND,
+			 &post_set, error_r) < 0)
+		return -1;
+	module->default_cache_key = auth_cache_parse_key_and_fields(
+		pool, BSDAUTH_CACHE_KEY, &post_set->fields, "bsdauth");
 
-	if (strcmp(args, "blocking=no") == 0)
-		module->blocking = FALSE;
-	else if (str_begins(args, "cache_key=", &value))
-		module->default_cache_key = auth_cache_parse_key(pool, value);
-	else if (*args != '\0')
-		i_fatal("passdb bsdauth: Unknown setting: %s", args);
-	return module;
+	settings_free(post_set);
+	*module_r = module;
+	return 0;
 }
 
 static void bsdauth_deinit(struct passdb_module *module ATTR_UNUSED)
@@ -81,15 +117,11 @@ static void bsdauth_deinit(struct passdb_module *module ATTR_UNUSED)
 }
 
 struct passdb_module_interface passdb_bsdauth = {
-	"bsdauth",
+	.name = "bsdauth",
 
-	bsdauth_preinit,
-	NULL,
-	bsdauth_deinit,
-
-	bsdauth_verify_plain,
-	NULL,
-	NULL
+	.preinit = bsdauth_preinit,
+	.deinit = bsdauth_deinit,
+	.verify_plain = bsdauth_verify_plain,
 };
 #else
 struct passdb_module_interface passdb_bsdauth = {

@@ -11,7 +11,6 @@
 #include "safe-mkdir.h"
 #include "restrict-process-size.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-settings.h"
 
 #include <dirent.h>
@@ -26,7 +25,7 @@ static bool master_settings_ext_check(struct event *event, void *_set,
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type("unix_listener_"#name, name, struct file_listener_settings)
 static const struct setting_define unix_listener_setting_defines[] = {
-	DEF(STR, path),
+	DEF(STR_NOVARS, path),
 	DEF(STR, type),
 	DEF(UINT_OCT, mode),
 	DEF(STR, user),
@@ -39,7 +38,7 @@ static const struct setting_define unix_listener_setting_defines[] = {
 #define DEF(type, name) \
 	SETTING_DEFINE_STRUCT_##type("fifo_listener_"#name, name, struct file_listener_settings)
 static const struct setting_define fifo_listener_setting_defines[] = {
-	DEF(STR, path),
+	DEF(STR_NOVARS, path),
 	DEF(STR, type),
 	DEF(UINT_OCT, mode),
 	DEF(STR, user),
@@ -50,6 +49,7 @@ static const struct setting_define fifo_listener_setting_defines[] = {
 
 static const struct file_listener_settings file_listener_default_settings = {
 	.path = "",
+	.type = "",
 	.mode = 0600,
 	.user = "",
 	.group = "",
@@ -82,7 +82,6 @@ const struct setting_parser_info fifo_listener_setting_parser_info = {
 static const struct setting_define inet_listener_setting_defines[] = {
 	DEF(STR, name),
 	DEF(STR, type),
-	DEF(STR, address),
 	DEF(IN_PORT, port),
 	DEF(BOOL, ssl),
 	DEF(BOOL, reuse_port),
@@ -93,7 +92,7 @@ static const struct setting_define inet_listener_setting_defines[] = {
 
 static const struct inet_listener_settings inet_listener_default_settings = {
 	.name = "",
-	.address = "",
+	.type = "",
 	.port = 0,
 	.ssl = FALSE,
 	.reuse_port = FALSE,
@@ -122,7 +121,7 @@ static const struct setting_define service_setting_defines[] = {
 	DEF(STR, user),
 	DEF(STR, group),
 	DEF(STR, privileged_group),
-	DEF(STR, extra_groups),
+	DEF(BOOLLIST, extra_groups),
 	DEF(STR, chroot),
 
 	DEF(BOOL, drop_priv_before_exec),
@@ -130,19 +129,19 @@ static const struct setting_define service_setting_defines[] = {
 	DEF(UINT, process_min_avail),
 	DEF(UINT, process_limit),
 	DEF(UINT, client_limit),
-	DEF(UINT, service_count),
-	DEF(TIME, idle_kill),
+	DEF(UINT, restart_request_count),
+	DEF(TIME, idle_kill_interval),
 	DEF(SIZE, vsz_limit),
 
 	{ .type = SET_FILTER_ARRAY, .key = "unix_listener",
 	  .offset = offsetof(struct service_settings, unix_listeners),
-	  .filter_array_field_name = "path", },
+	  .filter_array_field_name = "unix_listener_path", },
 	{ .type = SET_FILTER_ARRAY, .key = "fifo_listener",
 	  .offset = offsetof(struct service_settings, fifo_listeners),
-	  .filter_array_field_name = "path", },
+	  .filter_array_field_name = "fifo_listener_path", },
 	{ .type = SET_FILTER_ARRAY, .key = "inet_listener",
 	  .offset = offsetof(struct service_settings, inet_listeners),
-	  .filter_array_field_name = "name", },
+	  .filter_array_field_name = "inet_listener_name", },
 
 	SETTING_DEFINE_LIST_END
 };
@@ -155,7 +154,7 @@ static const struct service_settings service_default_settings = {
 	.user = "",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
@@ -163,9 +162,9 @@ static const struct service_settings service_default_settings = {
 	.process_min_avail = 0,
 	.process_limit = 0,
 	.client_limit = 0,
-	.service_count = 0,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+	.restart_request_count = SET_UINT_UNLIMITED,
+	.idle_kill_interval = 0,
+	.vsz_limit = 0,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -191,15 +190,15 @@ static const struct setting_define master_setting_defines[] = {
 	DEF(STR_HIDDEN, state_dir),
 	DEF(STR_HIDDEN, libexec_dir),
 	DEF(STR, instance_name),
-	DEF(STR, protocols),
-	DEF(STR, listen),
+	DEF(BOOLLIST, protocols),
+	DEF(BOOLLIST, listen),
 	DEF(ENUM, ssl),
 	DEF(STR, default_internal_user),
 	DEF(STR, default_internal_group),
 	DEF(STR, default_login_user),
 	DEF(UINT, default_process_limit),
 	DEF(UINT, default_client_limit),
-	DEF(TIME, default_idle_kill),
+	DEF(TIME, default_idle_kill_interval),
 	DEF(SIZE, default_vsz_limit),
 
 	DEF(BOOL, version_ignore),
@@ -211,7 +210,7 @@ static const struct setting_define master_setting_defines[] = {
 
 	{ .type = SET_FILTER_ARRAY, .key = "service",
 	  .offset = offsetof(struct master_settings, services),
-	  .filter_array_field_name = "name", },
+	  .filter_array_field_name = "service_name", },
 
 	SETTING_DEFINE_LIST_END
 };
@@ -221,16 +220,18 @@ static const struct master_settings master_default_settings = {
 	.state_dir = PKG_STATEDIR,
 	.libexec_dir = PKG_LIBEXECDIR,
 	.instance_name = PACKAGE,
-	.protocols = "imap pop3 lmtp",
-	.listen = "*, ::",
 	.ssl = "yes:no:required",
 	.default_internal_user = "dovecot",
 	.default_internal_group = "dovecot",
 	.default_login_user = "dovenull",
 	.default_process_limit = 100,
 	.default_client_limit = 1000,
-	.default_idle_kill = 60,
+	.default_idle_kill_interval = 60,
+#ifdef DOVECOT_PRO_EDITION
+	.default_vsz_limit = 1024*1024*1024,
+#else
 	.default_vsz_limit = 256*1024*1024,
+#endif
 
 	.version_ignore = FALSE,
 
@@ -241,12 +242,18 @@ static const struct master_settings master_default_settings = {
 
 	.services = ARRAY_INIT
 };
+static const struct setting_keyvalue master_default_settings_keyvalue[] = {
+	{ "protocols", "" },
+	{ "listen", "* ::" },
+	{ NULL, NULL }
+};
 
 const struct setting_parser_info master_setting_parser_info = {
 	.name = "master",
 
 	.defines = master_setting_defines,
 	.defaults = &master_default_settings,
+	.default_settings = master_default_settings_keyvalue,
 
 	.struct_size = sizeof(struct master_settings),
 	.pool_offset1 = 1 + offsetof(struct master_settings, pool),
@@ -261,10 +268,10 @@ expand_user(const char **user, enum service_user_default *default_r,
 	/* $variable expansion is typically done by doveconf, but these
 	   variables can come from built-in settings, so we need to expand
 	   them here */
-	if (strcmp(*user, "$default_internal_user") == 0) {
+	if (strcmp(*user, "$SET:default_internal_user") == 0) {
 		*user = set->default_internal_user;
 		*default_r = SERVICE_USER_DEFAULT_INTERNAL;
-	} else if (strcmp(*user, "$default_login_user") == 0) {
+	} else if (strcmp(*user, "$SET:default_login_user") == 0) {
 		*user = set->default_login_user;
 		*default_r = SERVICE_USER_DEFAULT_LOGIN;
 	} else {
@@ -278,8 +285,18 @@ expand_group(const char **group, const struct master_settings *set)
 	/* $variable expansion is typically done by doveconf, but these
 	   variables can come from built-in settings, so we need to expand
 	   them here */
-	if (strcmp(*group, "$default_internal_group") == 0)
+	if (strcmp(*group, "$SET:default_internal_group") == 0)
 		*group = set->default_internal_group;
+}
+
+static void
+expand_groups(ARRAY_TYPE(const_string) *groups, const struct master_settings *set)
+{
+	const char **group;
+	if (array_is_empty(groups))
+		return;
+	array_foreach_modifiable(groups, group)
+		expand_group(group, set);
 }
 
 static bool
@@ -323,14 +340,17 @@ static void add_inet_listeners(ARRAY_TYPE(inet_listener_settings) *l,
 {
 	struct inet_listener_settings *set;
 	const char *str;
+	const char *address;
 
 	if (!array_is_created(l))
 		return;
 
 	array_foreach_elem(l, set) {
 		if (set->port != 0) {
-			str = t_strdup_printf("%u:%s", set->port, set->address);
-			array_push_back(all_listeners, &str);
+			array_foreach_elem(&set->listen, address) {
+				str = t_strdup_printf("%u:%s", set->port, address);
+				array_push_back(all_listeners, &str);
+			}
 		}
 	}
 }
@@ -402,28 +422,24 @@ service_get_client_limit(struct master_settings *set, const char *name)
 	struct service_settings *service;
 
 	array_foreach_elem(&set->parsed_services, service) {
-		if (strcmp(service->name, name) == 0) {
-			if (service->client_limit != 0)
-				return service->client_limit;
-			else
-				return set->default_client_limit;
-		}
+		if (strcmp(service->name, name) == 0)
+			return service->client_limit;
 	}
-	return set->default_client_limit;
+	i_panic("Unexpectedly didn't find service %s", name);
 }
 
 static bool service_is_enabled(const struct master_settings *set,
 			       struct service_settings *service)
 {
-	return service->protocol[0] == '\0' ||
-		str_array_find((const char **)set->protocols_split,
-			       service->protocol);
+	if (service->protocol[0] == '\0')
+		return TRUE;
+	return array_is_created(&set->protocols) &&
+		array_lsearch(&set->protocols, &service->protocol, i_strcmp_p) != NULL;
 }
 
 static bool
-master_service_get_file_listeners(struct service_settings *service_set,
-				  pool_t pool, struct event *event,
-				  const char *set_name,
+master_service_get_file_listeners(pool_t pool, struct event *event,
+				  const char *set_name, const char *service_name,
 				  const struct setting_parser_info *info,
 				  const ARRAY_TYPE(const_string) *listener_names,
 				  ARRAY_TYPE(file_listener_settings) *parsed_listeners,
@@ -437,7 +453,7 @@ master_service_get_file_listeners(struct service_settings *service_set,
 		return TRUE;
 
 	event = event_create(event);
-	event_add_str(event, "service", service_set->name);
+	settings_event_add_list_filter_name(event, "service", service_name);
 
 	p_array_init(parsed_listeners, pool, array_count(listener_names));
 	array_foreach_elem(listener_names, name) {
@@ -461,10 +477,12 @@ master_service_get_file_listeners(struct service_settings *service_set,
 
 static bool
 master_service_get_inet_listeners(struct service_settings *service_set,
+				  const char *service_name,
 				  pool_t pool, struct event *event,
 				  const char **error_r)
 {
 	const struct inet_listener_settings *listener_set;
+	const struct master_settings *master_set;
 	const char *name, *error;
 	bool ret = TRUE;
 
@@ -472,7 +490,7 @@ master_service_get_inet_listeners(struct service_settings *service_set,
 		return TRUE;
 
 	event = event_create(event);
-	event_add_str(event, "service", service_set->name);
+	settings_event_add_list_filter_name(event, "service", service_name);
 
 	p_array_init(&service_set->parsed_inet_listeners, pool,
 		     array_count(&service_set->inet_listeners));
@@ -486,10 +504,37 @@ master_service_get_inet_listeners(struct service_settings *service_set,
 			ret = FALSE;
 			break;
 		}
+
+		struct event *event2 = event_create(event);
+		settings_event_add_list_filter_name(event2, "inet_listener",
+						    name);
+		if (settings_get(event2, &master_setting_parser_info,
+				 SETTINGS_GET_FLAG_NO_CHECK,
+				 &master_set, &error) < 0) {
+			*error_r = t_strdup_printf(
+				"Failed to get inet_listener %s: %s",
+				name, error);
+			ret = FALSE;
+			settings_free(listener_set);
+			event_unref(&event2);
+			break;
+		}
+		event_unref(&event2);
+
 		struct inet_listener_settings *listener_set_dup =
 			p_memdup(pool, listener_set, sizeof(*listener_set));
+		unsigned int listeners = array_count(&master_set->listen);
+		p_array_init(&listener_set_dup->listen, pool, listeners);
 
 		pool_add_external_ref(pool, listener_set->pool);
+		const char *address;
+		array_foreach_elem(&master_set->listen, address) {
+			const char **address_copy =
+				array_append_space(&listener_set_dup->listen);
+			*address_copy = p_strdup(listener_set_dup->pool, address);
+		}
+		settings_free(master_set);
+
 		array_push_back(&service_set->parsed_inet_listeners,
 				&listener_set_dup);
 		settings_free(listener_set);
@@ -498,7 +543,7 @@ master_service_get_inet_listeners(struct service_settings *service_set,
 	return ret;
 }
 
-static bool
+static int
 master_settings_get_services(struct master_settings *set, pool_t pool,
 			     struct event *event, const char **error_r)
 {
@@ -511,9 +556,12 @@ master_settings_get_services(struct master_settings *set, pool_t pool,
 		if (settings_get_filter(event, "service", service_name,
 					&service_setting_parser_info,
 					0, &service_set, &error) < 0) {
+			if (event_find_field_recursive(event,
+					SETTINGS_EVENT_NO_EXPAND) != NULL)
+				return 0;
 			*error_r = t_strdup_printf("Failed to get service %s: %s",
 						   service_name, error);
-			return FALSE;
+			return -1;
 		}
 		struct service_settings *service_set_dup =
 			p_memdup(pool, service_set, sizeof(*service_set));
@@ -522,25 +570,26 @@ master_settings_get_services(struct master_settings *set, pool_t pool,
 		array_push_back(&set->parsed_services, &service_set_dup);
 		settings_free(service_set);
 
-		if (!master_service_get_file_listeners(
-				service_set_dup, pool, event, "unix_listener",
+		if (!master_service_get_file_listeners(pool, event,
+				"unix_listener", service_name,
 				&unix_listener_setting_parser_info,
 				&service_set_dup->unix_listeners,
 				&service_set_dup->parsed_unix_listeners,
 				error_r))
-			return FALSE;
-		if (!master_service_get_file_listeners(
-				service_set_dup, pool, event, "fifo_listener",
+			return -1;
+		if (!master_service_get_file_listeners(pool, event,
+				"fifo_listener", service_name,
 				&fifo_listener_setting_parser_info,
 				&service_set_dup->fifo_listeners,
 				&service_set_dup->parsed_fifo_listeners,
 				error_r))
-			return FALSE;
-		if (!master_service_get_inet_listeners(service_set_dup, pool,
+			return -1;
+		if (!master_service_get_inet_listeners(service_set_dup,
+						       service_name, pool,
 						       event, error_r))
-			return FALSE;
+			return -1;
 	}
-	return TRUE;
+	return 1;
 }
 
 static bool
@@ -550,7 +599,7 @@ master_settings_ext_check(struct event *event, void *_set,
 	static bool warned_auth = FALSE, warned_anvil = FALSE;
 	struct master_settings *set = _set;
 	struct service_settings *const *services;
-	const char *const *strings;
+	const char *const *strings, *proto;
 	ARRAY_TYPE(const_string) all_listeners;
 	struct passwd pw;
 	unsigned int i, j, count, client_limit, process_limit;
@@ -558,18 +607,15 @@ master_settings_ext_check(struct event *event, void *_set,
 	string_t *max_auth_client_processes_reason = t_str_new(64);
 	string_t *max_anvil_client_processes_reason = t_str_new(64);
 	size_t len;
+	int ret;
 #ifdef CONFIG_BINARY
 	const struct service_settings *default_service;
 #else
 	rlim_t fd_limit;
-	const char *max_client_limit_source = "default_client_limit";
-	unsigned int max_client_limit = set->default_client_limit;
+	const char *max_client_limit_source = "BUG";
+	unsigned int max_client_limit = 0;
 #endif
 
-	if (*set->listen == '\0') {
-		*error_r = "listen can't be set empty";
-		return FALSE;
-	}
 
 	len = strlen(set->base_dir);
 	if (len > 0 && set->base_dir[len-1] == '/') {
@@ -610,8 +656,12 @@ master_settings_ext_check(struct event *event, void *_set,
 		return FALSE;
 #endif
 	}
-	if (!master_settings_get_services(set, pool, event, error_r))
+	if (array_is_empty(&set->listen)) {
+		*error_r = "listen can't be set empty";
 		return FALSE;
+	}
+	if ((ret = master_settings_get_services(set, pool, event, error_r)) <= 0)
+		return ret == 0;
 	services = array_get(&set->parsed_services, &count);
 	for (i = 0; i < count; i++) {
 		struct service_settings *service = services[i];
@@ -632,21 +682,17 @@ master_settings_ext_check(struct event *event, void *_set,
 			}
 		}
 		expand_user(&service->user, &service->user_default, set);
-		expand_group(&service->extra_groups, set);
+		expand_groups(&service->extra_groups, set);
 		service_set_login_dump_core(service);
 	}
-	set->protocols_split = p_strsplit_spaces(pool, set->protocols, " ");
-	if (set->protocols_split[0] != NULL &&
-	    strcmp(set->protocols_split[0], "none") == 0 &&
-	    set->protocols_split[1] == NULL)
-		set->protocols_split[0] = NULL;
 
-	for (i = 0; set->protocols_split[i] != NULL; i++) {
-		if (!services_have_protocol(set, set->protocols_split[i])) {
-			*error_r = t_strdup_printf("protocols: "
-						   "Unknown protocol: %s",
-						   set->protocols_split[i]);
-			return FALSE;
+	if (array_is_created(&set->protocols)) {
+		array_foreach_elem(&set->protocols, proto) {
+			if (!services_have_protocol(set, proto)) {
+				*error_r = t_strdup_printf("protocols: "
+					"Unknown protocol: %s", proto);
+				return FALSE;
+			}
 		}
 	}
 	t_array_init(&all_listeners, 64);
@@ -679,17 +725,42 @@ master_settings_ext_check(struct event *event, void *_set,
 			return FALSE;
 		}
 		process_limit = service->process_limit;
-		if (process_limit == 0)
-			process_limit = set->default_process_limit;
+		if (process_limit == 0) {
+			*error_r = t_strdup_printf("service(%s): "
+				"process_limit must be higher than 0",
+				service->name);
+			return FALSE;
+		}
 		if (service->process_min_avail > process_limit) {
 			*error_r = t_strdup_printf("service(%s): "
 				"process_min_avail is higher than process_limit",
 				service->name);
 			return FALSE;
 		}
-		if (service->vsz_limit < 1024*1024 && service->vsz_limit != 0) {
+		if (service->client_limit == 0) {
 			*error_r = t_strdup_printf("service(%s): "
-				"vsz_limit is too low", service->name);
+				"client_limit must be higher than 0",
+				service->name);
+			return FALSE;
+		}
+		if (service->restart_request_count == 0) {
+			*error_r = t_strdup_printf("service(%s): "
+				"restart_request_count must be higher than 0 "
+				"(did you mean \"unlimited\"?)",
+				service->name);
+			return FALSE;
+		}
+		if (service->idle_kill_interval == 0) {
+			*error_r = t_strdup_printf("service(%s): "
+				"idle_kill_interval must be higher than 0 "
+				"(did you mean \"unlimited\"?)",
+				service->name);
+			return FALSE;
+		}
+		if (service->vsz_limit < 1024*1024) {
+			*error_r = t_strdup_printf("service(%s): "
+				"vsz_limit is too low "
+				"(did you mean \"unlimited\"?)", service->name);
 			return FALSE;
 		}
 
@@ -712,9 +783,9 @@ master_settings_ext_check(struct event *event, void *_set,
 
 		if (*service->protocol != '\0') {
 			/* each imap/pop3/lmtp process can use up a connection,
-			   although if service_count=1 it's only temporary.
+			   although if restart_request_count=1 it's only temporary.
 			   imap-hibernate doesn't do any auth lookups. */
-			if ((service->service_count != 1 ||
+			if ((service->restart_request_count != 1 ||
 			     strcmp(service->type, "login") == 0) &&
 			    strcmp(service->name, "imap-hibernate") != 0) {
 				str_printfa(max_auth_client_processes_reason,
@@ -752,7 +823,7 @@ master_settings_ext_check(struct event *event, void *_set,
 		str_delete(max_auth_client_processes_reason, 0, 3);
 		i_warning("service auth { client_limit=%u } is lower than "
 			  "required under max. load (%u). "
-			  "Counted for protocol services with service_count != 1: %s",
+			  "Counted for protocol services with restart_request_count != 1: %s",
 			  client_limit, max_auth_client_processes,
 			  str_c(max_auth_client_processes_reason));
 	}

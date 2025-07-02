@@ -87,8 +87,6 @@ struct doveadm_http_server_mount {
 	bool auth;
 };
 
-static struct http_server *doveadm_http_server;
-
 static void doveadm_http_server_send_response(struct client_request_http *req);
 
 /*
@@ -949,7 +947,7 @@ doveadm_http_server_request_destroy(struct client_request_http *req)
 	i_stream_destroy(&req->input);
 
 	http_server_request_unref(&req->http_request);
-	http_server_switch_ioloop(doveadm_http_server);
+	http_server_switch_ioloop(http_server_request_get_server(http_sreq));
 
 	pool_unref(&req->pool);
 	conn->request = NULL;
@@ -1161,7 +1159,9 @@ static void client_connection_http_free(struct client_connection *_conn)
 	}
 }
 
-struct client_connection *client_connection_http_create(int fd, bool ssl)
+struct client_connection *
+client_connection_http_create(struct http_server *doveadm_http_server, int fd,
+			      bool ssl)
 {
 	struct client_connection_http *conn;
 	pool_t pool;
@@ -1201,22 +1201,4 @@ doveadm_http_server_connection_destroy(void *context,
 
 	/* destroy the connection itself */
 	client_connection_destroy(&bconn);
-}
-
-/*
- * Server
- */
-
-void doveadm_http_server_init(void)
-{
-	struct http_server_settings http_set = {
-		.rawlog_dir = doveadm_settings->doveadm_http_rawlog_dir,
-	};
-
-	doveadm_http_server = http_server_init(&http_set);
-}
-
-void doveadm_http_server_deinit(void)
-{
-	http_server_deinit(&doveadm_http_server);
 }

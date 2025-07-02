@@ -130,7 +130,8 @@ service_create_inet_listeners(struct service *service,
 			      const char **error_r)
 {
 	static struct service_listener *l;
-	const char *const *tmp, *addresses;
+	const char *address;
+	ARRAY_TYPE(const_string) addresses;
 	const struct ip_addr *ips;
 	unsigned int i, ips_count;
 	bool ssl_disabled = strcmp(service->list->set->ssl, "no") == 0;
@@ -140,17 +141,14 @@ service_create_inet_listeners(struct service *service,
 		return 0;
 	}
 
-	if (*set->address != '\0')
-		addresses = set->address;
+	if (!array_is_empty(&set->listen))
+		addresses = set->listen;
 	else {
 		/* use the default listen address */
 		addresses = service->list->set->listen;
 	}
 
-	tmp = t_strsplit_spaces(addresses, ", ");
-	for (; *tmp != NULL; tmp++) {
-		const char *address = *tmp;
-
+	array_foreach_elem(&addresses, address) {
 		if (set->ssl && ssl_disabled)
 			continue;
 
@@ -167,7 +165,7 @@ service_create_inet_listeners(struct service *service,
 	return 0;
 }
 
-static int service_get_groups(const char *groups, pool_t pool,
+static int service_get_groups(const ARRAY_TYPE(const_string) *groups, pool_t pool,
 			      const char **gids_r, const char **error_r)
 {
 	const char *const *tmp;
@@ -175,7 +173,7 @@ static int service_get_groups(const char *groups, pool_t pool,
 	gid_t gid;
 
 	str = t_str_new(64);
-	for (tmp = t_strsplit(groups, ","); *tmp != NULL; tmp++) {
+	for (tmp = settings_boollist_get(groups); *tmp != NULL; tmp++) {
 		if (get_gid(*tmp, &gid, error_r) < 0)
 			return -1;
 
@@ -190,13 +188,13 @@ static int service_get_groups(const char *groups, pool_t pool,
 static struct service *
 service_create_real(pool_t pool, struct event *event,
 		    const struct service_settings *set,
-	            struct service_list *service_list, const char **error_r)
+		    struct service_list *service_list, const char **error_r)
 {
 	struct file_listener_settings *const *unix_listeners;
 	struct file_listener_settings *const *fifo_listeners;
 	struct inet_listener_settings *const *inet_listeners;
 	struct service *service;
-        struct service_listener *l;
+	struct service_listener *l;
 	unsigned int i, unix_count, fifo_count, inet_count;
 
 	service = p_new(pool, struct service, 1);
@@ -205,25 +203,15 @@ service_create_real(pool_t pool, struct event *event,
 	service->set = set;
 	service->throttle_msecs = SERVICE_STARTUP_FAILURE_THROTTLE_MIN_MSECS;
 
-	service->client_limit = set->client_limit != 0 ? set->client_limit :
-		service_list->set->default_client_limit;
-	if (set->service_count > 0 &&
-	    service->client_limit > set->service_count)
-		service->client_limit = set->service_count;
+	service->client_limit = set->client_limit;
+	i_assert(set->restart_request_count > 0);
+	if (service->client_limit > set->restart_request_count)
+		service->client_limit = set->restart_request_count;
 
-	service->vsz_limit = set->vsz_limit != UOFF_T_MAX ? set->vsz_limit :
-		service_list->set->default_vsz_limit;
-	service->idle_kill = set->idle_kill != 0 ? set->idle_kill :
-		service_list->set->default_idle_kill;
+	service->vsz_limit = set->vsz_limit;
+	service->idle_kill_interval = set->idle_kill_interval;
 	service->type = service->set->parsed_type;
-
-	if (set->process_limit == 0) {
-		/* use default */
-		service->process_limit =
-			service_list->set->default_process_limit;
-	} else {
-		service->process_limit = set->process_limit;
-	}
+	service->process_limit = set->process_limit;
 
 	/* default gid to user's primary group */
 	if (get_uidgid(set->user, &service->uid, &service->gid, error_r) < 0) {
@@ -260,8 +248,8 @@ service_create_real(pool_t pool, struct event *event,
 		return NULL;
 	}
 
-	if (*set->extra_groups != '\0') {
-		if (service_get_groups(set->extra_groups, pool,
+	if (array_not_empty(&set->extra_groups)) {
+		if (service_get_groups(&set->extra_groups, pool,
 				       &service->extra_gids, error_r) < 0) {
 			*error_r = t_strdup_printf(
 				"%s (See service %s { extra_groups } setting)",
@@ -401,8 +389,6 @@ service_lookup_type(struct service_list *service_list, enum service_type type)
 static bool service_want(const struct master_settings *master_set,
 			 struct service_settings *set)
 {
-	char *const *proto;
-
 	if (*set->executable == '\0') {
 		/* silently allow service {} blocks for disabled extensions
 		   (e.g. service managesieve {} block without pigeonhole
@@ -413,11 +399,10 @@ static bool service_want(const struct master_settings *master_set,
 	if (*set->protocol == '\0')
 		return TRUE;
 
-	for (proto = master_set->protocols_split; *proto != NULL; proto++) {
-		if (strcmp(*proto, set->protocol) == 0)
-			return TRUE;
-	}
-	return FALSE;
+	if (!array_is_created(&master_set->protocols))
+		return FALSE;
+	return array_lsearch(&master_set->protocols, &set->protocol,
+			     i_strcmp_p) != NULL;
 }
 
 static int
@@ -712,7 +697,7 @@ void service_list_unref(struct service_list *service_list)
 
 const char *services_get_config_socket_path(struct service_list *service_list)
 {
-        struct service_listener *const *listeners;
+	struct service_listener *const *listeners;
 	unsigned int count;
 
 	listeners = array_get(&service_list->config->listeners, &count);

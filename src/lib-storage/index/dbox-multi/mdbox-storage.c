@@ -5,7 +5,6 @@
 #include "ioloop.h"
 #include "mkdir-parents.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "mail-index-modseq.h"
 #include "mail-index-alloc-cache.h"
 #include "mailbox-log.h"
@@ -52,21 +51,21 @@ int mdbox_storage_create(struct mail_storage *_storage,
 
 	storage->preallocate_space = storage->set->mdbox_preallocate_space;
 
-	if (*ns->list->set.mailbox_dir_name == '\0') {
-		*error_r = "mdbox: MAILBOXDIR must not be empty";
+	if (*ns->list->mail_set->mailbox_root_directory_name == '\0') {
+		*error_r = "mdbox: mailbox_root_directory_name must not be empty";
 		return -1;
 	}
 
 	_storage->unique_root_dir =
-		p_strdup(_storage->pool, ns->list->set.root_dir);
+		p_strdup(_storage->pool, ns->list->mail_set->mail_path);
 
 	dir = mailbox_list_get_root_forced(ns->list, MAILBOX_LIST_PATH_TYPE_DIR);
 	storage->storage_dir = p_strconcat(_storage->pool, dir,
 					   "/"MDBOX_GLOBAL_DIR_NAME, NULL);
-	if (ns->list->set.alt_dir != NULL) {
+	if (ns->list->mail_set->mail_alt_path[0] != '\0') {
 		storage->alt_storage_dir = p_strconcat(_storage->pool,
-							ns->list->set.alt_dir,
-							"/"MDBOX_GLOBAL_DIR_NAME, NULL);
+			ns->list->mail_set->mail_alt_path,
+			"/"MDBOX_GLOBAL_DIR_NAME, NULL);
 	}
 
 	event_set_append_log_prefix(_storage->event, t_strdup_printf(
@@ -116,15 +115,18 @@ mdbox_storage_find_root_dir(const struct mail_namespace *ns)
 	return NULL;
 }
 
-static bool mdbox_storage_autodetect(const struct mail_namespace *ns,
-				     struct mailbox_list_settings *set)
+static bool
+mdbox_storage_autodetect(const struct mail_namespace *ns,
+			 const struct mail_storage_settings *mail_set,
+			 const char **root_path_r,
+			 const char **inbox_path_r ATTR_UNUSED)
 {
 	struct event *event = ns->user->event;
 	struct stat st;
 	const char *path, *root_dir;
 
-	if (set->root_dir != NULL)
-		root_dir = set->root_dir;
+	if (mail_set->mail_path[0] != '\0')
+		root_dir = mail_set->mail_path;
 	else {
 		root_dir = mdbox_storage_find_root_dir(ns);
 		if (root_dir == NULL) {
@@ -145,8 +147,7 @@ static bool mdbox_storage_autodetect(const struct mail_namespace *ns,
 		return FALSE;
 	}
 
-	set->root_dir = root_dir;
-	dbox_storage_get_list_settings(ns, set);
+	*root_path_r = root_dir;
 	return TRUE;
 }
 
@@ -472,13 +473,13 @@ struct mail_storage mdbox_storage = {
 		MAIL_STORAGE_CLASS_FLAG_HAVE_MAIL_SAVE_GUIDS |
 		MAIL_STORAGE_CLASS_FLAG_BINARY_DATA,
 	.event_category = &event_category_mdbox,
+	.set_info = &mdbox_setting_parser_info,
 
 	.v = {
 		mdbox_storage_alloc,
 		mdbox_storage_create,
 		mdbox_storage_destroy,
 		NULL,
-		dbox_storage_get_list_settings,
 		mdbox_storage_autodetect,
 		mdbox_mailbox_alloc,
 		mdbox_purge,

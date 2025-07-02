@@ -1,9 +1,9 @@
 /* Copyright (c) 2010-2018 Dovecot authors, see the included COPYING file */
 
 #include "lib.h"
+#include "array.h"
 #include "process-title.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-service.h"
 #include "doveadm.h"
 #include "doveadm-settings.h"
@@ -14,12 +14,12 @@ bool doveadm_client_is_allowed_command(const struct doveadm_settings *set,
 {
 	bool ret = FALSE;
 
-	if (*set->doveadm_allowed_commands == '\0')
+	if (array_is_empty(&set->doveadm_allowed_commands))
 		return TRUE;
 
 	T_BEGIN {
 		const char *const *cmds =
-			t_strsplit(set->doveadm_allowed_commands, ",");
+			settings_boollist_get(&set->doveadm_allowed_commands);
 		for (; *cmds != NULL; cmds++) {
 			if (strcmp(*cmds, cmd_name) == 0) {
 				ret = TRUE;
@@ -102,14 +102,8 @@ void client_connection_set_proctitle(struct client_connection *conn,
 	process_title_set(str);
 }
 
-void doveadm_server_init(void)
-{
-	doveadm_http_server_init();
-}
-
 void doveadm_server_deinit(void)
 {
 	if (doveadm_client != NULL)
 		client_connection_destroy(&doveadm_client);
-	doveadm_http_server_deinit();
 }

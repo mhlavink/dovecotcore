@@ -72,8 +72,8 @@ static void service_kill_idle(struct service *service)
 
 	   (It's actually not important which processes get killed. A better
 	   way could be to kill the oldest processes since they might have to
-	   be restarted anyway soon due to reaching service_count, but we'd
-	   have to use priority queue for tracking that, which is more
+	   be restarted anyway soon due to reaching restart_request_count, but
+	   we'd have to use priority queue for tracking that, which is more
 	   expensive and probably not worth it.) */
 	for (; processes_to_kill > 0; processes_to_kill--) {
 		struct service_process *process = service->idle_processes_head;
@@ -91,7 +91,7 @@ static void service_kill_idle(struct service *service)
 		}
 		process->last_kill_sent = ioloop_time;
 		process->to_idle_kill =
-			timeout_add(service->idle_kill * 1000,
+			timeout_add(service->idle_kill_interval * 1000,
 				    service_process_idle_kill_timeout, process);
 
 		/* Move it to the end of the list, so it's not tried to be
@@ -167,11 +167,11 @@ static void service_check_idle(struct service_process *process)
 
 	if (service->process_avail > service->set->process_min_avail &&
 	    service->to_idle == NULL &&
-	    service->idle_kill != UINT_MAX) {
+	    service->idle_kill_interval != UINT_MAX) {
 		/* We have more processes than we really need. Start a timer
-		   to trigger idle_kill. */
+		   to trigger idle_kill_interval. */
 		service->to_idle =
-			timeout_add(service->idle_kill * 1000,
+			timeout_add(service->idle_kill_interval * 1000,
 				    service_kill_idle, service);
 	}
 }
@@ -282,9 +282,9 @@ static void service_log_drop_warning(struct service *service)
 		if (service->process_limit > 1) {
 			limit_name = "process_limit";
 			limit = service->process_limit;
-		} else if (service->set->service_count == 1) {
+		} else if (service->set->restart_request_count == 1) {
 			i_assert(service->client_limit == 1);
-			limit_name = "client_limit/service_count";
+			limit_name = "client_limit/restart_request_count";
 			limit = 1;
 		} else {
 			limit_name = "client_limit";
@@ -824,7 +824,7 @@ service_process_failure(struct service_process *process, int status)
 		   processes that were already running for a while.
 		   Try to avoid failure storms at Dovecot startup by throttling
 		   the service if it only keeps failing rapidly. This is no
-		   longer done after the service looks to be generailly working,
+		   longer done after the service looks to be generally working,
 		   in case an attacker finds a way to quickly crash their own
 		   session. */
 		if (service->exit_failure_last != ioloop_time) {

@@ -19,6 +19,7 @@
 #include "http-client.h"
 #include "test-common.h"
 #include "test-subprocess.h"
+#include "http-client.h"
 #include "dlua-script-private.h"
 
 #include <unistd.h>
@@ -134,9 +135,11 @@ static void test_dns_simple_post(void)
 /* server */
 
 struct _simple_post_sctx {
-	bool eoh;
 	struct timeout *to;
-	bool serviced;
+	bool serviced:1;
+	bool eoh:1;
+	bool agent_checked:1;
+	bool post_checked:1;
 };
 
 static int test_server_simple_post_init(struct server_connection *conn)
@@ -171,10 +174,22 @@ static void test_server_simple_post_input(struct server_connection *conn)
 	}
 
 	while ((line = i_stream_read_next_line(conn->conn.input)) != NULL) {
+		const char *agent;
 		if (*line == '\0') {
 			ctx->eoh = TRUE;
-			break;
+			o_stream_nsend_str(conn->conn.output, "HTTP/1.1 100 OK\r\n\r\n");
+			return;
 		}
+		if (!ctx->post_checked) {
+			test_assert(str_begins_with(line, "POST /"));
+			ctx->post_checked = TRUE;
+		}
+		if (!ctx->agent_checked && str_begins(line, "User-Agent: ", &agent)) {
+			test_assert_strcmp(agent, "dovecot/unit-test");
+			ctx->agent_checked = TRUE;
+		}
+		if (strcmp(line, "some+foolish+payload+for+funsies") == 0)
+			break;
 	}
 
 	if (conn->conn.input->stream_errno != 0) {
@@ -187,6 +202,8 @@ static void test_server_simple_post_input(struct server_connection *conn)
 		return;
 	}
 
+	test_assert(ctx->post_checked);
+	test_assert(ctx->agent_checked);
 	i_assert(ctx->eoh);
 	ctx->eoh = FALSE;
 
@@ -201,8 +218,6 @@ static void test_server_simple_post_input(struct server_connection *conn)
 
 	string_t *resp = t_str_new(512);
 	str_printfa(resp,
-		    "HTTP/1.1 100 OK\r\n"
-		    "\r\n"
 		    "HTTP/1.1 200 OK\r\n"
 		    "Content-Length: %zu\r\n"
 		    "\r\n"
@@ -250,6 +265,7 @@ test_client_simple_post_run_post(struct dlua_script *script, const char *url)
 		ret = lua_tointeger(script->L, -1);
 		/* not guaranteed to fail, but it will happen often */
 		e_debug(test_event, "http_request_post() returned %d", ret);
+		test_assert(ret == 0);
 	}
 
 	lua_pop(script->L, 1);
@@ -275,12 +291,14 @@ static bool test_client_simple_post(void)
 
 	/* First POST */
 	test_client_simple_post_run_post(
-		script, t_strdup_printf("https://hosta:%u/first-post",
+		script, t_strdup_printf("http%s://hosta:%u/first-post",
+					test_server_ssl ? "s" : "",
 					bind_ports[0]));
 
 	/* Second POST */
 	test_client_simple_post_run_post(
-		script, t_strdup_printf("https://hosta:%u/second-post",
+		script, t_strdup_printf("http%s://hosta:%u/second-post",
+					test_server_ssl ? "s" : "",
 					bind_ports[0]));
 
 	dlua_script_unref(&script);
@@ -380,20 +398,30 @@ static void test_bad_settings(void)
 
 	int ret = dlua_pcall(script->L, "test_invalid_set_name", 0, 0, &error);
 	test_assert(ret < 0);
+	error = t_strcut(error, '\n');
 	/* check the error is there */
-	test_assert(strstr(error, "Invalid HTTP client setting: timeout is unknown setting") != NULL);
+	test_assert_strcmp(error, "lua_pcall(test_invalid_set_name, 0, 0) failed: "
+				  "Invalid HTTP client setting: timeout is unknown setting");
 
 	ret = dlua_pcall(script->L, "test_invalid_set_value_1", 0, 0, &error);
 	test_assert(ret < 0);
-	test_assert(strstr(error, "Invalid HTTP client setting: debug: boolean expected") != NULL);
+	error = t_strcut(error, '\n');
+	test_assert_strcmp(error, "lua_pcall(test_invalid_set_value_1, 0, 0) failed: "
+				  "Invalid HTTP client setting: auto_retry=cow: Invalid boolean value: cow (use yes or no)");
 
 	ret = dlua_pcall(script->L, "test_invalid_set_value_2", 0, 0, &error);
 	test_assert(ret < 0);
-	test_assert(strstr(error, "Invalid HTTP client setting: max_attempts: non-negative number expected") != NULL);
+	error = t_strcut(error, '\n');
+	test_assert_strcmp(error, "lua_pcall(test_invalid_set_value_2, 0, 0) failed: "
+				  "Invalid HTTP client setting: request_max_attempts=three: Invalid number three: Not a valid number");
 
-	ret = dlua_pcall(script->L, "test_invalid_set_value_3", 0, 0, &error);
-	test_assert(ret < 0);
-	test_assert(strstr(error, "Invalid HTTP client setting: user_agent: string expected") != NULL);
+	/* This needs a bit more roundabout way to check this as SSL settings
+	   are lazily evaluated. */
+	test_assert(dlua_pcall(script->L, "test_invalid_set_value_3", 0, 0, &error) == 0);
+	lua_pushstring(script->L, "https://localhost");
+	test_assert(dlua_pcall(script->L, "http_request_post", 1, 2, &error) == 2);
+	error = lua_tostring(script->L, 2);
+	test_assert_strcmp(error, "Couldn't initialize SSL client context: Can't set minimum protocol to 'cow' (ssl_min_protocol setting): Unknown value");
 
 	dlua_script_unref(&script);
 
@@ -465,7 +493,6 @@ server_connection_init_ssl(struct server_connection *conn)
 	connection_input_halt(&conn->conn);
 
 	ssl_iostream_test_settings_server(&ssl_set);
-	ssl_set.verbose = debug;
 
 	if (server_ssl_ctx == NULL &&
 	    ssl_iostream_context_init_server(&ssl_set, &server_ssl_ctx,
@@ -474,7 +501,7 @@ server_connection_init_ssl(struct server_connection *conn)
 		return -1;
 	}
 
-	if (io_stream_create_ssl_server(server_ssl_ctx, &ssl_set, conn->conn.event,
+	if (io_stream_create_ssl_server(server_ssl_ctx, conn->conn.event,
 					&conn->conn.input, &conn->conn.output,
 					&conn->ssl_iostream, &error) < 0) {
 		i_error("SSL init failed: %s", error);
@@ -492,7 +519,8 @@ server_connection_init_ssl(struct server_connection *conn)
 
 static void server_connection_input(struct connection *_conn)
 {
-	struct server_connection *conn = (struct server_connection *)_conn;
+	struct server_connection *conn =
+		container_of(_conn, struct server_connection, conn);
 
 	test_server_input(conn);
 }
@@ -615,8 +643,6 @@ static int test_open_server_fd(in_port_t *bind_port)
 
 static int test_run_server(struct test_server_data *data)
 {
-	master_service_deinit_forked(&master_service);
-
 	i_set_failure_prefix("SERVER[%u]: ", data->index + 1);
 
 	e_debug(test_event, "PID=%s", my_pid);
@@ -634,13 +660,12 @@ static int test_run_server(struct test_server_data *data)
 	i_free(bind_ports);
 	event_unref(&test_event);
 	main_deinit();
+	master_service_deinit_forked(&master_service);
 	return 0;
 }
 
 static int test_run_dns(test_dns_init_t dns_test)
 {
-	master_service_deinit_forked(&master_service);
-
 	test_server_ssl = FALSE;
 
 	i_set_failure_prefix("DNS: ");
@@ -658,6 +683,7 @@ static int test_run_dns(test_dns_init_t dns_test)
 	i_free(bind_ports);
 	event_unref(&test_event);
 	main_deinit();
+	master_service_deinit_forked(&master_service);
 	return 0;
 }
 
@@ -736,6 +762,7 @@ test_run_client_server(test_client_init_t client_test,
 	i_free(bind_ports);
 
 	i_unlink_if_exists("./dns-test");
+	http_client_global_context_free();
 }
 
 /*
@@ -756,7 +783,7 @@ static void main_deinit(void)
 int main(int argc, char *argv[])
 {
 	const enum master_service_flags service_flags =
-		MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+		MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 		MASTER_SERVICE_FLAG_STANDALONE |
 		MASTER_SERVICE_FLAG_STD_CLIENT |
 		MASTER_SERVICE_FLAG_DONT_SEND_STATS;

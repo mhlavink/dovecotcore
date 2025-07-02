@@ -2,6 +2,7 @@
 #define IMAP_CLIENT_H
 
 #include "imap-commands.h"
+#include "imap-stats.h"
 #include "message-size.h"
 
 #define CLIENT_COMMAND_QUEUE_MAX_SIZE 4
@@ -130,7 +131,7 @@ struct client_command_context {
 
 struct imap_client_vfuncs {
 	/* Perform client initialization. This is called when client creation is
-	   finished completely. Particulary, at this point the namespaces are
+	   finished completely. Particularly, at this point the namespaces are
 	   fully initialized, which is not the case for the client create hook.
 	 */
 	void (*init)(struct client *client);
@@ -149,13 +150,16 @@ struct imap_client_vfuncs {
 	   couldn't be preserved, -1 if temporary internal error occurred. */
 	int (*state_export)(struct client *client, bool internal,
 			    buffer_t *dest, const char **error_r);
-	/* Import a single block of client state from the given data. Returns
-	   number of bytes successfully imported from the block, or 0 if state
-	   is corrupted or contains unknown data (e.g. some plugin is no longer
-	   loaded), -1 if temporary internal error occurred. */
-	ssize_t (*state_import)(struct client *client, bool internal,
-				const unsigned char *data, size_t size,
-				const char **error_r);
+	/* Import a single block of client state from the given data.
+	   Returns a value from enum imap_state_result.
+	   The skip_r parameter is set only if IMAP_STATE_OK is returned,
+	   and indicates the number of bytes successfully processed. */
+	enum imap_state_result (*state_import)(struct client *client,
+					       bool internal,
+					       const unsigned char *data,
+					       size_t size,
+					       size_t *skip_r,
+					       const char **error_r);
 };
 
 struct client {
@@ -177,6 +181,7 @@ struct client {
 	const struct imap_settings *set;
 	const struct smtp_submit_settings *smtp_set;
 	string_t *capability_string;
+	const char *init_error;
 	const char *disconnect_reason;
 
         struct mail_user *user;
@@ -205,11 +210,7 @@ struct client {
 	uint64_t highest_fetch_modseq;
 	ARRAY_TYPE(seq_range) fetch_failed_uids;
 
-	/* For imap_logout_format statistics: */
-	unsigned int fetch_hdr_count, fetch_body_count;
-	uint64_t fetch_hdr_bytes, fetch_body_bytes;
-	unsigned int deleted_count, expunged_count, trashed_count;
-	unsigned int autoexpunged_count, append_count;
+	struct imap_logout_stats logout_stats;
 
 	/* SEARCHRES extension: Last saved SEARCH result */
 	ARRAY_TYPE(seq_range) search_saved_uidset;
@@ -334,7 +335,9 @@ void client_args_finished(struct client_command_context *cmd,
    have to wait for an existing SEARCH SAVE to finish. */
 bool client_handle_search_save_ambiguity(struct client_command_context *cmd);
 
-void client_enable(struct client *client, unsigned int feature_idx);
+/* Enable an IMAP feature. Returns TRUE if the feature was actually enabled
+   (or it was already enabled before). */
+bool client_enable(struct client *client, unsigned int feature_idx);
 /* Returns TRUE if the given feature is enabled */
 bool client_has_enabled(struct client *client, unsigned int feature_idx);
 /* Returns mailbox features that are currently enabled. */

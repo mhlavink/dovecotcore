@@ -47,6 +47,7 @@ verify_plain_continue_mock_callback(struct auth_request *request,
 {
 	request->passdb_success = TRUE;
 	callback(PASSDB_RESULT_OK, request);
+	io_loop_stop(current_ioloop);
 }
 
 static void
@@ -86,22 +87,26 @@ static void test_mech_prepare_request(struct auth_request **request_r,
 				      unsigned int running_test,
 				      const struct test_case *test_case)
 {
-	test_auth_set.ssl_username_from_cert = test_case->set_cert_username;
-	struct auth *auth = auth_default_service();
+	struct auth *auth = auth_default_protocol();
 
 	struct auth_request *request = auth_request_new(mech,  NULL);
+	struct auth_settings *new_set =
+		p_memdup(request->pool, global_auth_settings,
+			 sizeof(*global_auth_settings));
+	new_set->ssl_username_from_cert = test_case->set_cert_username;
+
 	request->handler = handler;
 	request->id = running_test+1;
 	request->mech_password = NULL;
 	request->state = AUTH_REQUEST_STATE_NEW;
-	request->set = global_auth_settings;
+	request->set = new_set;
+	request->protocol_set = global_auth_settings;
 	request->connect_uid = running_test;
 	request->passdb = auth->passdbs;
 	request->userdb = auth->userdbs;
 	handler->refcount = 1;
 
 	request->failure_nodelay = TRUE;
-	auth_request_ref(request);
 	auth_request_state_count[AUTH_REQUEST_STATE_NEW] = 1;
 
 	if (test_case->set_username_before_test || test_case->set_cert_username)
@@ -332,14 +337,13 @@ static void test_mechs(void)
 		else
 			test_assert_idx(request->failed == TRUE, running_test);
 
-		event_unref(&request->event);
-		event_unref(&request->mech_event);
 		i_free(input_dup);
-		mech->auth_free(request);
+		auth_request_unref(&request);
 
 		test_end();
 	} T_END;
 
+	test_expect_error_string("oauth2 failed: aborted");
 	test_auth_deinit();
 }
 
@@ -350,7 +354,7 @@ int main(int argc, char *argv[])
 		NULL
 	};
 	const enum master_service_flags service_flags =
-		MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+		MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 		MASTER_SERVICE_FLAG_STANDALONE |
 		MASTER_SERVICE_FLAG_STD_CLIENT |
 		MASTER_SERVICE_FLAG_DONT_SEND_STATS;

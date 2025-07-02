@@ -99,6 +99,7 @@ AC_DEFUN([DOVECOT_SSL], [
   DOVECOT_CHECK_SSL_FUNC([ERR_get_error_all])
   DOVECOT_CHECK_SSL_FUNC([EVP_MAC_CTX_new])
   DOVECOT_CHECK_SSL_FUNC([OSSL_PROVIDER_try_load])
+  DOVECOT_CHECK_SSL_FUNC([ENGINE_by_id])
   DOVECOT_CHECK_SSL_FUNC([SSL_CTX_set_tmp_dh_callback])
   DOVECOT_CHECK_SSL_FUNC([SSL_CTX_set_current_cert])
   DOVECOT_CHECK_SSL_FUNC([SSL_CTX_set0_tmp_dh_pkey])
@@ -110,6 +111,7 @@ AC_DEFUN([DOVECOT_SSL], [
   DOVECOT_CHECK_SSL_FUNC([SSL_CTX_set_client_hello_cb])
   DOVECOT_CHECK_SSL_FUNC([SSL_CTX_select_current_cert])
   DOVECOT_CHECK_SSL_FUNC([SSL_client_hello_get0_ciphers])
+  DOVECOT_CHECK_SSL_FUNC([SSL_CTX_set_alpn_select_cb])
 
   CFLAGS="$old_CFLAGS"
 ])

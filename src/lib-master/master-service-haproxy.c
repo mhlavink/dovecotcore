@@ -139,6 +139,14 @@ master_service_haproxy_conn_success(struct master_service_haproxy_conn *hpconn)
 	struct master_service *service = hpconn->service;
 	struct master_service_connection conn = hpconn->conn;
 
+	/* copy values */
+	conn.haproxy.cert_common_name = t_strdup(hpconn->conn.haproxy.cert_common_name);
+	if (hpconn->conn.haproxy.alpn_size > 0)
+		conn.haproxy.alpn = t_memdup(hpconn->conn.haproxy.alpn, hpconn->conn.haproxy.alpn_size);
+	else
+		conn.haproxy.alpn = NULL;
+	conn.haproxy.hostname = t_strdup(hpconn->conn.haproxy.hostname);
+
 	master_service_haproxy_conn_free(hpconn);
 	master_service_client_connection_callback(service, &conn);
 }
@@ -177,7 +185,7 @@ static int get_ssl_tlv(const unsigned char *kvdata, size_t dlen,
 	if (dlen < SIZEOF_PP2_TLV_SSL)
 		return -1;
 	kv->client = kvdata[0];
-	/* spec does not specify the endianess of this field */
+	/* spec does not specify the endianness of this field */
 	kv->verify = cpu32_to_cpu_unaligned(kvdata+1);
 	kv->data = kvdata+SIZEOF_PP2_TLV_SSL;
 	kv->len = dlen - SIZEOF_PP2_TLV_SSL;

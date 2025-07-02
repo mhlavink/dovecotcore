@@ -3,6 +3,7 @@
 #include "lib.h"
 #include "buffer.h"
 #include "settings-parser.h"
+#include "master-service-settings.h"
 #include "service-settings.h"
 #include "mail-storage-settings.h"
 #include "imap-urlauth-worker-common.h"
@@ -18,17 +19,13 @@ struct service_settings imap_urlauth_worker_service_settings = {
 	.user = "",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "$default_internal_group",
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
 	.process_limit = 1024,
 	.client_limit = 1,
-	.service_count = 1,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+	.restart_request_count = 1,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -40,7 +37,9 @@ const struct setting_keyvalue imap_urlauth_worker_service_settings_defaults[] = 
 
 	{ "unix_listener/"IMAP_URLAUTH_WORKER_SOCKET"/path", IMAP_URLAUTH_WORKER_SOCKET },
 	{ "unix_listener/"IMAP_URLAUTH_WORKER_SOCKET"/mode", "0600" },
-	{ "unix_listener/"IMAP_URLAUTH_WORKER_SOCKET"/user", "$default_internal_user" },
+	{ "unix_listener/"IMAP_URLAUTH_WORKER_SOCKET"/user", "$SET:default_internal_user" },
+
+	{ "service_extra_groups", "$SET:default_internal_group" },
 
 	{ NULL, NULL }
 };
@@ -59,7 +58,7 @@ static const struct setting_define imap_urlauth_worker_setting_defines[] = {
 };
 
 const struct imap_urlauth_worker_settings imap_urlauth_worker_default_settings = {
-	.verbose_proctitle = FALSE,
+	.verbose_proctitle = VERBOSE_PROCTITLE_DEFAULT,
 
 	.imap_urlauth_host = "",
 	.imap_urlauth_port = 143

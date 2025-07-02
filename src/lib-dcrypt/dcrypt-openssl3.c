@@ -311,9 +311,11 @@ dcrypt_openssl_ctx_sym_set_iv(struct dcrypt_context_symmetric *ctx,
 			      const unsigned char *iv, size_t iv_len)
 {
 	p_free(ctx->pool, ctx->iv);
-	ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
-	memcpy(ctx->iv, iv, I_MIN(iv_len,
-	       (size_t)EVP_CIPHER_iv_length(ctx->cipher)));
+	if (EVP_CIPHER_iv_length(ctx->cipher) > 0) {
+		ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
+		memcpy(ctx->iv, iv, I_MIN(iv_len,
+		       (size_t)EVP_CIPHER_iv_length(ctx->cipher)));
+	}
 }
 
 static void
@@ -323,8 +325,10 @@ dcrypt_openssl_ctx_sym_set_key_iv_random(struct dcrypt_context_symmetric *ctx)
 	p_free(ctx->pool, ctx->iv);
 	ctx->key = p_malloc(ctx->pool, EVP_CIPHER_key_length(ctx->cipher));
 	random_fill(ctx->key, EVP_CIPHER_key_length(ctx->cipher));
-	ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
-	random_fill(ctx->iv, EVP_CIPHER_iv_length(ctx->cipher));
+	if (EVP_CIPHER_iv_length(ctx->cipher) > 0) {
+		ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
+		random_fill(ctx->iv, EVP_CIPHER_iv_length(ctx->cipher));
+	}
 }
 
 static void
@@ -428,11 +432,10 @@ dcrypt_openssl_ctx_sym_init(struct dcrypt_context_symmetric *ctx,
 	int len;
 
 	i_assert(ctx->key != NULL);
-	i_assert(ctx->iv != NULL);
 	i_assert(ctx->ctx == NULL);
 
 	if ((ctx->ctx = EVP_CIPHER_CTX_new()) == NULL)
-		dcrypt_openssl_error(error_r);
+		return dcrypt_openssl_error(error_r);
 
 	ec = EVP_CipherInit_ex(ctx->ctx, ctx->cipher, NULL,
 			       ctx->key, ctx->iv, ctx->mode);
@@ -908,13 +911,6 @@ dcrypt_openssl_ecdh_derive_secret(struct dcrypt_private_key *priv_key,
 {
 	/* initialize */
 	EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(priv_key->key, NULL);
-
-	unsigned int pad = 1;
-	const OSSL_PARAM params[] = {
-		OSSL_PARAM_uint(OSSL_EXCHANGE_PARAM_PAD, &pad),
-		OSSL_PARAM_END,
-	};
-	EVP_PKEY_CTX_set_params(pctx, params);
 
 	if (pctx == NULL ||
 	    EVP_PKEY_derive_init(pctx) != 1 ||
@@ -2683,7 +2679,7 @@ dcrypt_openssl_encrypt_private_key_dovecot(buffer_t *key, int enctype,
 	bool res;
 	unsigned char *ptr;
 
-	unsigned char salt[8];
+	unsigned char salt[DCRYPT_DOVECOT_SALT_LEN];
 	buffer_t *peer_key = t_buffer_create(128);
 	buffer_t *secret = t_buffer_create(128);
 	cipher = t_str_lcase(cipher);

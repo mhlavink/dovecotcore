@@ -11,6 +11,7 @@ struct file_ostream {
 		 unsigned int iov_count, const char **error_r);
 
 	int fd;
+	struct iostream_fd *fd_ref;
 	struct io *io;
 	uoff_t buffer_offset;
 	uoff_t real_offset;
@@ -26,6 +27,7 @@ struct file_ostream {
 	bool no_socket_cork:1;
 	bool no_socket_nodelay:1;
 	bool no_socket_quickack:1;
+	bool no_delay_enabled:1;
 	bool no_sendfile:1;
 	bool autoclose_fd:1;
 };

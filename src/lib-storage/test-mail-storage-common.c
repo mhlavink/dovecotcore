@@ -70,12 +70,12 @@ void test_mail_storage_init_user(struct test_mail_storage_ctx *ctx,
 	home = t_strdup_printf("%s%s", ctx->home_root, username);
 
 	const char *const default_input[] = {
-		t_strdup_printf("mail=%s:~/%s", set->driver,
-				set->driver_opts == NULL ? "" : set->driver_opts),
+		t_strdup_printf("mail_driver=%s", set->driver),
 		"postmaster_address=postmaster@localhost",
-		"namespace=inbox",
+		"namespace+=inbox",
 		"namespace/inbox/prefix=",
 		"namespace/inbox/inbox=yes",
+		t_strdup_printf("mail_path=%s", home),
 		t_strdup_printf("home=%s", home),
 	};
 

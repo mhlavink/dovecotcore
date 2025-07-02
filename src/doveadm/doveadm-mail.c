@@ -151,7 +151,7 @@ cmd_purge_run(struct doveadm_mail_cmd_context *ctx, struct mail_user *user)
 		storage = mail_namespace_get_default_storage(ns);
 		if (mail_storage_purge(storage) < 0) {
 			e_error(ctx->cctx->event,
-				"Purging namespace '%s' failed: %s", ns->prefix,
+				"Purging namespace %s failed: %s", ns->set->name,
 				mail_storage_get_last_internal_error(storage, NULL));
 			doveadm_mail_failed_storage(ctx, storage);
 			ret = -1;
@@ -338,7 +338,7 @@ static int cmd_force_resync_prerun(struct doveadm_mail_cmd_context *ctx ATTR_UNU
 	struct settings_instance *set_instance =
 		mail_storage_service_user_get_settings_instance(service_user);
 	settings_override(set_instance,
-			  "mailbox_list_index_very_dirty_syncs", "no",
+			  "*/mailbox_list_index_very_dirty_syncs", "no",
 			  SETTINGS_OVERRIDE_TYPE_CODE);
 	return 0;
 }
@@ -464,7 +464,7 @@ doveadm_mail_next_user(struct doveadm_mail_cmd_context *ctx,
 	if (ctx->v.prerun != NULL) {
 		T_BEGIN {
 			ret = ctx->v.prerun(ctx, ctx->cur_service_user, error_r);
-		} T_END;
+		} T_END_PASS_STR_IF(ret < 0, error_r);
 		if (ret < 0) {
 			mail_storage_service_user_unref(&ctx->cur_service_user);
 			return -1;
@@ -531,6 +531,11 @@ int doveadm_mail_single_user(struct doveadm_mail_cmd_context *ctx,
 	T_BEGIN {
 		ctx->v.init(ctx);
 	} T_END;
+	if (ctx->exit_code != 0) {
+		/* return success, so caller won't overwrite exit_code */
+		return 1;
+	}
+
 	doveadm_print_header_disallow(TRUE);
 	if (hook_doveadm_mail_init != NULL)
 		hook_doveadm_mail_init(ctx);
@@ -556,6 +561,8 @@ doveadm_mail_all_users(struct doveadm_mail_cmd_context *ctx,
 	T_BEGIN {
 		ctx->v.init(ctx);
 	} T_END;
+	if (ctx->exit_code != 0)
+		return;
 	doveadm_print_header_disallow(TRUE);
 
 	if (wildcard_user != NULL) {
@@ -818,6 +825,19 @@ static struct doveadm_cmd_ver2 *mail_commands_ver2[] = {
 	&doveadm_cmd_mailbox_cache_remove,
 	&doveadm_cmd_mailbox_cache_purge,
 	&doveadm_cmd_rebuild_attachments,
+	&doveadm_cmd_mail_fs_get,
+	&doveadm_cmd_mail_fs_put,
+	&doveadm_cmd_mail_fs_copy,
+	&doveadm_cmd_mail_fs_stat,
+	&doveadm_cmd_mail_fs_metadata,
+	&doveadm_cmd_mail_fs_delete,
+	&doveadm_cmd_mail_fs_iter,
+	&doveadm_cmd_mail_fs_iter_dirs,
+	&doveadm_cmd_mail_dict_get,
+	&doveadm_cmd_mail_dict_set,
+	&doveadm_cmd_mail_dict_unset,
+	&doveadm_cmd_mail_dict_inc,
+	&doveadm_cmd_mail_dict_iter,
 };
 
 void doveadm_mail_init(void)
@@ -839,11 +859,14 @@ void doveadm_mail_init_finish(void)
 	mod_set.binary_name = "doveadm";
 
 	/* load all configured mail plugins */
-	mail_storage_service_modules =
-		module_dir_load_missing(mail_storage_service_modules,
-					doveadm_settings->mail_plugin_dir,
-					doveadm_settings->mail_plugins,
-					&mod_set);
+	if (array_is_created(&doveadm_settings->mail_plugins) &&
+	    array_not_empty(&doveadm_settings->mail_plugins)) {
+		mail_storage_service_modules =
+			module_dir_load_missing(mail_storage_service_modules,
+						doveadm_settings->mail_plugin_dir,
+						settings_boollist_get(&doveadm_settings->mail_plugins),
+						&mod_set);
+	}
 	/* keep mail_storage_init() referenced so that its _deinit() doesn't
 	   try to free doveadm plugins' hooks too early. */
 	mail_storage_init();

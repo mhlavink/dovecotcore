@@ -62,7 +62,7 @@ void command_stats_start(struct client_command_context *cmd);
    needed during command_exec(). */
 void command_stats_flush(struct client_command_context *cmd);
 
-struct command *command_find(const char *name);
+const struct command *command_find(const char *name);
 
 void commands_init(void);
 void commands_deinit(void);
@@ -122,6 +122,9 @@ bool cmd_compress(struct client_command_context *cmd);
 bool cmd_genurlauth(struct client_command_context *cmd);
 bool cmd_resetkey(struct client_command_context *cmd);
 bool cmd_urlfetch(struct client_command_context *cmd);
+
+/* IMAP REPLACE (RFC8508): */
+bool cmd_replace(struct client_command_context *cmd);
 
 /* private: */
 bool cmd_list_full(struct client_command_context *cmd, bool lsub);

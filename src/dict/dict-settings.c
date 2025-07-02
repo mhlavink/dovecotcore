@@ -4,6 +4,7 @@
 #include "buffer.h"
 #include "settings-parser.h"
 #include "service-settings.h"
+#include "master-service-settings.h"
 #include "dict-settings.h"
 
 struct service_settings dict_service_settings = {
@@ -11,20 +12,15 @@ struct service_settings dict_service_settings = {
 	.protocol = "",
 	.type = "",
 	.executable = "dict",
-	.user = "$default_internal_user",
+	.user = "$SET:default_internal_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
-	.process_limit = 0,
 	.client_limit = 1,
-	.service_count = 0,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -36,7 +32,7 @@ const struct setting_keyvalue dict_service_settings_defaults[] = {
 
 	{ "unix_listener/dict/path", "dict" },
 	{ "unix_listener/dict/mode", "0660" },
-	{ "unix_listener/dict/group", "$default_internal_group" },
+	{ "unix_listener/dict/group", "$SET:default_internal_group" },
 
 	{ NULL, NULL }
 };
@@ -46,20 +42,18 @@ struct service_settings dict_async_service_settings = {
 	.protocol = "",
 	.type = "",
 	.executable = "dict",
-	.user = "$default_internal_user",
+	.user = "$SET:default_internal_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
-	.process_limit = 0,
-	.client_limit = 0,
-	.service_count = 0,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+#ifdef DOVECOT_PRO_EDITION
+	/* Cassandra driver can use up a lot of VSZ */
+	.vsz_limit = 2048ULL * 1024 * 1024,
+#endif
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -71,7 +65,7 @@ const struct setting_keyvalue dict_async_service_settings_defaults[] = {
 
 	{ "unix_listener/dict-async/path", "dict-async" },
 	{ "unix_listener/dict-async/mode", "0660" },
-	{ "unix_listener/dict-async/group", "$default_internal_group" },
+	{ "unix_listener/dict-async/group", "$SET:default_internal_group" },
 
 	{ NULL, NULL }
 };
@@ -81,20 +75,16 @@ struct service_settings dict_expire_service_settings = {
 	.protocol = "",
 	.type = "",
 	.executable = "dict-expire",
-	.user = "$default_internal_user",
+	.user = "$SET:default_internal_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
 	.process_limit = 1,
 	.client_limit = 1,
-	.service_count = 0,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -106,18 +96,17 @@ struct service_settings dict_expire_service_settings = {
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct dict_server_settings)
 
 static const struct setting_define dict_setting_defines[] = {
+	{ .type = SET_FILTER_NAME, .key = "dict_server" },
+
 	DEF(STR_HIDDEN, base_dir),
 	DEF(BOOL, verbose_proctitle),
-	{ .type = SET_STRLIST, .key = "dict",
-	  .offset = offsetof(struct dict_server_settings, dicts) },
 
 	SETTING_DEFINE_LIST_END
 };
 
 const struct dict_server_settings dict_default_settings = {
 	.base_dir = PKG_RUNDIR,
-	.verbose_proctitle = FALSE,
-	.dicts = ARRAY_INIT
+	.verbose_proctitle = VERBOSE_PROCTITLE_DEFAULT,
 };
 
 const struct setting_parser_info dict_server_setting_parser_info = {
@@ -130,4 +119,9 @@ const struct setting_parser_info dict_server_setting_parser_info = {
 	.pool_offset1 = 1 + offsetof(struct dict_server_settings, pool),
 };
 
-const struct dict_server_settings *dict_settings;
+const struct dict_server_settings *server_settings;
+const struct dict_settings *dict_settings;
+
+struct event_category dict_server_event_category = {
+	.name = "dict-server",
+};

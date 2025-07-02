@@ -30,14 +30,14 @@
 	((size) < SSIZE_T_MAX ? (size_t)(size) : SSIZE_T_MAX)
 
 static void stream_send_io(struct file_ostream *fstream);
-static struct ostream * o_stream_create_fd_common(int fd,
-		size_t max_buffer_size, bool autoclose_fd);
 
 static void stream_closed(struct file_ostream *fstream)
 {
 	io_remove(&fstream->io);
 
-	if (fstream->autoclose_fd && fstream->fd != -1) {
+	bool refs_left = fstream->fd_ref != NULL &&
+		iostream_fd_unref(&fstream->fd_ref);
+	if (fstream->autoclose_fd && fstream->fd != -1 && !refs_left) {
 		/* Ignore ECONNRESET because we don't really care about it here,
 		   as we are closing the socket down in any case. There might be
 		   unsent data but nothing we can do about that. */
@@ -240,6 +240,19 @@ o_stream_file_writev_full(struct file_ostream *fstream,
 		total_size += iov[i].iov_len;
 
 	o_stream_socket_cork(fstream);
+	if (fstream->no_delay_enabled && !fstream->ostream.corked) {
+		/* TCP_NODELAY is currently set, but stream isn't corked.
+		   Unset TCP_NODELAY to add delays. */
+		if (net_set_tcp_nodelay(fstream->fd, FALSE) < 0) {
+			/* We already successfully enabled TCP_NODELAY, so there
+			   shouldn't really be errors. Except ECONNRESET can
+			   possibly still happen between these two calls, so
+			   again don't log errors. */
+			fstream->no_socket_nodelay = TRUE;
+		}
+		fstream->no_delay_enabled = FALSE;
+	}
+
 	ret = fstream->writev(fstream, iov, iov_count, &error);
 	partial = ret != (ssize_t)total_size;
 
@@ -359,12 +372,8 @@ static void o_stream_tcp_flush_via_nodelay(struct file_ostream *fstream)
 		   Linux: ENOTSUP, ENOTSOCK, ENOPROTOOPT
 		   FreeBSD: EINVAL, ECONNRESET */
 		fstream->no_socket_nodelay = TRUE;
-	} else if (net_set_tcp_nodelay(fstream->fd, FALSE) < 0) {
-		/* We already successfully enabled TCP_NODELAY, so there
-		   shouldn't really be errors. Except ECONNRESET can possibly
-		   still happen between these two calls, so again don't log
-		   errors. */
-		fstream->no_socket_nodelay = TRUE;
+	} else {
+		fstream->no_delay_enabled = TRUE;
 	}
 }
 
@@ -402,10 +411,9 @@ static void o_stream_file_cork(struct ostream_private *stream, bool set)
 				fstream->no_socket_cork = TRUE;
 			fstream->socket_cork_set = FALSE;
 		}
-		if (!set && !fstream->no_socket_nodelay) {
-			/* Uncorking - send all the pending data immediately.
-			   Remove nodelay immediately afterwards, so if any
-			   output is sent outside corking it may get delayed. */
+		if (!set && !fstream->no_socket_nodelay &&
+		    !fstream->no_delay_enabled) {
+			/* Uncorking - send all the pending data immediately. */
 			o_stream_tcp_flush_via_nodelay(fstream);
 		}
 		if (!set && !fstream->no_socket_quickack) {
@@ -1072,15 +1080,19 @@ static void fstream_init_file(struct file_ostream *fstream)
 	}
 }
 
-static
-struct ostream * o_stream_create_fd_common(int fd, size_t max_buffer_size,
-		bool autoclose_fd)
+static struct ostream *
+o_stream_create_fd_common(int fd, struct iostream_fd *ref,
+			  size_t max_buffer_size, bool autoclose_fd)
 {
 	struct file_ostream *fstream;
 	struct ostream *ostream;
 	off_t offset;
 
 	fstream = i_new(struct file_ostream, 1);
+	if (ref != NULL) {
+		fstream->fd_ref = ref;
+		iostream_fd_ref(ref);
+	}
 	ostream = o_stream_create_file_common
 		(fstream, fd, max_buffer_size, autoclose_fd);
 
@@ -1113,16 +1125,22 @@ struct ostream * o_stream_create_fd_common(int fd, size_t max_buffer_size,
 struct ostream *
 o_stream_create_fd(int fd, size_t max_buffer_size)
 {
-	return o_stream_create_fd_common(fd, max_buffer_size, FALSE);
+	return o_stream_create_fd_common(fd, NULL, max_buffer_size, FALSE);
 }
 
 struct ostream *
 o_stream_create_fd_autoclose(int *fd, size_t max_buffer_size)
 {
-	struct ostream *ostream = o_stream_create_fd_common(*fd,
+	struct ostream *ostream = o_stream_create_fd_common(*fd, NULL,
 			max_buffer_size, TRUE);
 	*fd = -1;
 	return ostream;
+}
+
+struct ostream *o_stream_create_fd_ref_autoclose(struct iostream_fd *ref,
+						 size_t max_buffer_size)
+{
+	return o_stream_create_fd_common(ref->fd, ref, max_buffer_size, TRUE);
 }
 
 struct ostream *

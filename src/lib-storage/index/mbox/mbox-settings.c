@@ -10,8 +10,9 @@
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct mbox_settings)
 
 static const struct setting_define mbox_setting_defines[] = {
-	DEF(STR, mbox_read_locks),
-	DEF(STR, mbox_write_locks),
+	{ .type = SET_FILTER_NAME, .key = "mbox" },
+	DEF(BOOLLIST, mbox_read_locks),
+	DEF(BOOLLIST, mbox_write_locks),
 	DEF(TIME, mbox_lock_timeout),
 	DEF(TIME, mbox_dotlock_change_timeout),
 	DEF(SIZE_HIDDEN, mbox_min_index_size),
@@ -24,8 +25,8 @@ static const struct setting_define mbox_setting_defines[] = {
 };
 
 static const struct mbox_settings mbox_default_settings = {
-	.mbox_read_locks = "fcntl",
-	.mbox_write_locks = "dotlock fcntl",
+	.mbox_read_locks = ARRAY_INIT,
+	.mbox_write_locks = ARRAY_INIT,
 	.mbox_lock_timeout = 5*60,
 	.mbox_dotlock_change_timeout = 2*60,
 	.mbox_min_index_size = 0,
@@ -35,11 +36,22 @@ static const struct mbox_settings mbox_default_settings = {
 	.mbox_md5 = "apop3d:all"
 };
 
+static const struct setting_keyvalue mbox_default_settings_keyvalue[] = {
+	{ "mbox/mailbox_subscriptions_filename", ".subscriptions" },
+	{ "mbox/mail_path", "%{home}/mail" },
+	/* Use $mail_path/inbox as the INBOX, not $mail_path/INBOX */
+	{ "mbox/layout_fs/mail_inbox_path", "inbox" },
+	{ "mbox_read_locks", "fcntl" },
+	{ "mbox_write_locks", "dotlock fcntl" },
+	{ NULL, NULL }
+};
+
 const struct setting_parser_info mbox_setting_parser_info = {
 	.name = "mbox",
 
 	.defines = mbox_setting_defines,
 	.defaults = &mbox_default_settings,
+	.default_settings = mbox_default_settings_keyvalue,
 
 	.struct_size = sizeof(struct mbox_settings),
 	.pool_offset1 = 1 + offsetof(struct mbox_settings, pool),

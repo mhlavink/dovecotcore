@@ -436,8 +436,7 @@ static void auth_master_unset_io(struct auth_master_connection *conn)
 	if ((conn->flags & AUTH_MASTER_FLAG_NO_IDLE_TIMEOUT) == 0) {
 		if (conn->prev_ioloop == NULL)
 			auth_connection_close(conn);
-		else {
-			i_assert(conn->to == NULL);
+		else if (conn->to == NULL) {
 			conn->to = timeout_add(1000*AUTH_MASTER_IDLE_SECS,
 					       auth_idle_timeout, conn);
 		}
@@ -529,9 +528,9 @@ void auth_user_info_export(string_t *str, const struct auth_user_info *info)
 {
 	const char *const *fieldp;
 
-	if (info->service != NULL) {
-		str_append(str, "\tservice=");
-		str_append(str, info->service);
+	if (info->protocol != NULL) {
+		str_append(str, "\tprotocol=");
+		str_append(str, info->protocol);
 	}
 	if (info->session_id != NULL) {
 		str_append(str, "\tsession=");
@@ -598,8 +597,8 @@ auth_master_user_event_create(struct auth_master_connection *conn,
 	auth_master_event_create(conn, prefix);
 
 	if (info != NULL) {
-		if (info->service != NULL)
-			event_add_str(conn->event, "service", info->service);
+		if (info->protocol != NULL)
+			event_add_str(conn->event, "protocol", info->protocol);
 		if (info->session_id != NULL)
 			event_add_str(conn->event, "session", info->session_id);
 		if (info->local_name != NULL)
@@ -649,7 +648,7 @@ int auth_master_user_lookup(struct auth_master_connection *conn,
 	struct auth_master_lookup_ctx ctx;
 	string_t *str;
 
-	if (!is_valid_string(user) || !is_valid_string(info->service)) {
+	if (!is_valid_string(user) || !is_valid_string(info->protocol)) {
 		/* non-allowed characters, the user can't exist */
 		*username_r = NULL;
 		*fields_r = NULL;
@@ -764,7 +763,7 @@ int auth_master_pass_lookup(struct auth_master_connection *conn,
 	struct auth_master_lookup_ctx ctx;
 	string_t *str;
 
-	if (!is_valid_string(user) || !is_valid_string(info->service)) {
+	if (!is_valid_string(user) || !is_valid_string(info->protocol)) {
 		/* non-allowed characters, the user can't exist */
 		*fields_r = NULL;
 		return 0;

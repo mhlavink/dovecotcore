@@ -91,6 +91,8 @@ auth_server_input_mech(struct auth_client_connection *conn,
 			mech_desc.flags |= MECH_SEC_FORWARD_SECRECY;
 		else if (strcmp(*args, "mutual-auth") == 0)
 			mech_desc.flags |= MECH_SEC_MUTUAL_AUTH;
+		else if (strcmp(*args, "channel-binding") == 0)
+			mech_desc.flags |= MECH_SEC_CHANNEL_BINDING;
 	}
 	array_push_back(&conn->available_auth_mechs, &mech_desc);
 	return 0;
@@ -408,7 +410,7 @@ auth_client_connection_remove_requests(struct auth_client_connection *conn,
 }
 
 void auth_client_connection_disconnect(struct auth_client_connection *conn,
-				       const char *reason) ATTR_NULL(2)
+				       const char *reason)
 {
 	if (reason == NULL)
 		reason = "Disconnected from auth server, aborting";

@@ -3,9 +3,11 @@
 #include "lib.h"
 #include "buffer.h"
 #include "settings-parser.h"
+#include "master-service-settings.h"
 #include "service-settings.h"
 #include "mail-storage-settings.h"
 #include "pop3-settings.h"
+#include "var-expand.h"
 
 #include <unistd.h>
 
@@ -20,17 +22,17 @@ struct service_settings pop3_service_settings = {
 	.user = "",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "$default_internal_group",
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
 	.process_limit = 1024,
 	.client_limit = 1,
-	.service_count = 1,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+#ifdef DOVECOT_PRO_EDITION
+	.restart_request_count = 1000,
+#else
+	.restart_request_count = 1,
+#endif
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -47,6 +49,8 @@ const struct setting_keyvalue pop3_service_settings_defaults[] = {
 	{ "unix_listener/srv.pop3\\s%{pid}/type", "admin" },
 	{ "unix_listener/srv.pop3\\s%{pid}/mode", "0600" },
 
+	{ "service_extra_groups", "$SET:default_internal_group" },
+
 	{ NULL, NULL }
 };
 
@@ -56,7 +60,7 @@ const struct setting_keyvalue pop3_service_settings_defaults[] = {
 
 static const struct setting_define pop3_setting_defines[] = {
 	DEF(BOOL, verbose_proctitle),
-	DEF(STR_VARS, rawlog_dir),
+	DEF(STR, rawlog_dir),
 
 	DEF(BOOL, pop3_no_flag_updates),
 	DEF(BOOL, pop3_enable_last),
@@ -64,8 +68,8 @@ static const struct setting_define pop3_setting_defines[] = {
 	DEF(BOOL, pop3_save_uidl),
 	DEF(BOOL, pop3_lock_session),
 	DEF(BOOL, pop3_fast_size_lookups),
-	DEF(STR, pop3_client_workarounds),
-	DEF(STR, pop3_logout_format),
+	DEF(BOOLLIST, pop3_client_workarounds),
+	DEF(STR_NOVARS, pop3_logout_format),
 	DEF(ENUM, pop3_uidl_duplicates),
 	DEF(STR, pop3_deleted_flag),
 	DEF(ENUM, pop3_delete_type),
@@ -74,7 +78,7 @@ static const struct setting_define pop3_setting_defines[] = {
 };
 
 static const struct pop3_settings pop3_default_settings = {
-	.verbose_proctitle = FALSE,
+	.verbose_proctitle = VERBOSE_PROCTITLE_DEFAULT,
 	.rawlog_dir = "",
 
 	.pop3_no_flag_updates = FALSE,
@@ -83,11 +87,22 @@ static const struct pop3_settings pop3_default_settings = {
 	.pop3_save_uidl = FALSE,
 	.pop3_lock_session = FALSE,
 	.pop3_fast_size_lookups = FALSE,
-	.pop3_client_workarounds = "",
-	.pop3_logout_format = "top=%t/%p, retr=%r/%b, del=%d/%m, size=%s",
+	.pop3_client_workarounds = ARRAY_INIT,
+	.pop3_logout_format =
+		"top=%{top_count}/%{top_bytes}, "
+		"retr=%{retr_count}/%{retr_bytes}, "
+		"del=%{deleted_count}/%{deleted_bytes}, "
+		"size=%{message_bytes}",
 	.pop3_uidl_duplicates = "allow:rename",
 	.pop3_deleted_flag = "",
 	.pop3_delete_type = "default:expunge:flag"
+};
+
+static const struct setting_keyvalue pop3_default_settings_keyvalue[] = {
+#ifdef DOVECOT_PRO_EDITION
+	{ "service/pop3/process_shutdown_filter", "event=mail_user_session_finished AND rss > 20MB" },
+#endif
+	{ NULL, NULL },
 };
 
 const struct setting_parser_info pop3_setting_parser_info = {
@@ -95,6 +110,7 @@ const struct setting_parser_info pop3_setting_parser_info = {
 
 	.defines = pop3_setting_defines,
 	.defaults = &pop3_default_settings,
+	.default_settings = pop3_default_settings_keyvalue,
 
 	.struct_size = sizeof(struct pop3_settings),
 	.pool_offset1 = 1 + offsetof(struct pop3_settings, pool),
@@ -117,11 +133,11 @@ static int
 pop3_settings_parse_workarounds(struct pop3_settings *set,
 				const char **error_r)
 {
-        enum pop3_client_workarounds client_workarounds = 0;
+	enum pop3_client_workarounds client_workarounds = 0;
 	const struct pop3_client_workaround_list *list;
 	const char *const *str;
 
-        str = t_strsplit_spaces(set->pop3_client_workarounds, " ,");
+	str = settings_boollist_get(&set->pop3_client_workarounds);
 	for (; *str != NULL; str++) {
 		list = pop3_client_workaround_list;
 		for (; list->name != NULL; list++) {
@@ -165,6 +181,17 @@ pop3_settings_verify(void *_set, pool_t pool ATTR_UNUSED, const char **error_r)
 					   set->pop3_delete_type);
 		return FALSE;
 	}
+
+	struct var_expand_program *prog;
+	const char *error;
+	if (var_expand_program_create(set->pop3_logout_format, &prog, &error) < 0) {
+		*error_r = t_strdup_printf("Invalid pop3_logout_format: %s", error);
+		return FALSE;
+	}
+	const char *const *vars = var_expand_program_variables(prog);
+	set->parsed_want_uidl_change = str_array_find(vars, "uidl_change");
+	var_expand_program_free(&prog);
+
 	return TRUE;
 }
 /* </settings checks> */

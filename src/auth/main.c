@@ -13,7 +13,6 @@
 #include "randgen.h"
 #include "process-title.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "master-interface.h"
@@ -32,6 +31,7 @@
 #include "auth-master-connection.h"
 #include "auth-client-connection.h"
 #include "auth-policy.h"
+#include "db-oauth2.h"
 
 #include <unistd.h>
 #include <sys/stat.h>
@@ -40,6 +40,7 @@
 
 enum auth_socket_type {
 	AUTH_SOCKET_AUTH,
+	AUTH_SOCKET_AUTH_LEGACY,
 	AUTH_SOCKET_LOGIN,
 	AUTH_SOCKET_MASTER,
 	AUTH_SOCKET_USERDB,
@@ -56,6 +57,7 @@ struct auth_socket_listener {
 
 static const char *const auth_socket_type_names[] = {
 	"auth",
+	"auth-legacy",
 	"login",
 	"master",
 	"userdb",
@@ -92,9 +94,9 @@ static const char *const *read_global_settings(void)
 
 	auth_settings_read(&set_output);
 	global_auth_settings = auth_settings_get(NULL);
-	if (set_output.specific_services == NULL)
+	if (set_output.specific_protocols == NULL)
 		return t_new(const char *, 1);
-	return set_output.specific_services;
+	return set_output.specific_protocols;
 }
 
 static enum auth_socket_type auth_socket_type_get(const char *typename)
@@ -150,20 +152,19 @@ static bool auth_module_filter(const char *name, void *context ATTR_UNUSED)
 static void main_preinit(void)
 {
 	struct module_dir_load_settings mod_set;
-	const char *const *services;
+	const char *const *protocols;
 
 	/* Load built-in SQL drivers (if any) */
 	sql_drivers_init();
-	sql_drivers_register_all();
 
 	/* Initialize databases so their configuration files can be readable
 	   only by root. Also load all modules here. */
 	passdbs_init();
 	userdbs_init();
 	/* init schemes before plugins are loaded */
-	password_schemes_init();
+	password_schemes_register_all();
 
-	services = read_global_settings();
+	protocols = read_global_settings();
 
 	i_zero(&mod_set);
 	mod_set.abi_version = DOVECOT_ABI_VERSION;
@@ -176,10 +177,11 @@ static void main_preinit(void)
 
 	if (!worker)
 		auth_penalty = auth_penalty_init(AUTH_PENALTY_ANVIL_PATH);
+
+	dict_drivers_register_builtin();
 	mech_init(global_auth_settings);
 	mech_reg = mech_register_init(global_auth_settings);
-	dict_drivers_register_builtin();
-	auths_preinit(global_auth_settings, mech_reg, services);
+	auths_preinit(NULL, global_auth_settings, mech_reg, protocols);
 
 	listeners_init();
 	if (!worker)
@@ -190,8 +192,9 @@ static void main_preinit(void)
 	restrict_access_allow_coredumps(TRUE);
 }
 
-void auth_module_load(const char *names)
+void auth_module_load(const char *name)
 {
+	const char *names[] = { name, NULL };
 	struct module_dir_load_settings mod_set;
 
 	i_zero(&mod_set);
@@ -230,10 +233,10 @@ static void main_init(void)
 		/* workers have only a single connection from the master
 		   auth process */
 		master_service_set_client_limit(master_service, 1);
-		auth_worker_set_max_service_count(
-			master_service_get_service_count(master_service));
+		auth_worker_set_max_restart_request_count(
+			master_service_get_restart_request_count(master_service));
 		/* make sure this process cycles if auth connection drops */
-		master_service_set_service_count(master_service, 1);
+		master_service_set_restart_request_count(master_service, 1);
 	} else {
 		/* caching is handled only by the main auth process */
 		passdb_cache_init(global_auth_settings);
@@ -246,6 +249,7 @@ static void main_deinit(void)
 {
 	struct auth_socket_listener *l;
 
+	shutting_down = TRUE;
 	if (auth_penalty != NULL) {
 		/* cancel all pending anvil penalty lookups */
 		auth_penalty_deinit(&auth_penalty);
@@ -269,6 +273,7 @@ static void main_deinit(void)
 	auth_policy_deinit();
 	mech_register_deinit(&mech_reg);
 	mech_otp_deinit();
+	db_oauth2_deinit();
 	mech_deinit(global_auth_settings);
 	settings_free(global_auth_settings);
 
@@ -298,7 +303,7 @@ static void worker_connected(struct master_service_connection *conn)
 	}
 
 	master_service_client_connection_accept(conn);
-	(void)auth_worker_server_create(auth_default_service(), conn);
+	(void)auth_worker_server_create(auth_default_protocol(), conn);
 }
 
 static void client_connected(struct master_service_connection *conn)
@@ -312,7 +317,7 @@ static void client_connected(struct master_service_connection *conn)
 		l->path = i_strdup(conn->name);
 
 	type = master_service_connection_get_type(conn);
-	auth = auth_default_service();
+	auth = auth_default_protocol();
 	switch (auth_socket_type_get(type)) {
 	case AUTH_SOCKET_MASTER:
 		(void)auth_master_connection_create(auth, conn->fd,
@@ -324,19 +329,23 @@ static void client_connected(struct master_service_connection *conn)
 		break;
 	case AUTH_SOCKET_LOGIN:
 		auth_client_connection_create(auth, conn->fd, conn->name,
-					      TRUE, FALSE);
+					      AUTH_CLIENT_CONNECTION_FLAG_LOGIN_REQUESTS);
 		break;
 	case AUTH_SOCKET_AUTH:
+		auth_client_connection_create(auth, conn->fd, conn->name, 0);
+		break;
+	case AUTH_SOCKET_AUTH_LEGACY:
 		auth_client_connection_create(auth, conn->fd, conn->name,
-					      FALSE, FALSE);
+			AUTH_CLIENT_CONNECTION_FLAG_LEGACY);
 		break;
 	case AUTH_SOCKET_TOKEN_LOGIN:
 		auth_client_connection_create(auth, conn->fd, conn->name,
-					      TRUE, TRUE);
+			AUTH_CLIENT_CONNECTION_FLAG_LOGIN_REQUESTS |
+			AUTH_CLIENT_CONNECTION_FLAG_TOKEN_AUTH);
 		break;
 	case AUTH_SOCKET_TOKEN:
 		auth_client_connection_create(auth, conn->fd, conn->name,
-					      FALSE, TRUE);
+			AUTH_CLIENT_CONNECTION_FLAG_TOKEN_AUTH);
 		break;
 	default:
 		i_unreached();

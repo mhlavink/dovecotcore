@@ -196,9 +196,9 @@ oauth2_request_set_headers(struct oauth2_request *req,
 {
 	if (!req->set->send_auth_headers)
 		return;
-	if (input->service != NULL) {
+	if (input->protocol != NULL) {
 		http_client_request_add_header(
-			req->req, "X-Dovecot-Auth-Service", input->service);
+			req->req, "X-Dovecot-Auth-Protocol", input->protocol);
 	}
 	if (input->local_ip.family != 0) {
 		http_client_request_add_header(
@@ -265,8 +265,6 @@ oauth2_request_start(const struct oauth2_settings *set,
 					       t_strdup_printf("Bearer %s",
 							       input->token));
 	}
-	http_client_request_set_timeout_msecs(req->req,
-					      req->set->timeout_msecs);
 	http_client_request_submit(req->req);
 
 	return req;
@@ -417,6 +415,9 @@ void oauth2_request_abort(struct oauth2_request **_req)
 {
 	struct oauth2_request *req = *_req;
 	*_req = NULL;
+
+	if (req == NULL)
+		return;
 
 	http_client_request_abort(&req->req);
 	oauth2_request_free(req);

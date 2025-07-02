@@ -10,6 +10,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib-ldap \
 	-I$(top_srcdir)/src/lib-sql \
 	-I$(top_srcdir)/src/lib-settings \
+	-I$(top_srcdir)/src/lib-var-expand \
 	$(SQL_CFLAGS)
 
 NOPLUGIN_LDFLAGS =
@@ -28,6 +29,9 @@ libdict_backend_la_LIBADD =
 BUILT_SOURCES = \
 	dict-drivers-register.c
 
+DISTCLEANFILES = \
+	dict-drivers-register.c
+
 nodist_libdict_backend_la_SOURCES = \
 	dict-drivers-register.c
 
@@ -42,19 +46,17 @@ LIBDICT_LDAP = libdict_ldap.la
 libdict_ldap_la_DEPENDENCIES = $(LIBDOVECOT_LDAP) $(LIBDOVECOT_DEPS)
 libdict_ldap_la_LDFLAGS = -module -avoid-version
 libdict_ldap_la_LIBADD = $(LIBDOVECOT_LDAP) $(LIBDOVECOT)
-libdict_ldap_la_CPPFLAGS = $(AM_CPPFLAGS) -DPLUGIN_BUILD
+libdict_ldap_la_CFLAGS = $(AM_CFLAGS) -DPLUGIN_BUILD
 libdict_ldap_la_SOURCES = $(ldap_sources)
 else
 if HAVE_LDAP
-libdict_backend_la_LIBADD += $(LIBDOVECOT_LDAP)
+libdict_backend_la_LIBADD += ../lib-ldap/libdldap.la
 dict_drivers += ldap
 endif
 endif
 
 module_dict_LTLIBRARIES = \
 	$(LIBDICT_LDAP)
-
-EXTRA_DIST = dict.conf
 
 dict-drivers-register.c: Makefile $(top_builddir)/config.h
 	$(AM_V_GEN)rm -f $@; \
@@ -95,7 +97,7 @@ test_programs = \
 
 noinst_PROGRAMS = $(test_programs)
 
-test_dict_sql_CFLAGS = $(AM_CPPFLAGS) -DDICT_SRC_DIR=\"$(top_srcdir)/src/lib-dict-backend\"
+test_dict_sql_CFLAGS = $(AM_CFLAGS) -DDICT_SRC_DIR=\"$(top_srcdir)/src/lib-dict-backend\"
 test_dict_sql_SOURCES = \
 	test-dict-sql.c
 test_dict_sql_LDADD = \

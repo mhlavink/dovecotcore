@@ -5,6 +5,8 @@
 	"name hostname timestamps categories fields"
 
 /* <settings checks> */
+#define STATS_SERVER_FILTER "stats_server"
+
 /*
  * We allow a selection of a timestamp format.
  *
@@ -64,14 +66,34 @@ struct stats_exporter_settings {
 	pool_t pool;
 
 	const char *name;
-	const char *transport;
-	const char *transport_args;
-	unsigned int transport_timeout;
+	const char *driver;
 	const char *format;
-	const char *format_args;
+	const char *time_format;
 
 	/* parsed values */
 	enum event_exporter_time_fmt parsed_time_format;
+};
+
+struct stats_metric_group_by_settings {
+	pool_t pool;
+	const char *field;
+	ARRAY_TYPE(const_string) method;
+};
+
+struct stats_metric_group_by_method_settings {
+	pool_t pool;
+
+	const char *method;
+
+	const char *discrete_modifier;
+
+	unsigned int exponential_min_magnitude;
+	unsigned int exponential_max_magnitude;
+	unsigned int exponential_base;
+
+	uintmax_t linear_min;
+	uintmax_t linear_max;
+	uintmax_t linear_step;
 };
 
 /* <settings checks> */
@@ -98,6 +120,8 @@ struct stats_metric_settings_group_by {
 	unsigned int num_ranges;
 	struct stats_metric_settings_bucket_range *ranges;
 };
+ARRAY_DEFINE_TYPE(stats_metric_settings_group_by,
+		  struct stats_metric_settings_group_by);
 /* </settings checks> */
 
 struct stats_metric_settings {
@@ -105,21 +129,19 @@ struct stats_metric_settings {
 
 	const char *name;
 	const char *description;
-	const char *fields;
-	const char *group_by;
+	ARRAY_TYPE(const_string) fields;
+	ARRAY_TYPE(const_string) group_by;
 	const char *filter;
 
-	ARRAY(struct stats_metric_settings_group_by) parsed_group_by;
 	struct event_filter *parsed_filter;
 
 	/* exporter related fields */
 	const char *exporter;
-	const char *exporter_include;
+	ARRAY_TYPE(const_string) exporter_include;
 };
 
 struct stats_settings {
 	pool_t pool;
-	const char *stats_http_rawlog_dir;
 
 	ARRAY_TYPE(const_string) exporters;
 	ARRAY_TYPE(const_string) metrics;
@@ -127,6 +149,20 @@ struct stats_settings {
 
 extern const struct setting_parser_info stats_setting_parser_info;
 extern const struct setting_parser_info stats_metric_setting_parser_info;
+extern const struct setting_parser_info stats_metric_group_by_setting_parser_info;
+extern const struct setting_parser_info stats_metric_group_by_method_setting_parser_info;
 extern const struct setting_parser_info stats_exporter_setting_parser_info;
+
+extern const struct stats_metric_settings stats_metric_default_settings;
+
+bool parse_legacy_metric_group_by(pool_t pool, const char *group_by_str,
+				  ARRAY_TYPE(stats_metric_settings_group_by) *group_by_r,
+				  const char **error_r);
+void metrics_group_by_exponential_init(struct stats_metric_settings_group_by *group_by,
+				       pool_t pool, unsigned int base,
+				       unsigned int min, unsigned int max);
+void metrics_group_by_linear_init(struct stats_metric_settings_group_by *group_by,
+				  pool_t pool, uint64_t min, uint64_t max,
+				  uint64_t step);
 
 #endif

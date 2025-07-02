@@ -16,8 +16,8 @@
 #include "str.h"
 #include "strescape.h"
 #include "time-util.h"
+#include "settings.h"
 #include "master-service.h"
-#include "master-service-ssl-settings.h"
 #include "client-common.h"
 #include "login-proxy-state.h"
 #include "login-proxy.h"
@@ -847,8 +847,9 @@ bool login_proxy_failed(struct login_proxy *proxy, struct event *event,
 
 	if (try_reconnect && proxy_try_reconnect(proxy)) {
 		event_add_int(event, "reconnect_attempts", proxy->reconnect_count);
-		e_debug(event, "%s%s - reconnecting (attempt #%d)",
-			log_prefix, reason, proxy->reconnect_count);
+		event_set_name(event, "proxy_session_reconnecting");
+		e_warning(event, "%s%s - reconnecting (attempt #%d)",
+			  log_prefix, reason, proxy->reconnect_count);
 		proxy->failure_callback(proxy->client, type, reason, TRUE);
 		return TRUE;
 	}
@@ -1197,31 +1198,20 @@ void login_proxy_detach(struct login_proxy *proxy)
 
 int login_proxy_starttls(struct login_proxy *proxy)
 {
-	struct ssl_iostream_context *ssl_ctx;
-	struct ssl_iostream_settings ssl_set;
 	const char *error;
 	bool add_multiplex_istream = FALSE;
 
-	master_service_ssl_client_settings_to_iostream_set(
-		proxy->client->ssl_set, pool_datastack_create(), &ssl_set);
-	if ((proxy->ssl_flags & AUTH_PROXY_SSL_FLAG_ANY_CERT) != 0)
-		ssl_set.allow_invalid_cert = TRUE;
 	/* NOTE: We're explicitly disabling ssl_client_ca_* settings for now
 	   at least. The main problem is that we're chrooted, so we can't read
 	   them at this point anyway. The second problem is that especially
 	   ssl_client_ca_dir does blocking disk I/O, which could cause
 	   unexpected hangs when login process handles multiple clients. */
-	ssl_set.ca_file = ssl_set.ca_dir = NULL;
+	enum ssl_iostream_flags ssl_flags = SSL_IOSTREAM_FLAG_DISABLE_CA_FILES;
+	if ((proxy->ssl_flags & AUTH_PROXY_SSL_FLAG_ANY_CERT) != 0)
+		ssl_flags |= SSL_IOSTREAM_FLAG_ALLOW_INVALID_CERT;
 
 	io_remove(&proxy->side_channel_io);
 	io_remove(&proxy->server_io);
-	if (ssl_iostream_client_context_cache_get(&ssl_set, &ssl_ctx, &error) < 0) {
-		const char *reason = t_strdup_printf(
-			"Failed to create SSL client context: %s", error);
-		login_proxy_failed(proxy, proxy->event,
-				   LOGIN_PROXY_FAILURE_TYPE_INTERNAL, reason);
-		return -1;
-	}
 
 	if (proxy->multiplex_orig_input != NULL) {
 		/* restart multiplexing after TLS iostreams are set up */
@@ -1233,21 +1223,24 @@ int login_proxy_starttls(struct login_proxy *proxy)
 		proxy->multiplex_orig_input = NULL;
 		add_multiplex_istream = TRUE;
 	}
-
-	if (io_stream_create_ssl_client(ssl_ctx, proxy->host, &ssl_set,
-					proxy->event,
-					&proxy->server_input,
-					&proxy->server_output,
-					&proxy->server_ssl_iostream,
-					&error) < 0) {
+	const struct ssl_iostream_client_autocreate_parameters parameters = {
+		.event_parent = proxy->event,
+		.host = proxy->host,
+		.flags = ssl_flags,
+		.application_protocols = login_binary->application_protocols,
+	};
+	if (io_stream_autocreate_ssl_client(&parameters,
+					    &proxy->server_input,
+					    &proxy->server_output,
+					    &proxy->server_ssl_iostream,
+					    &error) < 0) {
 		const char *reason = t_strdup_printf(
 			"Failed to create SSL client: %s", error);
 		login_proxy_failed(proxy, proxy->event,
 				   LOGIN_PROXY_FAILURE_TYPE_INTERNAL, reason);
-		ssl_iostream_context_unref(&ssl_ctx);
 		return -1;
 	}
-	ssl_iostream_context_unref(&ssl_ctx);
+
 	if (ssl_iostream_handshake(proxy->server_ssl_iostream) < 0) {
 		error = ssl_iostream_get_last_error(proxy->server_ssl_iostream);
 		const char *reason = t_strdup_printf(

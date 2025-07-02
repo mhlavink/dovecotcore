@@ -1,6 +1,8 @@
 /* Copyright (c) 2009-2018 Dovecot authors, see the included COPYING file */
 
 #include "lib.h"
+#include "buffer.h"
+#include "hex-binary.h"
 #include "istream-private.h"
 #include "ostream-private.h"
 #include "iostream-openssl.h"
@@ -24,7 +26,9 @@ static struct event_category event_category_ssl_server = {
 
 static void openssl_iostream_free(struct ssl_iostream *ssl_io);
 
-void openssl_iostream_set_error(struct ssl_iostream *ssl_io, const char *str)
+static void
+openssl_iostream_set_error_full(struct ssl_iostream *ssl_io,
+				const char *str, bool fallback_error)
 {
 	char *new_str;
 
@@ -39,6 +43,12 @@ void openssl_iostream_set_error(struct ssl_iostream *ssl_io, const char *str)
 	e_debug(ssl_io->event, "SSL error: %s", new_str);
 	i_free(ssl_io->last_error);
 	ssl_io->last_error = new_str;
+	ssl_io->last_error_is_fallback = fallback_error;
+}
+
+void openssl_iostream_set_error(struct ssl_iostream *ssl_io, const char *str)
+{
+	openssl_iostream_set_error_full(ssl_io, str, FALSE);
 }
 
 static void openssl_info_callback(const SSL *ssl, int where, int ret)
@@ -70,58 +80,6 @@ static void openssl_info_callback(const SSL *ssl, int where, int ret)
 }
 
 static int
-openssl_iostream_use_certificate(struct ssl_iostream *ssl_io, const char *cert,
-				 const char **error_r)
-{
-	BIO *in;
-	X509 *x;
-	int ret = 0;
-
-	in = BIO_new_mem_buf(t_strdup_noconst(cert), strlen(cert));
-	if (in == NULL) {
-		*error_r = t_strdup_printf("BIO_new_mem_buf() failed: %s",
-					   openssl_iostream_error());
-		return -1;
-	}
-
-	x = PEM_read_bio_X509(in, NULL, NULL, NULL);
-	if (x != NULL) {
-		ret = SSL_use_certificate(ssl_io->ssl, x);
-		if (ERR_peek_error() != 0)
-			ret = 0;
-		X509_free(x);
-	}
-	BIO_free(in);
-
-	if (ret == 0) {
-		*error_r = t_strdup_printf("Can't load ssl_cert: %s",
-			openssl_iostream_use_certificate_error(cert, NULL));
-		return -1;
-	}
-	return 0;
-}
-
-static int
-openssl_iostream_use_key(struct ssl_iostream *ssl_io, const char *set_name,
-			 const struct ssl_iostream_cert *set,
-			 const char **error_r)
-{
-	EVP_PKEY *pkey;
-	int ret = 0;
-
-	if (openssl_iostream_load_key(set, set_name, &pkey, error_r) < 0)
-		return -1;
-	if (SSL_use_PrivateKey(ssl_io->ssl, pkey) != 1) {
-		*error_r = t_strdup_printf(
-			"Can't load SSL private key (%s setting): %s",
-			set_name, openssl_iostream_key_load_error());
-		ret = -1;
-	}
-	EVP_PKEY_free(pkey);
-	return ret;
-}
-
-static int
 openssl_iostream_verify_client_cert(int preverify_ok, X509_STORE_CTX *ctx)
 {
 	int ssl_extidx = SSL_get_ex_data_X509_STORE_CTX_idx();
@@ -146,11 +104,9 @@ openssl_iostream_verify_client_cert(int preverify_ok, X509_STORE_CTX *ctx)
 			X509_verify_cert_error_string(X509_STORE_CTX_get_error(ctx)), certname,
 			ssl_io->ctx->client_ctx ?
 				"ssl_client_ca_* settings?" :
-				"ssl_ca setting?"));
-		if (ssl_io->verbose_invalid_cert)
-			e_warning(ssl_io->event, "%s", ssl_io->last_error);
+				"ssl_server_ca_file setting?"));
 	} else {
-		e_info(ssl_io->event, "Received valid SSL certificate: %s", certname);
+		e_debug(ssl_io->event, "Received valid SSL certificate: %s", certname);
 	}
 	if (preverify_ok == 0) {
 		ssl_io->cert_broken = TRUE;
@@ -162,76 +118,14 @@ openssl_iostream_verify_client_cert(int preverify_ok, X509_STORE_CTX *ctx)
 	return 1;
 }
 
-static int
-openssl_iostream_set(struct ssl_iostream *ssl_io,
-		     const struct ssl_iostream_settings *set,
-		     const char **error_r)
+static void
+openssl_iostream_set(struct ssl_iostream *ssl_io)
 {
-	const struct ssl_iostream_settings *ctx_set = &ssl_io->ctx->set;
 	int verify_flags;
 
 	SSL_set_info_callback(ssl_io->ssl, openssl_info_callback);
 
-       if (set->cipher_list != NULL &&
-	    strcmp(ctx_set->cipher_list, set->cipher_list) != 0) {
-		if (SSL_set_cipher_list(ssl_io->ssl, set->cipher_list) == 0) {
-			*error_r = t_strdup_printf(
-				"Can't set cipher list to '%s': %s",
-				set->cipher_list, openssl_iostream_error());
-			return -1;
-		}
-	}
-	if (set->curve_list != NULL && strlen(set->curve_list) > 0 &&
-		(ctx_set->curve_list == NULL || strcmp(ctx_set->curve_list, set->curve_list) != 0)) {
-		if (SSL_set1_curves_list(ssl_io->ssl, set->curve_list) == 0) {
-			*error_r = t_strdup_printf(
-					"Failed to set curve list to '%s'",
-					set->curve_list);
-			return -1;
-		}
-	}
-        if (set->ciphersuites != NULL &&
-	    strcmp(ctx_set->ciphersuites, set->ciphersuites) != 0) {
-		if (SSL_set_ciphersuites(ssl_io->ssl, set->ciphersuites) == 0) {
-			*error_r = t_strdup_printf(
-				"Can't set ciphersuites to '%s': %s",
-				set->ciphersuites, openssl_iostream_error());
-			return -1;
-		}
-	}
-	if (set->prefer_server_ciphers)
-		SSL_set_options(ssl_io->ssl, SSL_OP_CIPHER_SERVER_PREFERENCE);
-	if (set->min_protocol != NULL) {
-		SSL_clear_options(ssl_io->ssl, OPENSSL_ALL_PROTOCOL_OPTIONS);
-		long opts;
-		int min_protocol;
-		if (openssl_min_protocol_to_options(set->min_protocol, &opts,
-						    &min_protocol) < 0) {
-			*error_r = t_strdup_printf(
-					"Unknown ssl_min_protocol setting '%s'",
-					set->min_protocol);
-			return -1;
-		}
-		SSL_set_min_proto_version(ssl_io->ssl, min_protocol);
-	}
-
-	if (set->cert.cert != NULL && strcmp(ctx_set->cert.cert, set->cert.cert) != 0) {
-		if (openssl_iostream_use_certificate(ssl_io, set->cert.cert, error_r) < 0)
-			return -1;
-	}
-	if (set->cert.key != NULL && strcmp(ctx_set->cert.key, set->cert.key) != 0) {
-		if (openssl_iostream_use_key(ssl_io, "ssl_key", &set->cert, error_r) < 0)
-			return -1;
-	}
-	if (set->alt_cert.cert != NULL && strcmp(ctx_set->alt_cert.cert, set->alt_cert.cert) != 0) {
-		if (openssl_iostream_use_certificate(ssl_io, set->alt_cert.cert, error_r) < 0)
-			return -1;
-	}
-	if (set->alt_cert.key != NULL && strcmp(ctx_set->alt_cert.key, set->alt_cert.key) != 0) {
-		if (openssl_iostream_use_key(ssl_io, "ssl_alt_key", &set->alt_cert, error_r) < 0)
-			return -1;
-	}
-	if (set->verify_remote_cert) {
+	if (ssl_io->ctx->verify_remote_cert) {
 		if (ssl_io->ctx->client_ctx)
 			verify_flags = SSL_VERIFY_NONE;
 		else
@@ -239,34 +133,13 @@ openssl_iostream_set(struct ssl_iostream *ssl_io,
 		SSL_set_verify(ssl_io->ssl, verify_flags,
 			       openssl_iostream_verify_client_cert);
 	}
-
-	if (set->cert_username_field != NULL) {
-		ssl_io->username_nid = OBJ_txt2nid(set->cert_username_field);
-		if (ssl_io->username_nid == NID_undef) {
-			*error_r = t_strdup_printf(
-				"Invalid cert_username_field: %s",
-				set->cert_username_field);
-			return -1;
-		}
-	} else {
-		ssl_io->username_nid = ssl_io->ctx->username_nid;
-	}
-
-	if (set->verbose)
-		event_set_forced_debug(ssl_io->event, TRUE);
-	else
-		event_set_min_log_level(ssl_io->event, LOG_TYPE_WARNING);
-	ssl_io->verbose_invalid_cert =
-		set->verbose_invalid_cert ||
-		event_want_debug(ssl_io->event);
-	ssl_io->allow_invalid_cert = set->allow_invalid_cert;
-	return 0;
 }
 
 static int
 openssl_iostream_create(struct ssl_iostream_context *ctx,
 			struct event *event_parent, const char *host,
-			const struct ssl_iostream_settings *set, bool client,
+			bool client,
+			enum ssl_iostream_flags flags,
 			struct istream **input, struct ostream **output,
 			struct ssl_iostream **iostream_r,
 			const char **error_r)
@@ -308,6 +181,8 @@ openssl_iostream_create(struct ssl_iostream_context *ctx,
 	ssl_io->plain_output = *output;
 	ssl_io->connected_host = i_strdup(host);
 	ssl_io->event = event_create(event_parent);
+	ssl_io->allow_invalid_cert = ctx->allow_invalid_cert ||
+		(flags & SSL_IOSTREAM_FLAG_ALLOW_INVALID_CERT) != 0;
 	if (client)
 		event_add_category(ssl_io->event, &event_category_ssl_client);
 	else
@@ -321,10 +196,7 @@ openssl_iostream_create(struct ssl_iostream_context *ctx,
         SSL_set_ex_data(ssl_io->ssl, dovecot_ssl_extdata_index, ssl_io);
 	SSL_set_tlsext_host_name(ssl_io->ssl, host);
 
-	if (openssl_iostream_set(ssl_io, set, error_r) < 0) {
-		openssl_iostream_free(ssl_io);
-		return -1;
-	}
+	openssl_iostream_set(ssl_io);
 
 	o_stream_uncork(ssl_io->plain_output);
 
@@ -352,6 +224,8 @@ static void openssl_iostream_free(struct ssl_iostream *ssl_io)
 	i_stream_unref(&ssl_io->plain_input);
 	BIO_free(ssl_io->bio_ext);
 	SSL_free(ssl_io->ssl);
+	i_free(ssl_io->cert_fp);
+	i_free(ssl_io->pubkey_fp);
 	i_free(ssl_io->ja3_str);
 	i_free(ssl_io->plain_stream_errstr);
 	i_free(ssl_io->last_error);
@@ -611,6 +485,7 @@ int openssl_iostream_handle_error(struct ssl_iostream *ssl_io, int ret,
 				  const char *func_name)
 {
 	const char *errstr = NULL;
+	bool fallback_error = FALSE;
 	int err;
 
 	err = SSL_get_error(ssl_io->ssl, ret);
@@ -652,10 +527,12 @@ int openssl_iostream_handle_error(struct ssl_iostream *ssl_io, int ret,
 			break;
 		} else if (errno != 0) {
 			errstr = strerror(errno);
+			fallback_error = TRUE;
 		} else {
 			/* Seen this at least with v1.1.0l SSL_accept() */
 			errstr = "OpenSSL BUG: errno=0";
 			errno = EINVAL;
+			fallback_error = TRUE;
 		}
 		errstr = t_strdup_printf("%s syscall failed: %s",
 					 func_name, errstr);
@@ -683,9 +560,15 @@ int openssl_iostream_handle_error(struct ssl_iostream *ssl_io, int ret,
 		break;
 	}
 
-	if (ssl_io->last_error != NULL)
+	if (ssl_io->last_error != NULL && !ssl_io->last_error_is_fallback) {
+		if (fallback_error) {
+			/* We already have an error, and this new one doesn't
+			   provide anything useful over it. Ignore it. */
+			return -1;
+		}
 		errstr = t_strdup_printf("%s+%s", errstr, ssl_io->last_error);
-	openssl_iostream_set_error(ssl_io, errstr);
+	}
+	openssl_iostream_set_error_full(ssl_io, errstr, fallback_error);
 	return -1;
 }
 
@@ -756,6 +639,9 @@ static int openssl_iostream_handshake(struct ssl_iostream *ssl_io)
 	i_free_and_null(ssl_io->last_error);
 	ssl_io->handshaked = TRUE;
 
+	const char *alpn_proto = ssl_iostream_get_application_protocol(ssl_io);
+	if (alpn_proto != NULL && *alpn_proto != '\0')
+		e_debug(ssl_io->event, "SSL: Chosen application protocol %s", alpn_proto);
 	if (ssl_io->ssl_output != NULL)
 		(void)o_stream_flush(ssl_io->ssl_output);
 	return 1;
@@ -815,13 +701,19 @@ openssl_iostream_has_valid_client_cert(const struct ssl_iostream *ssl_io)
 }
 
 static bool
-openssl_iostream_has_broken_client_cert(struct ssl_iostream *ssl_io)
+openssl_iostream_has_client_cert(struct ssl_iostream *ssl_io)
 {
-	return ssl_io->cert_received && ssl_io->cert_broken;
+	return ssl_io->cert_received;
+}
+
+static bool
+openssl_iostream_get_allow_invalid_cert(struct ssl_iostream *ssl_io)
+{
+	return ssl_io->allow_invalid_cert;
 }
 
 static const char *
-openssl_iostream_get_peer_name(struct ssl_iostream *ssl_io)
+openssl_iostream_get_peer_username(struct ssl_iostream *ssl_io)
 {
 	X509 *x509;
 	char *name;
@@ -838,13 +730,13 @@ openssl_iostream_get_peer_name(struct ssl_iostream *ssl_io)
 	i_assert(x509 != NULL);
 
 	len = X509_NAME_get_text_by_NID(X509_get_subject_name(x509),
-					ssl_io->username_nid, NULL, 0);
+					ssl_io->ctx->username_nid, NULL, 0);
 	if (len < 0)
 		name = NULL;
 	else {
 		name = t_malloc0(len + 1);
 		if (X509_NAME_get_text_by_NID(X509_get_subject_name(x509),
-					      ssl_io->username_nid,
+					      ssl_io->ctx->username_nid,
 					      name, len + 1) < 0)
 			name = NULL;
 		else if (strlen(name) != (size_t)len) {
@@ -940,6 +832,32 @@ openssl_iostream_get_protocol_name(struct ssl_iostream *ssl_io)
 	return SSL_get_version(ssl_io->ssl);
 }
 
+static enum ssl_iostream_protocol_version
+openssl_iostream_get_protocol_version(struct ssl_iostream *ssl_io)
+{
+	if (!ssl_io->handshaked)
+		return SSL_IOSTREAM_PROTOCOL_VERSION_UNKNOWN;
+
+	int version = SSL_version(ssl_io->ssl);
+
+	switch (version) {
+	case SSL3_VERSION:
+		return SSL_IOSTREAM_PROTOCOL_VERSION_SSL3;
+	case TLS1_VERSION:
+		return SSL_IOSTREAM_PROTOCOL_VERSION_TLS1;
+	case TLS1_1_VERSION:
+		return SSL_IOSTREAM_PROTOCOL_VERSION_TLS1_1;
+	case TLS1_2_VERSION:
+		return SSL_IOSTREAM_PROTOCOL_VERSION_TLS1_2;
+	case TLS1_3_VERSION:
+		return SSL_IOSTREAM_PROTOCOL_VERSION_TLS1_3;
+	default:
+		break;
+	}
+	i_assert(version > TLS1_3_VERSION);
+	return SSL_IOSTREAM_PROTOCOL_VERSION_NEW;
+}
+
 static const char *
 openssl_iostream_get_ja3(struct ssl_iostream *ssl_io)
 {
@@ -947,6 +865,207 @@ openssl_iostream_get_ja3(struct ssl_iostream *ssl_io)
 		return NULL;
 	return ssl_io->ja3_str;
 }
+
+static const char *
+openssl_iostream_get_application_protocol(struct ssl_iostream *ssl_io)
+{
+	if (!ssl_io->handshaked || ssl_io->handshake_failed)
+		return NULL;
+	const unsigned char *data;
+	unsigned int len;
+
+	SSL_get0_alpn_selected(ssl_io->ssl, &data, &len);
+	if (data != NULL)
+		return t_strndup(data, len);
+	return NULL;
+}
+
+static int
+openssl_iostream_get_cb_tls_exporter(struct ssl_iostream *ssl_io,
+				     const buffer_t **data_r,
+				     const char **error_r)
+{
+	/* RFC 9266, Section 4.2:
+
+	   When TLS renegotiation is enabled on a connection, the "tls-exporter"
+	   channel binding type is not defined for that connection, and
+	   implementations MUST NOT support it.
+	 */
+	if (SSL_version(ssl_io->ssl) < TLS1_3_VERSION
+#ifdef SSL_OP_NO_RENEGOTIATION
+	    && HAS_NO_BITS(SSL_get_options(ssl_io->ssl),
+			   SSL_OP_NO_RENEGOTIATION))
+#endif
+	{
+		*error_r = t_strdup_printf(
+			"Channel binding type 'tls-exporter' not available: "
+			"TLS renegotiation is enabled for %s",
+			SSL_get_version(ssl_io->ssl));
+		return -1;
+	}
+
+	static const char literal[] = "EXPORTER-Channel-Binding";
+	static const size_t size = 32;
+	buffer_t *buf = t_buffer_create(size);
+	void *data = buffer_get_space_unsafe(buf, 0, size);
+
+	if (SSL_export_keying_material(ssl_io->ssl, data, size,
+				       literal, sizeof(literal) - 1,
+				       NULL, 0, 0) != 1) {
+		*error_r = t_strdup_printf(
+			"Failed to compose channel binding 'tls-exporter': %s",
+			openssl_iostream_error());
+		return -1;
+	}
+
+        *data_r = buf;
+	return 0;
+}
+
+static int
+openssl_iostream_get_cb_tls_unique(struct ssl_iostream *ssl_io,
+				   const buffer_t **data_r,
+				   const char **error_r)
+{
+	/* RFC 9266, Section 3:
+
+	   The specifications for Salted Challenge Response Authentication
+	   Mechanism (SCRAM) [RFC5802] [RFC7677] and Generic Security Service
+	   Application Program Interface (GSS-API) over Simple Authentication
+	   and Security Layer (SASL) [RFC5801] define "tls-unique" as the
+	   default channel binding to use over TLS.  As "tls-unique" is not
+	   defined for TLS 1.3 (and greater), this document updates [RFC5801],
+	   [RFC5802], and [RFC7677] to use "tls-exporter" as the default channel
+	   binding over TLS 1.3 (and greater).
+	 */
+	if (SSL_version(ssl_io->ssl) >= TLS1_3_VERSION) {
+		*error_r = t_strdup_printf(
+			"Channel binding type 'tls-unique' not defined: "
+			"TLS version is %s", SSL_get_version(ssl_io->ssl));
+		return -1;
+	}
+
+	static const size_t max_size = EVP_MAX_MD_SIZE;
+	buffer_t *buf = t_buffer_create(max_size);
+	void *data = buffer_get_space_unsafe(buf, 0, max_size);
+	size_t size;
+	bool peer_finished;
+
+	/* Roles are reversed when session reuse is in effect */
+	peer_finished = !ssl_io->ctx->client_ctx;
+	if (SSL_session_reused(ssl_io->ssl) != 0)
+		peer_finished = !peer_finished;
+	if (peer_finished)
+		size = SSL_get_peer_finished(ssl_io->ssl, data, max_size);
+	else
+		size = SSL_get_finished(ssl_io->ssl, data, max_size);
+
+	buffer_set_used_size(buf, size);
+
+	*data_r = buf;
+	return 0;
+}
+
+static int
+openssl_iostream_get_channel_binding(struct ssl_iostream *ssl_io,
+				     const char *type, const buffer_t **data_r,
+				     const char **error_r)
+{
+	*error_r = NULL;
+	*data_r = NULL;
+
+	if (!ssl_io->handshaked) {
+		*error_r = "Channel binding not available before handshake";
+		return -1;
+	}
+
+	if (strcmp(type, SSL_CHANNEL_BIND_TYPE_TLS_UNIQUE) == 0) {
+		return openssl_iostream_get_cb_tls_unique(
+			ssl_io, data_r, error_r);
+	} else if (strcmp(type, SSL_CHANNEL_BIND_TYPE_TLS_EXPORTER) == 0) {
+		return openssl_iostream_get_cb_tls_exporter(
+			ssl_io, data_r, error_r);
+	}
+
+	*error_r = t_strdup_printf(
+		"Unsupported channel binding type '%s'", type);
+	return -1;
+}
+
+static int
+openssl_iostream_get_peer_cert_fingerprint(struct ssl_iostream *ssl_io,
+					   const char **cert_fp_r,
+					   const char **pubkey_fp_r,
+					   const char **error_r)
+{
+	SSL *ssl = ssl_io->ssl;
+	struct ssl_iostream_context *ctx = ssl_io->ctx;
+	const char *cert_fp;
+
+	if (!ssl_io->handshaked || ssl_io->handshake_failed)
+		return 0;
+
+	/* Use cached result */
+	if (ssl_io->cert_fp != NULL) {
+		*cert_fp_r = ssl_io->cert_fp;
+		*pubkey_fp_r = ssl_io->pubkey_fp;
+		return 1;
+	}
+
+#ifdef HAVE_SSL_get1_peer_certificate
+	X509 *cert = SSL_get0_peer_certificate(ssl);
+#else
+	X509 *cert = SSL_get_peer_certificate(ssl);
+#endif
+	if (cert == NULL)
+		return 0;
+
+	if (ctx->pcert_fp_algo == NULL) {
+		*error_r = "No hash algorithm configured";
+		return -1;
+	}
+
+	unsigned int fp_len = EVP_MAX_MD_SIZE;
+	unsigned char result[EVP_MAX_MD_SIZE];
+
+	if (X509_digest(cert, ctx->pcert_fp_algo, result, &fp_len) == 0) {
+		*error_r = openssl_iostream_error();
+		return -1;
+	}
+
+	cert_fp = binary_to_hex(result, fp_len);
+
+	fp_len = EVP_MAX_MD_SIZE;
+	memset(result, 0, EVP_MAX_MD_SIZE);
+
+	/* Apparently X509_pubkey_digest does not work correctly,
+	   so we need to do this the hard way. */
+	BIO *bio = BIO_new(BIO_s_null());
+	BIO *hash = BIO_new(BIO_f_md());
+	BIO_set_md(hash, ctx->pcert_fp_algo);
+	bio = BIO_push(hash, bio);
+
+	EVP_PKEY *pubkey = X509_get0_pubkey(cert);
+	int ret = i2d_PUBKEY_bio(bio, pubkey);
+
+	if (ret == 1)
+		fp_len = BIO_gets(hash, (void*)result, EVP_MAX_MD_SIZE);
+	else
+		*error_r = openssl_iostream_error();
+
+	BIO_free_all(bio);
+
+	if (ret == 0)
+		return -1;
+
+	ssl_io->cert_fp = i_strdup(cert_fp);
+	ssl_io->pubkey_fp = i_strdup(binary_to_hex(result, fp_len));
+	*cert_fp_r = ssl_io->cert_fp;
+	*pubkey_fp_r = ssl_io->pubkey_fp;
+
+	return 1;
+}
+
 
 static const struct iostream_ssl_vfuncs ssl_vfuncs = {
 	.global_init = openssl_iostream_global_init,
@@ -968,9 +1087,10 @@ static const struct iostream_ssl_vfuncs ssl_vfuncs = {
 	.is_handshaked = openssl_iostream_is_handshaked,
 	.has_handshake_failed = openssl_iostream_has_handshake_failed,
 	.has_valid_client_cert = openssl_iostream_has_valid_client_cert,
-	.has_broken_client_cert = openssl_iostream_has_broken_client_cert,
+	.has_client_cert = openssl_iostream_has_client_cert,
 	.cert_match_name = openssl_iostream_cert_match_name,
-	.get_peer_name = openssl_iostream_get_peer_name,
+	.get_allow_invalid_cert = openssl_iostream_get_allow_invalid_cert,
+	.get_peer_username = openssl_iostream_get_peer_username,
 	.get_server_name = openssl_iostream_get_server_name,
 	.get_compression = openssl_iostream_get_compression,
 	.get_security_string = openssl_iostream_get_security_string,
@@ -978,7 +1098,14 @@ static const struct iostream_ssl_vfuncs ssl_vfuncs = {
 	.get_cipher = openssl_iostream_get_cipher,
 	.get_pfs = openssl_iostream_get_pfs,
 	.get_protocol_name = openssl_iostream_get_protocol_name,
+	.get_protocol_version = openssl_iostream_get_protocol_version,
 	.get_ja3 = openssl_iostream_get_ja3,
+
+	.get_application_protocol = openssl_iostream_get_application_protocol,
+	.set_application_protocols = openssl_iostream_context_set_application_protocols,
+
+	.get_channel_binding = openssl_iostream_get_channel_binding,
+	.get_peer_cert_fingerprint = openssl_iostream_get_peer_cert_fingerprint,
 };
 
 void ssl_iostream_openssl_init(void)

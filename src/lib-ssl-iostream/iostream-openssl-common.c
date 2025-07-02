@@ -87,7 +87,7 @@ bool openssl_cert_match_name(SSL *ssl, const char *verify_name,
 	char *peername;
 	int check_res;
 
-	/* First check DNS name agains CommonName or SubjectAltNames.
+	/* First check DNS name against CommonName or SubjectAltNames.
 	   If failed, check IP addresses. */
 	if ((check_res = X509_check_host(cert, verify_name, strlen(verify_name),
 					 X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS,
@@ -161,7 +161,7 @@ const char *openssl_iostream_key_load_error(void)
 
        if (ERR_GET_LIB(err) == ERR_LIB_X509 &&
            ERR_GET_REASON(err) == X509_R_KEY_VALUES_MISMATCH)
-               return "Key is for a different cert than ssl_cert";
+               return "Key file is for a different certificate file";
        else
                return openssl_iostream_error();
 }
@@ -171,8 +171,7 @@ static bool is_pem_key(const char *cert)
 	return strstr(cert, "PRIVATE KEY---") != NULL;
 }
 
-const char *
-openssl_iostream_use_certificate_error(const char *cert, const char *set_name)
+const char *openssl_iostream_use_certificate_error(const char *cert)
 {
 	unsigned long err;
 
@@ -185,10 +184,7 @@ openssl_iostream_use_certificate_error(const char *cert, const char *set_name)
 		return openssl_iostream_error();
 	else if (is_pem_key(cert)) {
 		return "The file contains a private key "
-			"(you've mixed ssl_cert and ssl_key settings)";
-	} else if (set_name != NULL && strchr(cert, '\n') == NULL) {
-		return t_strdup_printf("There is no valid PEM certificate. "
-			"(You probably forgot '<' from %s=<%s)", set_name, cert);
+			"(you've mixed ssl_server_cert_file and ssl_server_key_file settings)";
 	} else {
 		return "There is no valid PEM certificate.";
 	}

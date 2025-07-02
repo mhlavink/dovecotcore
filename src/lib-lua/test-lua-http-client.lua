@@ -9,16 +9,16 @@ function http_request_post(url)
 
   request:add_header("Cache-Control", "no-cache")
   request:add_header("Content-Type", "application/x-www-form-urlencoded")
-  request:set_payload("some+foolish+payload+for+funsies", true)
+  request:set_payload("some+foolish+payload+for+funsies\r\n", true)
   local response = request:submit()
 
-  e = dovecot.event()
+  local e = dovecot.event()
 
   local status = response:status()
   if status ~= 200 then
     e:log_debug("HTTP error: " .. status .. " " .. response:reason())
     e:log_debug("HTTP error response: " .. response:payload())
-    return -1
+    return -1, response:reason()
   end
 
   local payload = response:payload()
@@ -34,12 +34,16 @@ function http_request_post(url)
 end
 
 function script_init()
+  local e = dovecot.event()
   http_client = dovecot.http.client({
-    max_attempts = 3,
-    connect_timeout_msecs = 2000,
-    request_timeout_msecs = 5000,
-    request_absolute_timeout_msecs = 45000,
-    dns_client_socket_path = "./dns-test"
+    event_parent = e,
+    request_max_attempts = 3,
+    connect_timeout = "2s",
+    request_timeout = "5s",
+    request_absolute_timeout = "45s",
+    dns_client_socket_path = "./dns-test",
+    user_agent = "dovecot/unit-test",
+    ssl_min_protocol = "TLSv1.2",
   })
   return 0
 end
@@ -53,21 +57,21 @@ end
 
 function test_invalid_set_value_1()
   http_client = dovecot.http.client({
-    debug = "yes"
+    auto_retry = "cow"
   })
   return 0
 end
 
 function test_invalid_set_value_2()
   http_client = dovecot.http.client({
-    max_attempts = "three"
+    request_max_attempts = "three"
   })
   return 0
 end
 
 function test_invalid_set_value_3()
   http_client = dovecot.http.client({
-    user_agent = 1
+    ssl_min_protocol = "cow",
   })
   return 0
 end

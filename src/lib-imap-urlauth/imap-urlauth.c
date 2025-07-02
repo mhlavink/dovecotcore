@@ -2,7 +2,6 @@
 
 #include "lib.h"
 #include "hostpid.h"
-#include "var-expand.h"
 #include "hmac.h"
 #include "sha1.h"
 #include "randgen.h"
@@ -277,7 +276,7 @@ imap_urlauth_verify_url_userid(struct imap_urlauth_context *uctx,
 		return 1;
 
 	i_zero(&info);
-	info.service = user->service;
+	info.protocol = user->protocol;
 	if (user->conn.local_ip != NULL)
 		info.local_ip = *user->conn.local_ip;
 	if (user->conn.remote_ip != NULL)

@@ -212,6 +212,32 @@ auth_str_append_extra_fields(struct auth_request *request, string_t *dest)
 	}
 }
 
+static bool auth_request_want_failure_delay(struct auth_request *request)
+{
+	if (request->failure_nodelay) {
+		/* passdb specifically requested not to delay the reply. */
+		e_debug(request->event, "immediate auth failure due to nodelay");
+		return FALSE;
+	}
+	if (request->internal_failure) {
+		/* internal failures have their own delay */
+		e_debug(request->event, "immediate auth failure due to internal failure");
+		return FALSE;
+	}
+	if (request->set->failure_delay == 0) {
+		/* Auth failure delays are disabled entirely. This is mainly
+		   intended for making tests faster. */
+		e_debug(request->event, "immediate auth failure due to auth_failure_delay=0");
+		return FALSE;
+	}
+	if (shutting_down) {
+		/* process is shutting down - finish failures immediately. */
+		e_debug(request->event, "immediate auth failure due to shutting down");
+		return FALSE;
+	}
+	return TRUE;
+}
+
 static void
 auth_request_handle_failure(struct auth_request *request, const char *reply)
 {
@@ -233,14 +259,12 @@ auth_request_handle_failure(struct auth_request *request, const char *reply)
 	if (request->set->policy_report_after_auth)
 		auth_policy_report(request);
 
-	e_debug(request->event, "handling failure, nodelay=%d",
-		(int) request->failure_nodelay);
-	if (request->failure_nodelay) {
-		/* passdb specifically requested not to delay the reply. */
+	if (!auth_request_want_failure_delay(request)) {
 		handler->callback(reply, handler->conn);
 		auth_request_unref(&request);
 		return;
 	}
+	e_debug(request->event, "delaying auth failure");
 
 	/* failure. don't announce it immediately to avoid
 	   a) timing attacks, b) flooding */
@@ -259,6 +283,34 @@ auth_request_handle_failure(struct auth_request *request, const char *reply)
 			timeout_add_short(AUTH_FAILURE_DELAY_CHECK_MSECS,
 					  auth_failure_timeout, NULL);
 	}
+}
+
+static void
+auth_request_handler_reply_continue_finish(struct auth_request *request,
+					   const void *auth_reply,
+					   size_t reply_size)
+{
+        struct auth_request_handler *handler = request->handler;
+	string_t *str;
+
+	str = t_str_new(64 + MAX_BASE64_ENCODED_SIZE(reply_size));
+	str_printfa(str, "CONT\t%u\t", request->id);
+	if (auth_reply == NULL) {
+		/* Send out-of-band challenge */
+		str_append_c(str, '#');
+	} else {
+		/* Send normal challenge */
+		base64_encode(auth_reply, reply_size, str);
+	}
+	if (request->fields.channel_binding.type != NULL &&
+	    handler->conn->conn.minor_version >=
+		AUTH_CLIENT_MINOR_VERSION_CHANNEL_BINDING) {
+		auth_str_add_keyvalue(str, "channel_binding",
+				      request->fields.channel_binding.type);
+	}
+
+	request->accept_cont_input = TRUE;
+	handler->callback(str_c(str), handler->conn);
 }
 
 static void
@@ -385,12 +437,8 @@ auth_request_handler_default_reply_callback(struct auth_request *request,
 
 	switch (result) {
 	case AUTH_CLIENT_RESULT_CONTINUE:
-		str = t_str_new(16 + MAX_BASE64_ENCODED_SIZE(reply_size));
-		str_printfa(str, "CONT\t%u\t", request->id);
-		base64_encode(auth_reply, reply_size, str);
-
-		request->accept_cont_input = TRUE;
-		handler->callback(str_c(str), handler->conn);
+		auth_request_handler_reply_continue_finish(request, auth_reply,
+							   reply_size);
 		break;
 	case AUTH_CLIENT_RESULT_SUCCESS:
 		if (reply_size > 0) {
@@ -549,7 +597,7 @@ int auth_request_handler_auth_begin(struct auth_request_handler *handler,
 			return -1;
 		}
 	} else {
-		struct auth *auth_default = auth_default_service();
+		struct auth *auth_default = auth_default_protocol();
 		mech = mech_register_find(auth_default->reg, args[1]);
 		if (mech == NULL) {
 			/* unsupported mechanism */
@@ -599,10 +647,10 @@ int auth_request_handler_auth_begin(struct auth_request_handler *handler,
 		return -1;
 	}
 
-	if (request->fields.service == NULL) {
+	if (request->fields.protocol == NULL) {
 		e_error(handler->conn->conn.event,
 			"BUG: Authentication client %u "
-			"didn't specify service in request",
+			"didn't specify protocol in request",
 			handler->client_pid);
 		auth_request_unref(&request);
 		return -1;
@@ -620,8 +668,20 @@ int auth_request_handler_auth_begin(struct auth_request_handler *handler,
 					auth_request_timeout, request);
 	hash_table_insert(handler->requests, POINTER_CAST(id), request);
 
+	/* If the provided certificate is not valid (untrusted CA signature),
+	   we allow continuing only if there are fingerprints for the certificate
+	   too. If there are no certificate fingerprints, we can already fail
+	   here.
+
+	   Actual validity is re-checked after authentication, so that
+	   certificate fingeprints can be checked too.
+	*/
 	if (request->set->ssl_require_client_cert &&
-	    !request->fields.valid_client_cert) {
+	    !request->fields.valid_client_cert &&
+	    (request->fields.ssl_client_cert_fp == NULL ||
+	     *request->fields.ssl_client_cert_fp == '\0') &&
+	    (request->fields.ssl_client_cert_pubkey_fp == NULL ||
+	     *request->fields.ssl_client_cert_pubkey_fp == '\0')) {
 		/* we fail without valid certificate */
                 auth_request_handler_auth_fail(handler, request,
 			"Client didn't present valid SSL certificate");
@@ -690,6 +750,8 @@ int auth_request_handler_auth_continue(struct auth_request_handler *handler,
 				       const char *const *args)
 {
 	struct auth_request *request;
+	const char *name, *arg;
+	const char *data;
 	size_t data_len;
 	buffer_t *buf;
 	unsigned int id;
@@ -722,19 +784,37 @@ int auth_request_handler_auth_continue(struct auth_request_handler *handler,
 
 	request->accept_cont_input = FALSE;
 
-	data_len = strlen(args[1]);
-	buf = t_buffer_create(MAX_BASE64_DECODED_SIZE(data_len));
-	if (base64_decode(args[1], data_len, buf) < 0) {
-		auth_request_handler_auth_fail_code(handler, request,
-			AUTH_CLIENT_FAIL_CODE_INVALID_BASE64,
-			"Invalid base64 data in continued response");
-		return 1;
+	data = args[1];
+	data_len = strlen(data);
+	if (data_len == 1 && *data == '#') {
+		/* Out-of-band response */
+		buf = NULL;
+	} else {
+		/* Normal SASL response */
+		buf = t_buffer_create(MAX_BASE64_DECODED_SIZE(data_len));
+		if ((handler->conn->conn.minor_version <
+			AUTH_CLIENT_MINOR_VERSION_CHANNEL_BINDING &&
+		     args[2] != NULL) ||
+		    base64_decode(data, data_len, buf) < 0) {
+			auth_request_handler_auth_fail_code(handler, request,
+				AUTH_CLIENT_FAIL_CODE_INVALID_BASE64,
+				"Invalid base64 data in continued response");
+			return -1;
+		}
+	}
+
+	for (args += 2; *args != NULL; args++) {
+		t_split_key_value_eq(*args, &name, &arg);
+		auth_request_import_continue(request, name, arg);
 	}
 
 	/* handler is referenced until auth_request_handler_reply()
 	   is called. */
 	handler->refcount++;
-	auth_request_continue(request, buf->data, buf->used);
+	if (buf == NULL)
+		auth_request_continue(request, NULL, 0);
+	else
+		auth_request_continue(request, buf->data, buf->used);
 	return 1;
 }
 
@@ -761,7 +841,7 @@ static void auth_str_append_userdb_extra_fields(struct auth_request *request,
 	if (request->request_auth_token &&
 	    request->session_pid != (pid_t)-1) {
 		const char *auth_token =
-			auth_token_get(request->fields.service,
+			auth_token_get(request->fields.protocol,
 				       dec2str(request->session_pid),
 				       request->fields.user,
 				       request->fields.session_id);

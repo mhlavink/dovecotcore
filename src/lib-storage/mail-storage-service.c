@@ -12,18 +12,15 @@
 #include "str.h"
 #include "time-util.h"
 #include "sleep.h"
-#include "var-expand.h"
 #include "dict.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "auth-master.h"
 #include "master-service-private.h"
-#include "master-service-ssl-settings.h"
 #include "mail-user.h"
 #include "mail-namespace.h"
 #include "mail-storage.h"
-#include "mail-storage-private.h"
 #include "mail-storage-service.h"
+#include "doc.h"
 
 #include <sys/stat.h>
 #include <time.h>
@@ -58,39 +55,18 @@ struct mail_storage_service_ctx {
 	bool log_initialized:1;
 };
 
-struct mail_storage_service_user {
-	pool_t pool;
-	int refcount;
-
-	struct mail_storage_service_ctx *service_ctx;
-	struct mail_storage_service_input input;
-	enum mail_storage_service_flags flags;
-
-	struct event *event;
-	struct ioloop_context *ioloop_ctx;
-	const char *log_prefix, *auth_mech, *auth_token, *auth_user;
-	const char *local_name;
-
-	const char *system_groups_user, *uid_source, *gid_source;
-	const char *chdir_path;
-	const struct mail_user_settings *user_set;
-	struct settings_instance *set_instance;
-
-	unsigned int session_id_counter;
-
-	bool anonymous:1;
-	bool admin:1;
-	bool master_service_user_set:1;
-	bool home_from_userdb:1;
-};
-
 struct mail_storage_service_init_var_expand_ctx {
 	struct mail_storage_service_ctx *ctx;
 	const struct mail_storage_service_input *input;
 	struct mail_storage_service_user *user;
 };
 
+struct mail_storage_service_user_module_register
+	mail_storage_service_user_module_register = { 0 };
 struct module *mail_storage_service_modules = NULL;
+
+struct metacache_service_user_module metacache_service_user_module =
+	MODULE_CONTEXT_INIT(&mail_storage_service_user_module_register);
 
 static void set_keyvalue(struct mail_storage_service_user *user,
 			 const char *key, const char *value)
@@ -99,14 +75,30 @@ static void set_keyvalue(struct mail_storage_service_user *user,
 	if (*key == '\0')
 		return;
 
-	settings_override(user->set_instance, key, value,
-			  SETTINGS_OVERRIDE_TYPE_USERDB);
+	bool is_setting;
+	if (str_begins(key, "set/", &key)) {
+		/* An explicit set/ prefix means that this is a setting.
+		   If the setting is unknown, it's an error. */
+		is_setting = TRUE;
+	} else if (strchr(key, '/') != NULL) {
+		/* Assume this is intended to be a setting. */
+		is_setting = TRUE;
+	} else {
+		is_setting = settings_key_exists(user->event, key);
+	}
+	if (is_setting) {
+		settings_override(user->set_instance, key, value,
+				  SETTINGS_OVERRIDE_TYPE_USERDB);
+	}
 	if (strstr(key, "pass") != NULL) {
 		/* possibly a password field (e.g. imapc_password).
 		   hide the value. */
 		value = "<hidden>";
 	}
-	e_debug(user->event, "Added userdb setting: %s=%s", key, value);
+	if (is_setting)
+		e_debug(user->event, "Added setting via userdb: %s=%s", key, value);
+	else
+		e_debug(user->event, "Ignored unknown userdb field: %s=%s", key, value);
 }
 
 static bool validate_chroot(const struct mail_user_settings *user_set,
@@ -117,10 +109,10 @@ static bool validate_chroot(const struct mail_user_settings *user_set,
 	if (*dir == '\0')
 		return FALSE;
 
-	if (*user_set->valid_chroot_dirs == '\0')
+	if (array_is_empty(&user_set->valid_chroot_dirs))
 		return FALSE;
 
-	chroot_dirs = t_strsplit(user_set->valid_chroot_dirs, ":");
+	chroot_dirs = settings_boollist_get(&user_set->valid_chroot_dirs);
 	while (*chroot_dirs != NULL) {
 		if (**chroot_dirs != '\0' &&
 		    str_begins_with(dir, *chroot_dirs))
@@ -158,7 +150,7 @@ user_reply_handle(struct mail_storage_service_user *user,
 	}
 
 	if (home != NULL && chroot == NULL &&
-	    *user->user_set->valid_chroot_dirs != '\0' &&
+	    array_not_empty(&user->user_set->valid_chroot_dirs) &&
 	    (p = strstr(home, "/./")) != NULL) {
 		/* wu-ftpd like <chroot>/./<home> - check only if there's even
 		   a possibility of using them (non-empty valid_chroot_dirs) */
@@ -224,6 +216,21 @@ user_reply_handle(struct mail_storage_service_user *user,
 	return 0;
 }
 
+static void
+mail_storage_service_add_code_overrides(struct mail_storage_service_user *user,
+					const char *const *code_override_fields)
+{
+	for (unsigned int i = 0; code_override_fields[i] != NULL; i++) {
+		const char *key, *value;
+		t_split_key_value_eq(code_override_fields[i], &key, &value);
+
+		if (strcmp(key, "mail_home") == 0)
+			user->home_from_userdb = TRUE;
+		settings_override(user->set_instance, key, value,
+				  SETTINGS_OVERRIDE_TYPE_CODE);
+	}
+}
+
 static int
 service_auth_userdb_lookup(struct mail_storage_service_ctx *ctx,
 			   const struct mail_storage_service_input *input,
@@ -235,8 +242,15 @@ service_auth_userdb_lookup(struct mail_storage_service_ctx *ctx,
 	int ret;
 
 	i_zero(&info);
-	info.service = input->service != NULL ? input->service :
-		ctx->service->name;
+	/* If protocol was explicitly provided, use it. Otherwise, fallback to
+	   using service name as the protocol. Outside a few special cases
+	   (e.g. imap-urlauth-worker) the service and protocol are the same. */
+	if (input->protocol != NULL)
+		info.protocol = input->protocol;
+	else if (input->service != NULL)
+		info.protocol = input->service;
+	else
+		info.protocol = ctx->service->name;
 	info.local_ip = input->local_ip;
 	info.remote_ip = input->remote_ip;
 	info.local_port = input->local_port;
@@ -304,48 +318,64 @@ static bool parse_gid(const char *str, gid_t *gid_r, const char **error_r)
 	}
 }
 
+static const char *get_master_user(const char *const *fields)
+{
+	const char *value;
+	for (; *fields != NULL; fields++)
+		if (str_begins(*fields, "master=", &value))
+			return value;
+	return NULL;
+}
+
 static const struct var_expand_table *
 get_var_expand_table(struct master_service *service,
 		     struct mail_storage_service_user *user,
 		     const struct mail_storage_service_input *input)
 {
-	const char *username = t_strcut(input->username, '@');
-	const char *domain = i_strchr_to_next(input->username, '@');
 	const char *local_name = NULL;
+	const char *master_user;
+	const char *auth_user;
 
-	const char *auth_user, *auth_username, *auth_domain;
 	if (user == NULL || user->auth_user == NULL) {
 		auth_user = input->username;
-		auth_username = username;
-		auth_domain = domain;
+		if (input->userdb_fields != NULL)
+			master_user = get_master_user(input->userdb_fields);
+		else
+			master_user = NULL;
 	} else {
 		auth_user = user->auth_user;
-		auth_username = t_strcut(user->auth_user, '@');
-		auth_domain = i_strchr_to_next(user->auth_user, '@');
 		local_name = user->local_name;
+		master_user = user->master_user;
 	}
 
 	const char *service_name = input->service != NULL ?
 				   input->service : service->name;
+	const char *protocol = input->protocol != NULL ?
+		input->protocol : service_name;
 	const char *hostname = user != NULL ?
 		user->user_set->hostname : my_hostname;
+	const char *local_port = "";
+	const char *remote_port = "";
+
+	if (input->local_port != 0)
+		local_port = dec2str(input->local_port);
+	if (input->remote_port != 0)
+		remote_port = dec2str(input->remote_port);
+
 	const struct var_expand_table stack_tab[] = {
-		{ 'u', input->username, "user" },
-		{ 'n', username, "username" },
-		{ 'd', domain, "domain" },
-		{ 's', service_name, "service" },
-		{ 'l', net_ip2addr(&input->local_ip), "lip" },
-		{ 'r', net_ip2addr(&input->remote_ip), "rip" },
-		{ '\0', input->session_id, "session" },
-		{ '\0', auth_user, "auth_user" },
-		{ '\0', auth_username, "auth_username" },
-		{ '\0', auth_domain, "auth_domain" },
-		{ '\0', hostname, "hostname" },
-		{ '\0', local_name, "local_name" },
-		/* aliases: */
-		{ '\0', net_ip2addr(&input->local_ip), "local_ip" },
-		{ '\0', net_ip2addr(&input->remote_ip), "remote_ip" },
-		{ '\0', NULL, NULL }
+		{ .key = "user", .value = input->username },
+		{ .key = "service", .value = service_name },
+		{ .key = "local_ip", .value = net_ip2addr(&input->local_ip) },
+		{ .key = "remote_ip", .value = net_ip2addr(&input->remote_ip) },
+		{ .key = "session", .value = input->session_id },
+		{ .key = "auth_user", .value = auth_user },
+		{ .key = "hostname", .value = hostname },
+		{ .key = "local_name", .value = local_name },
+		{ .key = "protocol", .value = protocol },
+		{ .key = "master_user", .value = master_user },
+		{ .key = "local_port", .value = local_port },
+		{ .key = "remote_port", .value = remote_port },
+		VAR_EXPAND_TABLE_END
 	};
 	struct var_expand_table *tab;
 
@@ -354,11 +384,32 @@ get_var_expand_table(struct master_service *service,
 	return tab;
 }
 
-const struct var_expand_table *
-mail_storage_service_get_var_expand_table(struct mail_storage_service_ctx *ctx,
-					  struct mail_storage_service_input *input)
+
+static int
+mail_storage_service_var_userdb(const char *key, const char **value_r,
+			       void *context, const char **error_r ATTR_UNUSED)
 {
-	return get_var_expand_table(ctx->service, NULL, input);
+	const struct mail_storage_service_input *input = context;
+
+	*value_r = mail_storage_service_fields_var_expand(key, input->userdb_fields);
+	return 0;
+}
+
+const struct var_expand_provider mail_storage_service_providers[] = {
+	{ .key = "userdb", .func = mail_storage_service_var_userdb },
+	VAR_EXPAND_TABLE_END
+};
+
+const struct var_expand_params *
+mail_storage_service_get_var_expand_params(struct mail_storage_service_ctx *ctx,
+					   struct mail_storage_service_input *input)
+{
+	struct var_expand_params *params = t_new(struct var_expand_params, 1);
+
+	params->table = get_var_expand_table(ctx->service, NULL, input);
+	params->providers = mail_storage_service_providers;
+	params->context = input;
+	return params;
 }
 
 static int
@@ -479,8 +530,8 @@ service_drop_privileges(struct mail_storage_service_user *user,
 			return -1;
 		}
 	}
-	if (*set->mail_access_groups != '\0') {
-		rset.extra_groups = t_strconcat(set->mail_access_groups, ",",
+	if (array_not_empty(&set->mail_access_groups)) {
+		rset.extra_groups = t_strconcat(t_array_const_string_join(&set->mail_access_groups, ","), ",",
 						rset.extra_groups, NULL);
 	}
 
@@ -580,6 +631,9 @@ mail_storage_service_init_post(struct mail_storage_service_ctx *ctx,
 	mail_user->gid = priv->gid == (gid_t)-1 ? getegid() : priv->gid;
 	mail_user->anonymous = user->anonymous;
 	mail_user->admin = user->admin;
+	mail_user->protocol = user->input.protocol != NULL ?
+		p_strdup(mail_user->pool, user->input.protocol) :
+		mail_user->service;
 	mail_user->auth_mech = p_strdup(mail_user->pool, user->auth_mech);
 	mail_user->auth_token = p_strdup(mail_user->pool, user->auth_token);
 	mail_user->auth_user = p_strdup(mail_user->pool, user->auth_user);
@@ -606,9 +660,13 @@ mail_storage_service_init_post(struct mail_storage_service_ctx *ctx,
 					session_id_suffix);
 	event_add_str(user->event, "session", mail_user->session_id);
 	event_add_str(user->event, "service", service_name);
+	settings_event_add_list_filter_name(user->event, "service",
+					    service_name);
 
 	mail_user->userdb_fields = user->input.userdb_fields == NULL ? NULL :
 		p_strarray_dup(mail_user->pool, user->input.userdb_fields);
+	if (mail_user->userdb_fields != NULL)
+		mail_user->master_user = get_master_user(mail_user->userdb_fields);
 	mail_user_add_event_fields(mail_user);
 
 	string_t *str = t_str_new(64);
@@ -691,19 +749,6 @@ mail_storage_service_io_deactivate_user_cb(struct mail_storage_service_user *use
 		i_set_failure_prefix("%s", user->service_ctx->default_log_prefix);
 }
 
-static const char *field_get_default(const char *data)
-{
-	const char *p;
-
-	p = strchr(data, ':');
-	if (p == NULL)
-		return "";
-	else {
-		/* default value given */
-		return p+1;
-	}
-}
-
 const char *mail_storage_service_fields_var_expand(const char *data,
 						   const char *const *fields)
 {
@@ -712,7 +757,7 @@ const char *mail_storage_service_fields_var_expand(const char *data,
 	size_t field_name_len;
 
 	if (fields == NULL)
-		return field_get_default(data);
+		return "";
 
 	field_name_len = strlen(field_name);
 	for (i = 0; fields[i] != NULL; i++) {
@@ -720,40 +765,21 @@ const char *mail_storage_service_fields_var_expand(const char *data,
 		    fields[i][field_name_len] == '=')
 			return fields[i] + field_name_len+1;
 	}
-	return field_get_default(data);
+
+	return "";
 }
 
-static int
-mail_storage_service_input_var_userdb(const char *data, void *context,
-				      const char **value_r,
-				      const char **error_r ATTR_UNUSED)
+static void
+mail_storage_service_var_expand_callback(void *context,
+					 struct var_expand_params *params_r)
 {
 	struct mail_storage_service_init_var_expand_ctx *var_expand_ctx = context;
 
-	*value_r = mail_storage_service_fields_var_expand(data,
-			var_expand_ctx->input->userdb_fields);
-	return 1;
-}
-
-static const struct var_expand_func_table
-mail_storage_service_var_expand_func_table[] = {
-	{ "userdb", mail_storage_service_input_var_userdb },
-	{ NULL, NULL }
-};
-
-static void
-mail_storage_service_var_expand_callback(struct event *event,
-					 const struct var_expand_table **tab_r,
-					 const struct var_expand_func_table **func_tab_r)
-{
-	struct mail_storage_service_init_var_expand_ctx *var_expand_ctx =
-		event_get_ptr(event, SETTINGS_EVENT_VAR_EXPAND_FUNC_CONTEXT);
-	i_assert(var_expand_ctx != NULL);
-
-	*tab_r = get_var_expand_table(var_expand_ctx->ctx->service,
-				      var_expand_ctx->user,
-				      var_expand_ctx->input);
-	*func_tab_r = mail_storage_service_var_expand_func_table;
+	params_r->table = get_var_expand_table(var_expand_ctx->ctx->service,
+					       var_expand_ctx->user,
+					       var_expand_ctx->input);
+	params_r->providers = mail_storage_service_providers;
+	params_r->context = (void*)var_expand_ctx->input;
 }
 
 const char *
@@ -806,7 +832,7 @@ mail_storage_service_time_moved(const struct timeval *old_time,
 	}
 	diff = -diff;
 
-	const char *doc_ref = "https://doc.dovecot.org/admin_manual/errors/time_moved_backwards/";
+	const char *doc_ref = DOC_LINK("core/admin/errors.html#time-moved-backwards-error");
 	if ((diff / 1000) > MAX_TIME_BACKWARDS_SLEEP_MSECS) {
 		i_fatal("Time just moved backwards by %lld.%06lld seconds. "
 			"This might cause a lot of problems, "
@@ -926,7 +952,8 @@ mail_storage_service_load_modules(struct mail_storage_service_ctx *ctx,
 {
 	struct module_dir_load_settings mod_set;
 
-	if (*user_set->mail_plugins == '\0')
+	if (!array_is_created(&user_set->mail_plugins) ||
+	    array_is_empty(&user_set->mail_plugins))
 		return 0;
 	if ((ctx->flags & MAIL_STORAGE_SERVICE_FLAG_NO_PLUGINS) != 0)
 		return 0;
@@ -940,7 +967,7 @@ mail_storage_service_load_modules(struct mail_storage_service_ctx *ctx,
 
 	return module_dir_try_load_missing(&mail_storage_service_modules,
 					   user_set->mail_plugin_dir,
-					   user_set->mail_plugins,
+					   settings_boollist_get(&user_set->mail_plugins),
 					   &mod_set, error_r);
 }
 
@@ -1087,7 +1114,7 @@ mail_storage_service_lookup_real(struct mail_storage_service_ctx *ctx,
 	   settings lookups are expected to be using mail_user.event. */
 	event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_CALLBACK,
 		      mail_storage_service_var_expand_callback);
-	event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_FUNC_CONTEXT,
+	event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_CALLBACK_CONTEXT,
 		      &var_expand_ctx);
 	if (settings_get(event, &mail_user_setting_parser_info,
 			 0, &user_set, error_r) < 0) {
@@ -1166,6 +1193,7 @@ mail_storage_service_lookup_real(struct mail_storage_service_ctx *ctx,
 	user->event = event;
 	user->input.session_create_time = input->session_create_time;
 	user->flags = flags;
+	p_array_init(&user->module_contexts, user->pool, 5);
 
 	user->set_instance = set_instance;
 	user->user_set = user_set;
@@ -1198,8 +1226,13 @@ mail_storage_service_lookup_real(struct mail_storage_service_ctx *ctx,
 			ret = -2;
 		}
 	}
+	if (input->code_override_fields != NULL) {
+		mail_storage_service_add_code_overrides(user,
+			input->code_override_fields);
+	}
 	if ((ctx->flags & MAIL_STORAGE_SERVICE_FLAG_NO_PLUGINS) != 0 &&
-	    user_set->mail_plugins[0] != '\0') {
+	    array_is_created(&user_set->mail_plugins) &&
+	    array_not_empty(&user_set->mail_plugins)) {
 		/* mail_storage_service_load_modules() already avoids loading
 		   plugins when the _NO_PLUGINS flag is set. However, it's
 		   possible that the plugins are already loaded, because the
@@ -1241,7 +1274,7 @@ mail_storage_service_lookup_real(struct mail_storage_service_ctx *ctx,
 		/* The context points to a variable in stack, so it can't be
 		   used anymore. */
 		event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_CALLBACK, NULL);
-		event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_FUNC_CONTEXT, NULL);
+		event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_CALLBACK_CONTEXT, NULL);
 	}
 	*user_r = user;
 	return ret;
@@ -1458,6 +1491,28 @@ void mail_storage_service_user_unref(struct mail_storage_service_user **_user)
 	pool_unref(&user->pool);
 }
 
+struct mail_storage_service_user *
+mail_storage_service_user_dup(const struct mail_storage_service_user *user)
+{
+	struct mail_storage_service_user *dest =
+		p_memdup(user->pool, user, sizeof(*user));
+	pool_ref(dest->pool);
+	dest->refcount = 1;
+
+	dest->set_instance = settings_instance_dup(user->set_instance);
+	dest->event = event_create(event_get_parent(user->event));
+	event_set_ptr(dest->event, SETTINGS_EVENT_INSTANCE, dest->set_instance);
+
+	dest->ioloop_ctx = io_loop_context_new(current_ioloop);
+	io_loop_context_add_callbacks(dest->ioloop_ctx,
+				      mail_storage_service_io_activate_user_cb,
+				      mail_storage_service_io_deactivate_user_cb,
+				      dest);
+	io_loop_context_switch(dest->ioloop_ctx);
+	pool_ref(dest->user_set->pool);
+	return dest;
+}
+
 const char *const *
 mail_storage_service_user_get_userdb_fields(struct mail_storage_service_user *user)
 {
@@ -1562,21 +1617,6 @@ mail_storage_service_user_get_settings_instance(struct mail_storage_service_user
 	return user->set_instance;
 }
 
-int mail_storage_service_user_init_ssl_client_settings(
-	struct mail_storage_service_user *user, pool_t pool,
-	struct ssl_iostream_settings *ssl_set_r, const char **error_r)
-{
-	const struct master_service_ssl_settings *ssl_set;
-
-	if (settings_get(user->event, &master_service_ssl_setting_parser_info,
-			 0, &ssl_set, error_r) < 0)
-		return -1;
-	master_service_ssl_client_settings_to_iostream_set(ssl_set, pool,
-							   ssl_set_r);
-	settings_free(ssl_set);
-	return 0;
-}
-
 struct mail_storage_service_ctx *
 mail_storage_service_user_get_service_ctx(struct mail_storage_service_user *user)
 {
@@ -1592,4 +1632,10 @@ const char *
 mail_storage_service_get_log_prefix(struct mail_storage_service_ctx *ctx)
 {
 	return ctx->default_log_prefix;
+}
+
+enum mail_storage_service_flags
+mail_storage_service_get_flags(struct mail_storage_service_ctx *ctx)
+{
+	return ctx->flags;
 }

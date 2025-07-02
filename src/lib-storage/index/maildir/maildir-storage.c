@@ -6,7 +6,6 @@
 #include "eacces-error.h"
 #include "unlink-old-files.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "mailbox-uidvalidity.h"
 #include "mailbox-list-private.h"
 #include "maildir-storage.h"
@@ -64,7 +63,8 @@ maildir_storage_create(struct mail_storage *_storage, struct mail_namespace *ns,
 	storage->temp_prefix = p_strdup(_storage->pool,
 					mailbox_list_get_temp_prefix(list));
 
-	if (list->set.control_dir == NULL && list->set.inbox_path == NULL &&
+	if (list->mail_set->mail_control_path[0] == '\0' &&
+	    list->mail_set->mail_inbox_path[0] == '\0' &&
 	    (ns->flags & NAMESPACE_FLAG_INBOX_ANY) != 0) {
 		/* put the temp files into tmp/ directory preferably */
 		storage->temp_prefix = p_strconcat(_storage->pool, "tmp/",
@@ -85,23 +85,6 @@ static void maildir_storage_destroy(struct mail_storage *_storage)
 
 	settings_free(storage->set);
 	index_storage_destroy(_storage);
-}
-
-static void maildir_storage_get_list_settings(const struct mail_namespace *ns,
-					      struct mailbox_list_settings *set)
-{
-	if (set->layout == NULL)
-		set->layout = MAILBOX_LIST_NAME_MAILDIRPLUSPLUS;
-	if (set->subscription_fname == NULL)
-		set->subscription_fname = MAILDIR_SUBSCRIPTION_FILE_NAME;
-
-	if (set->inbox_path == NULL && *set->maildir_name == '\0' &&
-	    (strcmp(set->layout, MAILBOX_LIST_NAME_MAILDIRPLUSPLUS) == 0 ||
-	     strcmp(set->layout, MAILBOX_LIST_NAME_FS) == 0) &&
-	    (ns->flags & NAMESPACE_FLAG_INBOX_ANY) != 0) {
-		/* Maildir++ INBOX is the Maildir base itself */
-		set->inbox_path = set->root_dir;
-	}
 }
 
 static const char *
@@ -133,15 +116,18 @@ maildir_storage_find_root_dir(const struct mail_namespace *ns)
 	return NULL;
 }
 
-static bool maildir_storage_autodetect(const struct mail_namespace *ns,
-				       struct mailbox_list_settings *set)
+static bool
+maildir_storage_autodetect(const struct mail_namespace *ns,
+			   const struct mail_storage_settings *mail_set,
+			   const char **root_path_r,
+			   const char **inbox_path_r ATTR_UNUSED)
 {
 	struct event *event = ns->user->event;
 	struct stat st;
 	const char *path, *root_dir;
 
-	if (set->root_dir != NULL)
-		root_dir = set->root_dir;
+	if (mail_set->mail_path[0] != '\0')
+		root_dir = mail_set->mail_path;
 	else {
 		root_dir = maildir_storage_find_root_dir(ns);
 		if (root_dir == NULL) {
@@ -161,8 +147,7 @@ static bool maildir_storage_autodetect(const struct mail_namespace *ns,
 		return FALSE;
 	}
 
-	set->root_dir = root_dir;
-	maildir_storage_get_list_settings(ns, set);
+	*root_path_r = root_dir;
 	return TRUE;
 }
 
@@ -573,7 +558,7 @@ maildir_mailbox_create(struct mailbox *box, const struct mailbox_update *update,
 {
 	const char *root_dir, *shared_path;
 	/* allow physical location to exist when we rebuild list index, this
-	   happens with LAYOUT=INDEX only. */
+	   happens with mailbox_list_layout=index only. */
 	bool verify = box->storage->rebuilding_list_index;
 	struct stat st;
 	int ret;
@@ -694,7 +679,7 @@ static enum mail_flags maildir_get_private_flags_mask(struct mailbox *box)
 	mbox->private_flags_mask_set = TRUE;
 
 	path = mailbox_list_get_root_forced(box->list, MAILBOX_LIST_PATH_TYPE_MAILBOX);
-	if (box->list->set.index_pvt_dir != NULL) {
+	if (box->list->mail_set->mail_index_private_path[0] != '\0') {
 		/* private index directory is set. we'll definitely have
 		   private flags. */
 		mbox->_private_flags_mask = MAIL_SEEN;
@@ -733,13 +718,13 @@ struct mail_storage maildir_storage = {
 		MAIL_STORAGE_CLASS_FLAG_HAVE_MAIL_SAVE_GUIDS |
 		MAIL_STORAGE_CLASS_FLAG_BINARY_DATA,
 	.event_category = &event_category_maildir,
+	.set_info = &maildir_setting_parser_info,
 
 	.v = {
 		maildir_storage_alloc,
 		maildir_storage_create,
 		maildir_storage_destroy,
 		maildir_storage_add_list,
-		maildir_storage_get_list_settings,
 		maildir_storage_autodetect,
 		maildir_mailbox_alloc,
 		NULL,

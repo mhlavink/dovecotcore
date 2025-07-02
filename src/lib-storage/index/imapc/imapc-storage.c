@@ -4,8 +4,8 @@
 #include "ioloop.h"
 #include "str.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "imap-arg.h"
+#include "imap-util.h"
 #include "imap-resp-code.h"
 #include "mailbox-tree.h"
 #include "imapc-connection.h"
@@ -17,6 +17,7 @@
 #include "imapc-attribute.h"
 #include "imapc-settings.h"
 #include "imapc-storage.h"
+#include "dsasl-client.h"
 
 #define DNS_CLIENT_SOCKET_NAME "dns-client"
 
@@ -36,6 +37,11 @@ extern struct mailbox imapc_mailbox;
 static struct event_category event_category_imapc = {
 	.name = "imapc",
 	.parent = &event_category_storage,
+};
+
+struct imapc_forwarded_response_codes {
+	const char *code;
+	bool (*forward)(const struct imapc_storage_client *client);
 };
 
 static struct imapc_resp_code_map imapc_resp_code_map[] = {
@@ -58,12 +64,23 @@ static struct imapc_resp_code_map imapc_resp_code_map[] = {
 	{ IMAP_RESP_CODE_NONEXISTENT, MAIL_ERROR_NOTFOUND }
 };
 
+static bool response_code_forward_alert(const struct imapc_storage_client *client);
+
+static const struct imapc_forwarded_response_codes forwarded_response_codes[] = {
+	{ IMAP_RESP_CODE_ALERT, response_code_forward_alert },
+	{ IMAP_RESP_CODE_BADCHARSET, NULL },
+	{ IMAP_RESP_CODE_BADCOMPARATOR, NULL },
+	{ IMAP_RESP_CODE_BADEVENT, NULL }
+};
+
 static void imapc_untagged_status(const struct imapc_untagged_reply *reply,
 				  struct imapc_storage_client *client);
 static void imapc_untagged_namespace(const struct imapc_untagged_reply *reply,
 				     struct imapc_storage_client *client);
 static void imapc_untagged_inprogress(const struct imapc_untagged_reply *reply,
 				      struct imapc_storage_client *client);
+static void imapc_untagged_respcodes(const struct imapc_untagged_reply *reply,
+				     struct imapc_storage_client *client);
 static int imapc_mailbox_run_status(struct mailbox *box,
 				    enum mailbox_status_items items,
 				    struct mailbox_status *status_r);
@@ -308,83 +325,66 @@ static void imapc_storage_client_login(struct imapc_storage_client *client,
 	}
 }
 
-int imapc_storage_client_create(struct mail_namespace *ns,
+int imapc_storage_client_create(struct mailbox_list *list,
 				struct imapc_storage_client **client_r,
 				const char **error_r)
 {
+	struct mail_namespace *ns = list->ns;
 	const struct imapc_settings *imapc_set;
 	struct imapc_storage_client *client;
-	struct imapc_client_settings set;
+	struct imapc_parameters params = {};
 	string_t *str;
 
-	if (settings_get(ns->user->event, &imapc_setting_parser_info, 0,
+	if (settings_get(list->event, &imapc_setting_parser_info, 0,
 			 &imapc_set, error_r) < 0)
 		return -1;
 
-	i_zero(&set);
-	set.host = imapc_set->imapc_host;
-	if (*set.host == '\0') {
-		*error_r = "missing imapc_host";
-		settings_free(imapc_set);
-		return -1;
+	if ((ns->flags & NAMESPACE_FLAG_UNUSABLE) != 0 ||
+	    *imapc_set->imapc_host == '\0')
+		/* Shared namespace user doesn't actually exist. Don't try to
+		   access the user via imapc, but also don't make this a
+		   visible error. If any code path tries to connect to imapc,
+		   it's a bug. */
+		params.flags |= IMAPC_PARAMETER_CLIENT_DISABLED;
+
+	if (!array_is_empty(&imapc_set->imapc_sasl_mechanisms)) {
+		const char *mech_name;
+		array_foreach_elem(&imapc_set->imapc_sasl_mechanisms, mech_name) {
+			const struct dsasl_client_mech *mech =
+				dsasl_client_mech_find(mech_name);
+			if (mech == NULL) {
+				*error_r =
+					t_strdup_printf("imapc_sasl_mechanism: "
+							"'%s' is not supported",
+							mech_name);
+				settings_free(imapc_set);
+				return -1;
+			} else if (dsasl_client_mech_uses_password(mech) &&
+				   *imapc_set->imapc_password == '\0') {
+				*error_r = "Missing imapc_password";
+				settings_free(imapc_set);
+				return -1;
+			}
+		}
 	}
-	set.port = imapc_set->imapc_port;
-	if (imapc_set->imapc_user[0] != '\0')
-		set.username = imapc_set->imapc_user;
-	else if (ns->owner != NULL)
-		set.username = ns->owner->username;
-	else
-		set.username = ns->user->username;
-	set.master_user = imapc_set->imapc_master_user;
-	set.password = imapc_set->imapc_password;
-	if (*set.password == '\0') {
-		*error_r = "missing imapc_password";
-		settings_free(imapc_set);
-		return -1;
-	}
-	set.sasl_mechanisms = imapc_set->imapc_sasl_mechanisms;
-	set.use_proxyauth = (imapc_set->parsed_features & IMAPC_FEATURE_PROXYAUTH) != 0;
-	set.no_qresync = (imapc_set->parsed_features & IMAPC_FEATURE_NO_QRESYNC) != 0;
-	set.cmd_timeout_msecs = imapc_set->imapc_cmd_timeout * 1000;
-	set.connect_retry_count = imapc_set->imapc_connection_retry_count;
-	set.connect_retry_interval_msecs = imapc_set->imapc_connection_retry_interval;
-	set.max_idle_time = imapc_set->imapc_max_idle_time;
-	set.max_line_length = imapc_set->imapc_max_line_length;
-	set.dns_client_socket_path = *ns->user->set->base_dir == '\0' ? "" :
+	params.override_dns_client_socket_path = *ns->user->set->base_dir == '\0' ? "" :
 		t_strconcat(ns->user->set->base_dir, "/",
 			    DNS_CLIENT_SOCKET_NAME, NULL);
-	set.debug = event_want_debug(ns->user->event);
-	set.rawlog_dir = mail_user_home_expand(ns->user,
-					       imapc_set->imapc_rawlog_dir);
+	params.override_rawlog_dir = mail_user_home_expand(ns->user,
+			imapc_set->imapc_rawlog_dir);
+
 	if ((imapc_set->parsed_features & IMAPC_FEATURE_SEND_ID) != 0)
-		set.session_id_prefix = ns->user->session_id;
+		params.session_id_prefix = ns->user->session_id;
 
 	str = t_str_new(128);
 	mail_user_set_get_temp_prefix(str, ns->user->set);
-	set.temp_path_prefix = str_c(str);
-
-	set.ssl_set = *ns->user->ssl_set;
-	if (!imapc_set->imapc_ssl_verify)
-		set.ssl_set.allow_invalid_cert = TRUE;
-
-	if (strcmp(imapc_set->imapc_ssl, "imaps") == 0)
-		set.ssl_mode = IMAPC_CLIENT_SSL_MODE_IMMEDIATE;
-	else if (strcmp(imapc_set->imapc_ssl, "starttls") == 0)
-		set.ssl_mode = IMAPC_CLIENT_SSL_MODE_STARTTLS;
-	else
-		set.ssl_mode = IMAPC_CLIENT_SSL_MODE_NONE;
-
-	set.throttle_set.init_msecs = imapc_set->throttle_init_msecs;
-	set.throttle_set.max_msecs = imapc_set->throttle_max_msecs;
-	set.throttle_set.shrink_min_msecs = imapc_set->throttle_shrink_min_msecs;
+	params.temp_path_prefix = str_c(str);
 
 	client = i_new(struct imapc_storage_client, 1);
 	client->refcount = 1;
 	client->set = imapc_set;
 	i_array_init(&client->untagged_callbacks, 16);
-	/* FIXME: storage->event would be better, but we first get here when
-	   creating mailbox_list, and storage doesn't even exist yet. */
-	client->client = imapc_client_init(&set, ns->user->event);
+	client->client = imapc_client_init(&params, list->event);
 	imapc_client_register_untagged(client->client,
 				       imapc_storage_client_untagged_cb, client);
 
@@ -393,7 +393,7 @@ int imapc_storage_client_create(struct mail_namespace *ns,
 	if ((ns->flags & NAMESPACE_FLAG_LIST_PREFIX) != 0 &&
 	    (imapc_set->parsed_features & IMAPC_FEATURE_NO_DELAY_LOGIN) != 0) {
 		/* start logging in immediately */
-		imapc_storage_client_login(client, ns->user, set.host);
+		imapc_storage_client_login(client, ns->user, imapc_set->imapc_host);
 	}
 
 	*client_r = client;
@@ -432,7 +432,7 @@ imapc_storage_create(struct mail_storage *_storage,
 		storage->client = imapc_list->client;
 		storage->client->refcount++;
 	} else {
-		if (imapc_storage_client_create(ns, &storage->client, error_r) < 0)
+		if (imapc_storage_client_create(ns->list, &storage->client, error_r) < 0)
 			return -1;
 	}
 	storage->client->_storage = storage;
@@ -445,25 +445,25 @@ imapc_storage_create(struct mail_storage *_storage,
 
 	/* serialize all the settings */
 	_storage->unique_root_dir = p_strdup_printf(_storage->pool,
-						    "%s%s://(%s|%s):%s@%s:%u/%s mechs:%s features:%s "
+						    "%s://(%s|%s):%s@%s:%u/%s mechs:%s features:%s "
 						    "rawlog:%s cmd_timeout:%u maxidle:%u maxline:%zuu "
 						    "pop3delflg:%s root_dir:%s",
 						    storage->set->imapc_ssl,
-						    storage->set->imapc_ssl_verify ? "(verify)" : "",
 						    storage->set->imapc_user,
 						    storage->set->imapc_master_user,
 						    storage->set->imapc_password,
 						    storage->set->imapc_host,
 						    storage->set->imapc_port,
 						    storage->set->imapc_list_prefix,
-						    storage->set->imapc_sasl_mechanisms,
-						    storage->set->imapc_features,
+						    t_array_const_string_join(&storage->set->imapc_sasl_mechanisms,
+									      ","),
+						    t_array_const_string_join(&storage->set->imapc_features, ","),
 						    storage->set->imapc_rawlog_dir,
-						    storage->set->imapc_cmd_timeout,
-						    storage->set->imapc_max_idle_time,
+						    storage->set->imapc_cmd_timeout_secs,
+						    storage->set->imapc_max_idle_time_secs,
 						    (size_t) storage->set->imapc_max_line_length,
 						    storage->set->pop3_deleted_flag,
-						    ns->list->set.root_dir);
+						    ns->list->mail_set->mail_path);
 
 	imapc_storage_client_register_untagged(storage->client, "STATUS",
 					       imapc_untagged_status);
@@ -471,6 +471,12 @@ imapc_storage_create(struct mail_storage *_storage,
 					       imapc_untagged_namespace);
 	imapc_storage_client_register_untagged(storage->client, "OK",
 					       imapc_untagged_inprogress);
+	imapc_storage_client_register_untagged(storage->client, "OK",
+					       imapc_untagged_respcodes);
+	imapc_storage_client_register_untagged(storage->client, "NO",
+					       imapc_untagged_respcodes);
+	imapc_storage_client_register_untagged(storage->client, "BAD",
+					       imapc_untagged_respcodes);
 	return 0;
 }
 
@@ -513,19 +519,6 @@ void imapc_storage_client_unregister_untagged(struct imapc_storage_client *clien
 		}
 	}
 	i_unreached();
-}
-
-static void
-imapc_storage_get_list_settings(const struct mail_namespace *ns ATTR_UNUSED,
-				struct mailbox_list_settings *set)
-{
-	if (set->layout == NULL)
-		set->layout = MAILBOX_LIST_NAME_IMAPC;
-	set->storage_name_escape_char = IMAPC_LIST_STORAGE_NAME_ESCAPE_CHAR;
-	/* We want to have all imapc mailboxes accessible, so escape them if
-	   necessary. */
-	if (set->vname_escape_char == '\0')
-		set->vname_escape_char = IMAPC_LIST_VNAME_ESCAPE_CHAR;
 }
 
 static struct mailbox *
@@ -948,6 +941,7 @@ static void imapc_untagged_status(const struct imapc_untagged_reply *reply,
 				  struct imapc_storage_client *client)
 {
 	struct imapc_storage *storage = client->_storage;
+	struct mailbox *box = &storage->cur_status_box->box;
 	struct mailbox_status *status;
 	const struct imap_arg *list;
 	const char *remote_name, *key, *value;
@@ -974,9 +968,12 @@ static void imapc_untagged_status(const struct imapc_untagged_reply *reply,
 
 		if (strcasecmp(key, "MESSAGES") == 0)
 			status->messages = num;
-		else if (strcasecmp(key, "RECENT") == 0)
+		else if (strcasecmp(key, "RECENT") == 0) {
 			status->recent = num;
-		else if (strcasecmp(key, "UIDNEXT") == 0)
+			if ((box->enabled_features &
+			     MAILBOX_FEATURE_IMAP4REV2) != 0)
+				status->recent = 0;
+		} else if (strcasecmp(key, "UIDNEXT") == 0)
 			status->uidnext = num;
 		else if (strcasecmp(key, "UIDVALIDITY") == 0)
 			status->uidvalidity = num;
@@ -1086,6 +1083,44 @@ static void imapc_untagged_inprogress(const struct imapc_untagged_reply *reply,
 	storage->callbacks.notify_progress(box, &dtl, storage->callback_context);
 }
 
+static bool response_code_forward_alert(const struct imapc_storage_client *client) {
+	return imapc_client_is_ssl(client->client);
+}
+
+static void imapc_untagged_respcodes(const struct imapc_untagged_reply *reply,
+				     struct imapc_storage_client *client)
+{
+	if (reply->resp_text_key == NULL)
+		return;
+
+	struct mail_storage *storage = &client->_storage->storage;
+	void (*notify)(struct mailbox *mailbox, const char *text, void *context);
+	if (storage->callbacks.notify_ok != NULL && strcasecmp(reply->name, "OK") == 0)
+		notify = storage->callbacks.notify_ok;
+	else if (storage->callbacks.notify_no != NULL && strcasecmp(reply->name, "NO") == 0)
+		notify = storage->callbacks.notify_no;
+	else if (storage->callbacks.notify_bad != NULL && strcasecmp(reply->name, "BAD") == 0)
+		notify = storage->callbacks.notify_bad;
+	else
+		return;
+
+	for (unsigned long int index = 0; index < N_ELEMENTS(forwarded_response_codes); index++) {
+		const struct imapc_forwarded_response_codes *entry = &forwarded_response_codes[index];
+		if (strcasecmp(entry->code, reply->resp_text_key) != 0)
+			continue;
+
+		if (entry->forward != NULL && entry->forward(client)) {
+			string_t *text = t_str_new(80);
+			imap_write_args(text, reply->args);
+
+			struct imapc_mailbox *mbox = reply->untagged_box_context;
+			struct mailbox *box = mbox == NULL ? NULL : &mbox->box;
+			notify(box, str_c(text), storage->callback_context);
+		}
+		break;
+	}
+}
+
 static void imapc_mailbox_get_selected_status(struct imapc_mailbox *mbox,
 					      enum mailbox_status_items items,
 					      struct mailbox_status *status_r)
@@ -1132,7 +1167,8 @@ static int imapc_mailbox_run_status(struct mailbox *box,
 	str = t_str_new(256);
 	if ((items & STATUS_MESSAGES) != 0)
 		str_append(str, " MESSAGES");
-	if ((items & STATUS_RECENT) != 0)
+	if ((items & STATUS_RECENT) != 0 &&
+	    (box->enabled_features & MAILBOX_FEATURE_IMAP4REV2) == 0)
 		str_append(str, " RECENT");
 	if ((items & STATUS_UIDNEXT) != 0)
 		str_append(str, " UIDNEXT");
@@ -1187,7 +1223,7 @@ static int imapc_mailbox_get_status(struct mailbox *box,
 			return -1;
 		/* If this mailbox has private indexes make sure to check
 		   STATUS_UNSEEN from there. */
-		if (box->list->set.index_pvt_dir != NULL &&
+		if (box->list->mail_set->mail_index_private_path[0] != '\0' &&
 		    (items & (STATUS_UNSEEN)) != 0) {
 			struct mailbox_status pvt_idx_status;
 			index_storage_get_status(box, STATUS_UNSEEN,
@@ -1370,13 +1406,13 @@ struct mail_storage imapc_storage = {
 		       MAIL_STORAGE_CLASS_FLAG_UNIQUE_ROOT |
 		       MAIL_STORAGE_CLASS_FLAG_SECONDARY_INDEX,
 	.event_category = &event_category_imapc,
+	.set_info = &imapc_setting_parser_info,
 
 	.v = {
 		imapc_storage_alloc,
 		imapc_storage_create,
 		imapc_storage_destroy,
 		NULL,
-		imapc_storage_get_list_settings,
 		NULL,
 		imapc_mailbox_alloc,
 		NULL,

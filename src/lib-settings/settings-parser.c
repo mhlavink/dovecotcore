@@ -2,41 +2,42 @@
 
 #include "lib.h"
 #include "array.h"
-#include "net.h"
-#include "env-util.h"
-#include "execv-const.h"
+#include "crc32.h"
 #include "str.h"
-#include "strescape.h"
 #include "str-parse.h"
+#include "read-full.h"
 #include "var-expand.h"
 #include "settings-parser.h"
 
-#include <stdio.h>
-#include <unistd.h>
-#include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
+#include <fcntl.h>
+#include <unistd.h>
 
-#define IS_WHITE(c) ((c) == ' ' || (c) == '\t')
+struct boollist_removal {
+	ARRAY_TYPE(const_string) *array;
+	const char *key_suffix;
+};
 
 struct setting_parser_context {
 	pool_t set_pool, parser_pool;
 	int refcount;
         enum settings_parser_flags flags;
-	bool str_vars_are_expanded;
-	uint8_t change_counter;
 
 	const struct setting_parser_info *info;
 
 	/* Pointer to structure containing the values */
 	void *set_struct;
-	/* Pointer to structure containing non-zero values for settings that
-	   have been changed. */
-	void *change_struct;
+	ARRAY(struct boollist_removal) boollist_removals;
 
-	unsigned int linenum;
 	char *error;
 };
+
+const char *set_value_unknown = "UNKNOWN_VALUE_WITH_VARIABLES";
+
+#ifdef DEBUG
+static const char *boollist_eol_sentry = "boollist-eol";
+#endif
+static const char *set_array_stop = "array-stop";
 
 static void
 setting_parser_copy_defaults(struct setting_parser_context *ctx,
@@ -54,41 +55,14 @@ setting_parser_copy_defaults(struct setting_parser_context *ctx,
 		case SET_ENUM: {
 			/* fix enums by dropping everything after the
 			   first ':' */
-			strp = STRUCT_MEMBER_P(ctx->set_struct, def->offset);
+			strp = PTR_OFFSET(ctx->set_struct, def->offset);
 			p = strchr(*strp, ':');
 			if (p != NULL)
 				*strp = p_strdup_until(ctx->set_pool, *strp, p);
 			break;
 		}
-		case SET_STR_VARS: {
-			/* insert the unexpanded-character */
-			strp = STRUCT_MEMBER_P(ctx->set_struct, def->offset);
-			if (*strp != NULL) {
-				*strp = p_strconcat(ctx->set_pool,
-						    SETTING_STRVAR_UNEXPANDED,
-						    *strp, NULL);
-			}
-			break;
-		}
 		default:
 			break;
-		}
-	}
-}
-
-static void
-setting_parser_fill_defaults_strings(struct setting_parser_context *ctx)
-{
-	const struct setting_keyvalue *defaults = ctx->info->default_settings;
-	if (defaults == NULL)
-		return;
-
-	for (unsigned int i = 0; defaults[i].key != NULL; i++) {
-		const char *key = defaults[i].key;
-		const char *value = defaults[i].value;
-		if (settings_parse_keyvalue_nodup(ctx, key, value) <= 0) {
-			i_panic("Failed to add default setting %s=%s: %s",
-				key, value, settings_parser_get_error(ctx));
 		}
 	}
 }
@@ -112,13 +86,7 @@ settings_parser_init(pool_t set_pool, const struct setting_parser_info *root,
 	if (root->struct_size > 0) {
 		ctx->set_struct =
 			p_malloc(ctx->set_pool, root->struct_size);
-		if ((flags & SETTINGS_PARSER_FLAG_TRACK_CHANGES) != 0) {
-			ctx->change_counter = 1;
-			ctx->change_struct =
-				p_malloc(ctx->set_pool, root->struct_size);
-		}
 		setting_parser_copy_defaults(ctx, root);
-		setting_parser_fill_defaults_strings(ctx);
 	}
 
 	pool_ref(ctx->set_pool);
@@ -147,14 +115,43 @@ void settings_parser_unref(struct setting_parser_context **_ctx)
 	pool_unref(&ctx->parser_pool);
 }
 
+unsigned int
+setting_parser_info_get_define_count(const struct setting_parser_info *info)
+{
+	unsigned int count = 0;
+	while (info->defines[count].key != NULL)
+		count++;
+	return count;
+}
+
+bool setting_parser_info_find_key(const struct setting_parser_info *info,
+				  const char *key, unsigned int *idx_r)
+{
+	const char *suffix;
+
+	for (unsigned int i = 0; info->defines[i].key != NULL; i++) {
+		if (!str_begins(key, info->defines[i].key, &suffix))
+			; /* mismatch */
+		else if (suffix[0] == '\0') {
+			/* full setting */
+			while (i > 0 && info->defines[i].type == SET_ALIAS)
+				i--;
+			*idx_r = i;
+			return TRUE;
+		} else if (suffix[0] == '/' &&
+			   (info->defines[i].type == SET_STRLIST ||
+			    info->defines[i].type == SET_BOOLLIST)) {
+			/* strlist key */
+			*idx_r = i;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 void *settings_parser_get_set(const struct setting_parser_context *ctx)
 {
 	return ctx->set_struct;
-}
-
-void *settings_parser_get_changes(struct setting_parser_context *ctx)
-{
-	return ctx->change_struct;
 }
 
 static void settings_parser_set_error(struct setting_parser_context *ctx,
@@ -192,9 +189,26 @@ get_bool(struct setting_parser_context *ctx, const char *value, bool *result_r)
 }
 
 static int
+get_uintmax(struct setting_parser_context *ctx, const char *value,
+	    uintmax_t *result_r)
+{
+	if (str_to_uintmax(value, result_r) < 0) {
+		settings_parser_set_error(ctx, t_strdup_printf(
+			"Invalid number %s: %s", value,
+			str_num_error(value)));
+		return -1;
+	}
+	return 0;
+}
+
+static int
 get_uint(struct setting_parser_context *ctx, const char *value,
 	 unsigned int *result_r)
 {
+	if (settings_value_is_unlimited(value)) {
+		*result_r = SET_UINT_UNLIMITED;
+		return 0;
+	}
 	if (str_to_uint(value, result_r) < 0) {
 		settings_parser_set_error(ctx, t_strdup_printf(
 			"Invalid number %s: %s", value,
@@ -250,6 +264,27 @@ static int get_enum(struct setting_parser_context *ctx, const char *value,
 }
 
 static int
+get_file(struct setting_parser_context *ctx, bool dup_value, const char **value)
+{
+	if (**value == '\0')
+		return 0;
+	const char *content = strchr(*value, '\n');
+	if (content != NULL) {
+		if (dup_value)
+			*value = p_strdup(ctx->set_pool, *value);
+		return 0;
+	}
+
+	const char *error;
+	if (settings_parse_read_file(*value, *value, ctx->set_pool, NULL,
+				     value, &error) < 0) {
+		settings_parser_set_error(ctx, error);
+		return -1;
+	}
+	return 0;
+}
+
+static int
 get_in_port_zero(struct setting_parser_context *ctx, const char *value,
 	 in_port_t *result_r)
 {
@@ -261,19 +296,82 @@ get_in_port_zero(struct setting_parser_context *ctx, const char *value,
 	return 0;
 }
 
-static void
+int settings_parse_read_file(const char *path, const char *value_path,
+			     pool_t pool, struct stat *st_r,
+			     const char **output_r, const char **error_r)
+{
+	struct stat st;
+	int fd;
+
+	if ((fd = open(path, O_RDONLY)) == -1) {
+		*error_r = t_strdup_printf("open(%s) failed: %m", path);
+		return -1;
+	}
+	if (fstat(fd, &st) < 0) {
+		*error_r = t_strdup_printf("fstat(%s) failed: %m", path);
+		i_close_fd(&fd);
+		return -1;
+	}
+	size_t value_path_len = strlen(value_path);
+	char *buf = p_malloc(pool, value_path_len + 1 + st.st_size + 1);
+	memcpy(buf, value_path, value_path_len);
+	buf[value_path_len] = '\n';
+
+	int ret = read_full(fd, buf + value_path_len + 1, st.st_size);
+	i_close_fd(&fd);
+	if (ret < 0) {
+		*error_r = t_strdup_printf("read(%s) failed: %m", path);
+		return -1;
+	}
+	if (ret == 0) {
+		*error_r = t_strdup_printf(
+			"read(%s) failed: Unexpected EOF", path);
+		return -1;
+	}
+	if (memchr(buf + value_path_len + 1, '\0', st.st_size) != NULL) {
+		*error_r = t_strdup_printf(
+			"%s contains NUL characters - This is not supported",
+			path);
+		return -1;
+	}
+
+	if (st_r != NULL)
+		*st_r = st;
+	*output_r = buf;
+	return 0;
+}
+
+static int
 settings_parse_strlist(struct setting_parser_context *ctx,
 		       ARRAY_TYPE(const_string) *array,
-		       const char *key, const char *value)
+		       const char *key, const char *value, const char **error_r)
 {
 	const char *const *items;
 	const char *vkey, *vvalue;
 	unsigned int i, count;
 
-	key = strrchr(key, SETTINGS_SEPARATOR);
-	if (key == NULL)
-		return;
-	key++;
+	/* If the next element after the visible array is set_array_stop, then
+	   the strlist should not be modified any further. */
+	if (array_is_created(array)) {
+		items = array_get(array, &count);
+		if (items[count] == set_array_stop)
+			return 0;
+	}
+
+	const char *suffix = strchr(key, SETTINGS_SEPARATOR);
+	if (suffix == NULL) {
+		if (value[0] == '\0') {
+			/* clear out the whole strlist */
+			if (array_is_created(array))
+				array_clear(array);
+			return 0;
+		}
+
+		*error_r = t_strdup_printf(
+			"Setting is a string list, use %s/key=value'", key);
+		return -1;
+	}
+	key = settings_section_unescape(suffix + 1);
 	vvalue = p_strdup(ctx->set_pool, value);
 
 	if (!array_is_created(array))
@@ -284,13 +382,229 @@ settings_parse_strlist(struct setting_parser_context *ctx,
 	for (i = 0; i < count; i += 2) {
 		if (strcmp(items[i], key) == 0) {
 			array_idx_set(array, i + 1, &vvalue);
-			return;
+			return 0;
 		}
 	}
 
 	vkey = p_strdup(ctx->set_pool, key);
 	array_push_back(array, &vkey);
 	array_push_back(array, &vvalue);
+	return 0;
+}
+
+int settings_parse_boollist_string(const char *value, pool_t pool,
+				   ARRAY_TYPE(const_string) *dest,
+				   const char **error_r)
+{
+	string_t *elem = t_str_new(32);
+	const char *elem_dup;
+	bool quoted = FALSE, end_of_quote = FALSE;
+	for (unsigned int i = 0; value[i] != '\0'; i++) {
+		switch (value[i]) {
+		case '"':
+			if (!quoted) {
+				/* beginning of a string */
+				if (str_len(elem) != 0) {
+					*error_r = "'\"' in the middle of a string";
+					return -1;
+				}
+				quoted = TRUE;
+			} else if (end_of_quote) {
+				*error_r = "Expected ',' or ' ' after '\"'";
+				return -1;
+			} else {
+				/* end of a string */
+				end_of_quote = TRUE;
+			}
+			break;
+		case ' ':
+		case ',':
+			if (quoted && !end_of_quote) {
+				/* inside a "quoted string" */
+				str_append_c(elem, value[i]);
+				break;
+			}
+
+			if (quoted || str_len(elem) > 0) {
+				elem_dup = p_strdup(pool,
+					settings_section_unescape(str_c(elem)));
+				array_push_back(dest, &elem_dup);
+				str_truncate(elem, 0);
+			}
+			quoted = FALSE;
+			end_of_quote = FALSE;
+			break;
+		case '\\':
+			if (quoted) {
+				i++;
+				if (value[i] == '\0') {
+					*error_r = "Value ends with '\\'";
+					return -1;
+				}
+			}
+			/* fall through */
+		default:
+			if (end_of_quote) {
+				*error_r = "Expected ',' or ' ' after '\"'";
+				return -1;
+			}
+			str_append_c(elem, value[i]);
+			break;
+		}
+	}
+	if (quoted && !end_of_quote) {
+		*error_r = "Missing ending '\"'";
+		return -1;
+	}
+	if (quoted || str_len(elem) > 0) {
+		elem_dup = p_strdup(pool, settings_section_unescape(str_c(elem)));
+		array_push_back(dest, &elem_dup);
+	}
+	return 0;
+}
+
+const char *const *settings_boollist_get(const ARRAY_TYPE(const_string) *array)
+{
+	const char *const *strings = empty_str_array;
+	unsigned int count;
+
+	if (array_not_empty(array)) {
+		strings = array_get(array, &count);
+		i_assert(strings[count] == NULL);
+#ifdef DEBUG
+	i_assert(strings[count+1] == boollist_eol_sentry ||
+		 (strings[count+1] == set_array_stop &&
+		  strings[count+2] == boollist_eol_sentry));
+#endif
+	}
+	return strings;
+
+}
+
+void settings_file_get(const char *value, pool_t path_pool,
+		       struct settings_file *file_r)
+{
+	const char *p;
+
+	if (*value == '\0') {
+		file_r->path = "";
+		file_r->content = "";
+		return;
+	}
+
+	p = strchr(value, '\n');
+	if (p == NULL)
+		i_panic("Settings file value is missing LF");
+	file_r->path = p_strdup_until(path_pool, value, p);
+	file_r->content = p + 1;
+}
+
+bool settings_file_has_path(const char *value)
+{
+	/* value must be in <path><LF><content> format */
+	const char *p = strchr(value, '\n');
+	if (p == NULL)
+		i_panic("Settings file value is missing LF");
+	return p != value;
+}
+
+const char *settings_file_get_value(pool_t pool,
+				    const struct settings_file *file)
+{
+	const char *path = file->path != NULL ? file->path : "";
+	size_t path_len = strlen(path);
+	size_t content_len = strlen(file->content);
+
+	char *value = p_malloc(pool, path_len + 1 + content_len + 1);
+	memcpy(value, path, path_len);
+	value[path_len] = '\n';
+	memcpy(value + path_len + 1, file->content, content_len);
+	return value;
+}
+
+void settings_boollist_finish(ARRAY_TYPE(const_string) *array, bool stop)
+{
+	array_append_zero(array);
+	if (stop)
+		array_push_back(array, &set_array_stop);
+#ifdef DEBUG
+	array_push_back(array, &boollist_eol_sentry);
+	array_pop_back(array);
+#endif
+	if (stop)
+		array_pop_back(array);
+	array_pop_back(array);
+}
+
+bool settings_boollist_is_stopped(const ARRAY_TYPE(const_string) *array)
+{
+	/* The first element after the visible array is NULL. If the next element
+	   after the NULL is set_array_stop, then the boollist is stopped. */
+	unsigned int count;
+	const char *const *values = array_get(array, &count);
+	i_assert(values[count] == NULL);
+	return values[count + 1] == set_array_stop;
+}
+
+static int
+settings_parse_boollist(struct setting_parser_context *ctx,
+			ARRAY_TYPE(const_string) *array,
+			const char *key, const char *value)
+{
+	const char *const *elem, *error;
+
+	if (!array_is_created(array))
+		p_array_init(array, ctx->set_pool, 5);
+	else {
+		/* If the array is stopped, then the boollist should not
+		   be modified any further. */
+		if (settings_boollist_is_stopped(array))
+			return 0;
+	}
+
+	key = strrchr(key, SETTINGS_SEPARATOR);
+	if (key == NULL) {
+		/* replace the whole boollist */
+		array_clear(array);
+		if (settings_parse_boollist_string(value, ctx->set_pool,
+						   array, &error) < 0) {
+			settings_parser_set_error(ctx, error);
+			return -1;
+		}
+		/* keep it NULL-terminated for each access */
+		settings_boollist_finish(array, FALSE);
+		return 0;
+	}
+	key = settings_section_unescape(key + 1);
+
+	bool value_bool;
+	if (get_bool(ctx, value, &value_bool) < 0)
+		return -1;
+
+	elem = array_lsearch(array, &key, i_strcmp_p);
+	if (elem == NULL && value_bool) {
+		/* add missing element */
+		key = p_strdup(ctx->set_pool, key);
+		array_push_back(array, &key);
+	} else if (!value_bool) {
+		/* remove unwanted element */
+		if (elem != NULL) {
+			key = *elem;
+			array_delete(array, array_ptr_to_idx(array, elem), 1);
+		} else {
+			key = p_strdup(ctx->parser_pool, key);
+		}
+		/* remember the removal for settings_parse_list_has_key() */
+		if (!array_is_created(&ctx->boollist_removals))
+			p_array_init(&ctx->boollist_removals, ctx->parser_pool, 2);
+		struct boollist_removal *removal =
+			array_append_space(&ctx->boollist_removals);
+		removal->array = array;
+		removal->key_suffix = key;
+	}
+	/* keep it NULL-terminated for each access */
+	settings_boollist_finish(array, FALSE);
+	return 0;
 }
 
 static int
@@ -298,9 +612,15 @@ settings_parse(struct setting_parser_context *ctx,
 	       const struct setting_define *def,
 	       const char *key, const char *value, bool dup_value)
 {
-	void *ptr, *change_ptr;
+	void *ptr;
 	const void *ptr2;
 	const char *error;
+	int ret;
+
+	if (value == set_value_unknown) {
+		/* setting value is unknown - preserve the exact pointer */
+		dup_value = FALSE;
+	}
 
 	i_free(ctx->error);
 
@@ -309,13 +629,14 @@ settings_parse(struct setting_parser_context *ctx,
 		def--;
 	}
 
-	change_ptr = ctx->change_struct == NULL ? NULL :
-		STRUCT_MEMBER_P(ctx->change_struct, def->offset);
-
-	ptr = STRUCT_MEMBER_P(ctx->set_struct, def->offset);
+	ptr = PTR_OFFSET(ctx->set_struct, def->offset);
 	switch (def->type) {
 	case SET_BOOL:
 		if (get_bool(ctx, value, (bool *)ptr) < 0)
+			return -1;
+		break;
+	case SET_UINTMAX:
+		if (get_uintmax(ctx, value, (uintmax_t *)ptr) < 0)
 			return -1;
 		break;
 	case SET_UINT:
@@ -327,18 +648,30 @@ settings_parse(struct setting_parser_context *ctx,
 			return -1;
 		break;
 	case SET_TIME:
+		if (settings_value_is_unlimited(value)) {
+			*(unsigned int *)ptr = SET_TIME_INFINITE;
+			return 0;
+		}
 		if (str_parse_get_interval(value, (unsigned int *)ptr, &error) < 0) {
 			settings_parser_set_error(ctx, error);
 			return -1;
 		}
 		break;
 	case SET_TIME_MSECS:
+		if (settings_value_is_unlimited(value)) {
+			*(unsigned int *)ptr = SET_TIME_MSECS_INFINITE;
+			return 0;
+		}
 		if (str_parse_get_interval_msecs(value, (unsigned int *)ptr, &error) < 0) {
 			settings_parser_set_error(ctx, error);
 			return -1;
 		}
 		break;
 	case SET_SIZE:
+		if (settings_value_is_unlimited(value)) {
+			*(uoff_t *)ptr = SET_SIZE_UNLIMITED;
+			return 0;
+		}
 		if (str_parse_get_size(value, (uoff_t *)ptr, &error) < 0) {
 			settings_parser_set_error(ctx, error);
 			return -1;
@@ -349,42 +682,91 @@ settings_parse(struct setting_parser_context *ctx,
 			return -1;
 		break;
 	case SET_STR:
+	case SET_STR_NOVARS:
 		if (dup_value)
 			value = p_strdup(ctx->set_pool, value);
 		*((const char **)ptr) = value;
 		break;
-	case SET_STR_VARS:
-		*((char **)ptr) = p_strconcat(ctx->set_pool,
-					      ctx->str_vars_are_expanded ?
-					      SETTING_STRVAR_EXPANDED :
-					      SETTING_STRVAR_UNEXPANDED,
-					      value, NULL);
+	case SET_FILE: {
+		/* only expand first line, if there */
+		const char *path = t_strcut(value, '\n');
+		if (strstr(path, "%{") != NULL) {
+			if (t_var_expand(value, NULL, &value, &error) < 0) {
+				settings_parser_set_error(ctx, error);
+				return -1;
+			}
+		}
+		/* Read the file directly to get the content */
+		if (get_file(ctx, dup_value, &value) < 0) {
+			/* We may be running settings_check()s in doveconf at a
+			   time when the file couldn't yet be opened. To avoid
+			   unnecessary errors, set the value unknown. */
+			*((const char **)ptr) = set_value_unknown;
+			return -1;
+		}
+		*((const char **)ptr) = value;
 		break;
+	}
 	case SET_ENUM:
 		/* get the available values from default string */
 		i_assert(ctx->info->defaults != NULL);
-		ptr2 = CONST_STRUCT_MEMBER_P(ctx->info->defaults, def->offset);
+		ptr2 = CONST_PTR_OFFSET(ctx->info->defaults, def->offset);
 		if (get_enum(ctx, value, (char **)ptr,
 			     *(const char *const *)ptr2) < 0)
 			return -1;
 		break;
 	case SET_STRLIST:
-		settings_parse_strlist(ctx, ptr, key, value);
+		T_BEGIN {
+			ret = settings_parse_strlist(ctx, ptr, key, value,
+						     &error);
+			if (ret < 0)
+				settings_parser_set_error(ctx, error);
+		} T_END;
+		if (ret < 0)
+			return -1;
+		break;
+	case SET_BOOLLIST:
+		T_BEGIN {
+			ret = settings_parse_boollist(ctx, ptr, key, value);
+		} T_END;
+		if (ret < 0)
+			return -1;
 		break;
 	case SET_FILTER_ARRAY: {
 		/* Add filter names to the array. Userdb can add more simply
-		   by giving e.g. "namespace=newname" without it removing the
+		   by giving e.g. "namespace+=newname" without it removing the
 		   existing ones. */
 		ARRAY_TYPE(const_string) *arr = ptr;
-		const char *const *list = t_strsplit(value, ",\t ");
+		const char *const *list =
+			t_strsplit(value, SETTINGS_FILTER_ARRAY_SEPARATORS);
 		unsigned int i, count = str_array_length(list);
 		if (!array_is_created(arr))
 			p_array_init(arr, ctx->set_pool, count);
+		else {
+			/* If the next element after the visible array is
+			   set_array_stop, then the named list filter
+			   should not be modified any further. */
+			unsigned int old_count;
+			const char *const *old_values =
+				array_get(arr, &old_count);
+			if (old_values[old_count] == set_array_stop)
+				break;
+		}
+		unsigned int insert_pos = 0;
 		for (i = 0; i < count; i++) {
 			const char *value = p_strdup(ctx->set_pool,
 				settings_section_unescape(list[i]));
-			array_push_back(arr, &value);
+			if (array_lsearch(arr, &value, i_strcmp_p) != NULL)
+				continue; /* ignore duplicates */
+			if ((ctx->flags & SETTINGS_PARSER_FLAG_INSERT_FILTERS) != 0)
+				array_insert(arr, insert_pos++, &value, 1);
+			else
+				array_push_back(arr, &value);
 		}
+		/* Make sure the next element after the array is accessible for
+		   the set_array_stop check. */
+		array_append_zero(arr);
+		array_pop_back(arr);
 		break;
 	}
 	case SET_FILTER_NAME:
@@ -393,12 +775,6 @@ settings_parse(struct setting_parser_context *ctx,
 		return -1;
 	case SET_ALIAS:
 		i_unreached();
-	}
-
-	if (change_ptr != NULL) {
-		uint8_t *change_ptr8 = change_ptr;
-		if (*change_ptr8 < ctx->change_counter)
-			*change_ptr8 = ctx->change_counter;
 	}
 	return 0;
 }
@@ -418,14 +794,15 @@ settings_find_key(struct setting_parser_context *ctx, const char *key,
 		return TRUE;
 	}
 
-	/* try to find strlist/key prefix */
+	/* try to find list/key prefix */
 	end = strrchr(key, SETTINGS_SEPARATOR);
 	if (end == NULL)
 		return FALSE;
 
 	parent_key = t_strdup_until(key, end);
 	def = setting_define_find(ctx->info, parent_key);
-	if (def != NULL && def->type == SET_STRLIST) {
+	if (def != NULL && (def->type == SET_STRLIST ||
+			    def->type == SET_BOOLLIST)) {
 		*def_r = def;
 		return TRUE;
 	}
@@ -477,6 +854,78 @@ int settings_parse_keyidx_value_nodup(struct setting_parser_context *ctx,
 			      key, value, FALSE);
 }
 
+void settings_parse_array_stop(struct setting_parser_context *ctx,
+			       unsigned int key_idx)
+{
+	i_assert(ctx->info->defines[key_idx].type == SET_FILTER_ARRAY ||
+		 ctx->info->defines[key_idx].type == SET_BOOLLIST ||
+		 ctx->info->defines[key_idx].type == SET_STRLIST);
+
+	ARRAY_TYPE(const_string) *arr =
+		PTR_OFFSET(ctx->set_struct, ctx->info->defines[key_idx].offset);
+	if (!array_is_created(arr))
+		p_array_init(arr, ctx->set_pool, 1);
+
+	if (ctx->info->defines[key_idx].type == SET_BOOLLIST)
+		settings_boollist_finish(arr, TRUE);
+	else {
+		/* Use the next element hidden after the array to keep
+		   the stop-state */
+		array_push_back(arr, &set_array_stop);
+		array_pop_back(arr);
+	}
+}
+
+static int boollist_removal_cmp(const struct boollist_removal *r1,
+				const struct boollist_removal *r2)
+{
+	if (r1->array != r2->array)
+		return 1;
+	return strcmp(r1->key_suffix, r2->key_suffix);
+}
+
+bool settings_parse_list_has_key(struct setting_parser_context *ctx,
+				 unsigned int key_idx,
+				 const char *key_suffix)
+{
+	const struct setting_define *def = &ctx->info->defines[key_idx];
+	unsigned int skip = UINT_MAX;
+
+	switch (def->type) {
+	case SET_STRLIST:
+		skip = 2;
+		break;
+	case SET_BOOLLIST:
+		skip = 1;
+		if (!array_is_created(&ctx->boollist_removals))
+			break;
+
+		struct boollist_removal lookup = {
+			.array = PTR_OFFSET(ctx->set_struct, def->offset),
+			.key_suffix = key_suffix,
+		};
+		if (array_lsearch(&ctx->boollist_removals, &lookup,
+				  boollist_removal_cmp) != NULL)
+			return TRUE;
+		break;
+	default:
+		i_unreached();
+	}
+
+	ARRAY_TYPE(const_string) *array =
+		PTR_OFFSET(ctx->set_struct, def->offset);
+	if (!array_is_created(array))
+		return FALSE;
+
+	unsigned int i, count;
+	const char *const *items = array_get(array, &count);
+	for (i = 0; i < count; i += skip) {
+		if (strcmp(items[i], key_suffix) == 0)
+			return TRUE;
+	}
+	return FALSE;
+}
+
 const void *
 settings_parse_get_value(struct setting_parser_context *ctx,
 			 const char **key, enum setting_type *type_r)
@@ -490,36 +939,13 @@ settings_parse_get_value(struct setting_parser_context *ctx,
 		i_assert(def != ctx->info->defines);
 		def--;
 		/* Replace the key with the unaliased key. We assume here that
-		   strlists don't have aliases, because the key replacement
+		   lists don't have aliases, because the key replacement
 		   would only need to replace the key prefix then. */
-		i_assert(def->type != SET_STRLIST);
+		i_assert(def->type != SET_STRLIST && def->type != SET_BOOLLIST);
 		*key = def->key;
 	}
 	*type_r = def->type;
-	return STRUCT_MEMBER_P(ctx->set_struct, def->offset);
-}
-
-void settings_parse_set_change_counter(struct setting_parser_context *ctx,
-				       uint8_t change_counter)
-{
-	i_assert(change_counter > 0);
-	i_assert((ctx->flags & SETTINGS_PARSER_FLAG_TRACK_CHANGES) != 0);
-	ctx->change_counter = change_counter;
-}
-
-uint8_t settings_parse_get_change_counter(struct setting_parser_context *ctx,
-					  const char *key)
-{
-	const struct setting_define *def;
-	const uint8_t *p;
-
-	if (!settings_find_key(ctx, key, FALSE, &def))
-		return 0;
-	if (ctx->change_struct == NULL)
-		return 0;
-
-	p = STRUCT_MEMBER_P(ctx->change_struct, def->offset);
-	return *p;
+	return PTR_OFFSET(ctx->set_struct, def->offset);
 }
 
 bool settings_check(struct event *event, const struct setting_parser_info *info,
@@ -551,336 +977,177 @@ bool settings_parser_check(struct setting_parser_context *ctx, pool_t pool,
 			      ctx->set_struct, error_r);
 }
 
-void settings_parse_set_expanded(struct setting_parser_context *ctx,
-				 bool is_expanded)
+unsigned int settings_hash(const struct setting_parser_info *info,
+			   const void *set, const char *const *except_fields)
 {
-	ctx->str_vars_are_expanded = is_expanded;
-}
+	unsigned int crc = 0;
 
-static int ATTR_NULL(3, 4, 5)
-settings_var_expand_info(const struct setting_parser_info *info, void *set,
-			 pool_t pool,
-			 const struct var_expand_table *table,
-			 const struct var_expand_func_table *func_table,
-			 void *func_context, string_t *str,
-			 const char **error_r)
-{
-	const struct setting_define *def;
-	void *value;
-	const char *error;
-	int ret, final_ret = 1;
+	for (unsigned int i = 0; info->defines[i].key != NULL; i++) {
+		if (except_fields != NULL &&
+		    str_array_find(except_fields, info->defines[i].key))
+			continue;
 
-	for (def = info->defines; def->key != NULL; def++) {
-		value = PTR_OFFSET(set, def->offset);
-		switch (def->type) {
-		case SET_BOOL:
+		const void *p = CONST_PTR_OFFSET(set, info->defines[i].offset);
+		switch (info->defines[i].type) {
+		case SET_BOOL: {
+			const bool *b = p;
+			crc = crc32_data_more(crc, b, sizeof(*b));
+			break;
+		}
+		case SET_UINTMAX: {
+			const uintmax_t *i = p;
+			crc = crc32_data_more(crc, i, sizeof(*i));
+			break;
+		}
 		case SET_UINT:
 		case SET_UINT_OCT:
 		case SET_TIME:
-		case SET_TIME_MSECS:
-		case SET_SIZE:
-		case SET_IN_PORT:
-		case SET_STR:
-		case SET_ENUM:
-		case SET_STRLIST:
-		case SET_FILTER_NAME:
-		case SET_FILTER_ARRAY:
-		case SET_ALIAS:
+		case SET_TIME_MSECS: {
+			const unsigned int *i = p;
+			crc = crc32_data_more(crc, i, sizeof(*i));
 			break;
-		case SET_STR_VARS: {
-			const char **val = value;
-
-			if (*val == NULL)
-				break;
-
-			if (table == NULL) {
-				i_assert(**val == SETTING_STRVAR_EXPANDED[0] ||
-					 **val == SETTING_STRVAR_UNEXPANDED[0]);
-				*val += 1;
-			} else if (**val == SETTING_STRVAR_UNEXPANDED[0]) {
-				str_truncate(str, 0);
-				ret = var_expand_with_funcs(str, *val + 1, table,
-							    func_table, func_context,
-							    &error);
-				if (final_ret > ret) {
-					final_ret = ret;
-					*error_r = t_strdup_printf(
-						"%s: %s", def->key, error);
-				}
-				*val = p_strdup(pool, str_c(str));
+		}
+		case SET_SIZE: {
+			const uoff_t *s = p;
+			crc = crc32_data_more(crc, s, sizeof(*s));
+			break;
+		}
+		case SET_IN_PORT: {
+			const in_port_t *port = p;
+			crc = crc32_data_more(crc, port, sizeof(*port));
+			break;
+		}
+		case SET_STR:
+		case SET_STR_NOVARS:
+		case SET_ENUM: {
+			const char *const *str = p;
+			crc = crc32_str_more(crc, *str);
+			break;
+		}
+		case SET_FILE: {
+			const char *const *str = p;
+			const char *lf = strchr(*str, '\n');
+			if (lf == NULL)
+				i_panic("Settings file value is missing LF");
+			if (lf == *str) {
+				/* no filename - need to hash the content */
+				crc = crc32_str_more(crc, *str + 1);
 			} else {
-				i_assert(**val == SETTING_STRVAR_EXPANDED[0]);
-				*val += 1;
+				/* hashing the filename is enough */
+				crc = crc32_data_more(crc, *str, lf - *str);
 			}
 			break;
 		}
-		}
-	}
-
-	if (final_ret <= 0)
-		return final_ret;
-
-	if (info->expand_check_func != NULL) {
-		if (!info->expand_check_func(set, pool, error_r))
-			return -1;
-	}
-
-	return final_ret;
-}
-
-int settings_var_expand(const struct setting_parser_info *info,
-			void *set, pool_t pool,
-			const struct var_expand_table *table,
-			const char **error_r)
-{
-	return settings_var_expand_with_funcs(info, set, pool, table,
-					      NULL, NULL, error_r);
-}
-
-int settings_var_expand_with_funcs(const struct setting_parser_info *info,
-				   void *set, pool_t pool,
-				   const struct var_expand_table *table,
-				   const struct var_expand_func_table *func_table,
-				   void *func_context, const char **error_r)
-{
-	int ret;
-
-	T_BEGIN {
-		string_t *str = t_str_new(256);
-
-		ret = settings_var_expand_info(info, set, pool, table,
-					       func_table, func_context, str,
-					       error_r);
-	} T_END_PASS_STR_IF(ret <= 0, error_r);
-	return ret;
-}
-
-void settings_parse_var_skip(struct setting_parser_context *ctx)
-{
-	settings_var_skip(ctx->info, ctx->set_struct);
-}
-
-void settings_var_skip(const struct setting_parser_info *info, void *set)
-{
-	const char *error;
-
-	(void)settings_var_expand_info(info, set, NULL, NULL, NULL, NULL, NULL,
-				       &error);
-}
-
-static void
-setting_copy(enum setting_type type, const void *src, void *dest, pool_t pool,
-	     bool keep_values)
-{
-	switch (type) {
-	case SET_BOOL: {
-		const bool *src_bool = src;
-		bool *dest_bool = dest;
-
-		*dest_bool = *src_bool;
-		break;
-	}
-	case SET_UINT:
-	case SET_UINT_OCT:
-	case SET_TIME:
-	case SET_TIME_MSECS: {
-		const unsigned int *src_uint = src;
-		unsigned int *dest_uint = dest;
-
-		*dest_uint = *src_uint;
-		break;
-	}
-	case SET_SIZE: {
-		const uoff_t *src_size = src;
-		uoff_t *dest_size = dest;
-
-		*dest_size = *src_size;
-		break;
-	}
-	case SET_IN_PORT: {
-		const in_port_t *src_size = src;
-		in_port_t *dest_size = dest;
-
-		*dest_size = *src_size;
-		break;
-	}
-	case SET_STR_VARS:
-	case SET_STR:
-	case SET_ENUM: {
-		const char *const *src_str = src;
-		const char **dest_str = dest;
-
-		if (keep_values)
-			*dest_str = *src_str;
-		else
-			*dest_str = p_strdup(pool, *src_str);
-		break;
-	}
-	case SET_STRLIST: {
-		const ARRAY_TYPE(const_string) *src_arr = src;
-		ARRAY_TYPE(const_string) *dest_arr = dest;
-		const char *const *strings, *const *dest_strings, *dup;
-		unsigned int i, j, count, dest_count;
-
-		if (!array_is_created(src_arr))
-			break;
-
-		strings = array_get(src_arr, &count);
-		i_assert(count % 2 == 0);
-		if (!array_is_created(dest_arr))
-			p_array_init(dest_arr, pool, count);
-		dest_count = array_count(dest_arr);
-		i_assert(dest_count % 2 == 0);
-		for (i = 0; i < count; i += 2) {
-			if (dest_count > 0) {
-				dest_strings = array_front(dest_arr);
-				for (j = 0; j < dest_count; j += 2) {
-					if (strcmp(strings[i], dest_strings[j]) == 0)
-						break;
-				}
-				if (j < dest_count)
-					continue;
+		case SET_STRLIST:
+		case SET_BOOLLIST:
+		case SET_FILTER_ARRAY: {
+			const ARRAY_TYPE(const_string) *list = p;
+			if (array_is_created(list)) {
+				const char *str;
+				array_foreach_elem(list, str)
+					crc = crc32_str_more(crc, str);
 			}
-			dup = keep_values ? strings[i] : p_strdup(pool, strings[i]);
-			array_push_back(dest_arr, &dup);
-			dup = keep_values ? strings[i+1] : p_strdup(pool, strings[i+1]);
-			array_push_back(dest_arr, &dup);
-		}
-		break;
-	}
-	case SET_FILTER_ARRAY: {
-		const ARRAY_TYPE(const_string) *src_arr = src;
-		ARRAY_TYPE(const_string) *dest_arr = dest;
-		const char *const *strings, *const *dest_strings, *dup;
-		unsigned int i, j, count, dest_count;
-
-		if (!array_is_created(src_arr))
 			break;
-
-		strings = array_get(src_arr, &count);
-		if (!array_is_created(dest_arr))
-			p_array_init(dest_arr, pool, count);
-		dest_count = array_count(dest_arr);
-		for (i = 0; i < count; i++) {
-			if (dest_count > 0) {
-				dest_strings = array_front(dest_arr);
-				for (j = 0; j < dest_count; j++) {
-					if (strcmp(strings[i], dest_strings[j]) == 0)
-						break;
-				}
-				if (j < dest_count)
-					continue;
-			}
-			dup = keep_values ? strings[i] : p_strdup(pool, strings[i]);
-			array_push_back(dest_arr, &dup);
 		}
-		break;
+		case SET_ALIAS:
+		case SET_FILTER_NAME:
+			break;
+		}
 	}
-	case SET_FILTER_NAME:
-	case SET_ALIAS:
-		break;
-	}
+	return crc;
 }
 
-static void *settings_dup_full(const struct setting_parser_info *info,
-			       const void *set, pool_t pool, bool keep_values)
+bool settings_equal(const struct setting_parser_info *info,
+		    const void *set1, const void *set2,
+		    const char *const *except_fields)
 {
-	const struct setting_define *def;
-	const void *src;
-	void *dest_set, *dest;
+	for (unsigned int i = 0; info->defines[i].key != NULL; i++) {
+		if (except_fields != NULL &&
+		    str_array_find(except_fields, info->defines[i].key))
+			continue;
 
-	if (info->struct_size == 0)
-		return NULL;
-
-	/* don't just copy everything from set to dest_set. it may contain
-	   some non-setting fields allocated from the original pool. */
-	dest_set = p_malloc(pool, info->struct_size);
-	for (def = info->defines; def->key != NULL; def++) {
-		src = CONST_PTR_OFFSET(set, def->offset);
-		dest = PTR_OFFSET(dest_set, def->offset);
-
-		setting_copy(def->type, src, dest, pool, keep_values);
-	}
-
-	i_assert(info->pool_offset1 > 0);
-	pool_t *pool_p = PTR_OFFSET(dest_set, info->pool_offset1 - 1);
-	*pool_p = pool;
-	return dest_set;
-}
-
-static void *
-settings_changes_dup(const struct setting_parser_info *info,
-		     const void *change_set, pool_t pool)
-{
-	const struct setting_define *def;
-	const void *src;
-	void *dest_set, *dest;
-
-	if (change_set == NULL || info->struct_size == 0)
-		return NULL;
-
-	dest_set = p_malloc(pool, info->struct_size);
-	for (def = info->defines; def->key != NULL; def++) {
-		src = CONST_PTR_OFFSET(change_set, def->offset);
-		dest = PTR_OFFSET(dest_set, def->offset);
-
-		switch (def->type) {
-		case SET_BOOL:
+		const void *p1 = CONST_PTR_OFFSET(set1, info->defines[i].offset);
+		const void *p2 = CONST_PTR_OFFSET(set2, info->defines[i].offset);
+		switch (info->defines[i].type) {
+		case SET_BOOL: {
+			const bool *b1 = p1, *b2 = p2;
+			if (*b1 != *b2)
+				return FALSE;
+			break;
+		}
+		case SET_UINTMAX: {
+			const uintmax_t *i1 = p1, *i2 = p2;
+			if (*i1 != *i2)
+				return FALSE;
+			break;
+		}
 		case SET_UINT:
 		case SET_UINT_OCT:
 		case SET_TIME:
-		case SET_TIME_MSECS:
-		case SET_SIZE:
-		case SET_IN_PORT:
-		case SET_STR_VARS:
-		case SET_STR:
-		case SET_ENUM:
-		case SET_STRLIST:
-		case SET_FILTER_ARRAY:
-			*((uint8_t *)dest) = *((const uint8_t *)src);
+		case SET_TIME_MSECS: {
+			const unsigned int *i1 = p1, *i2 = p2;
+			if (*i1 != *i2)
+				return FALSE;
 			break;
-		case SET_FILTER_NAME:
+		}
+		case SET_SIZE: {
+			const uoff_t *s1 = p1, *s2 = p2;
+			if (*s1 != *s2)
+				return FALSE;
+			break;
+		}
+		case SET_IN_PORT: {
+			const in_port_t *port1 = p1, *port2 = p2;
+			if (*port1 != *port2)
+				return FALSE;
+			break;
+		}
+		case SET_STR:
+		case SET_STR_NOVARS:
+		case SET_ENUM:
+		case SET_FILE: {
+			const char *const *str1 = p1, *const *str2 = p2;
+			if (strcmp(*str1, *str2) != 0)
+				return FALSE;
+			break;
+		}
+		case SET_STRLIST:
+		case SET_BOOLLIST:
+		case SET_FILTER_ARRAY: {
+			const ARRAY_TYPE(const_string) *list1 = p1, *list2 = p2;
+			if (array_is_empty(list1)) {
+				if (!array_is_empty(list2))
+					return FALSE;
+				break;
+			}
+			if (array_is_empty(list2))
+				return FALSE;
+
+			unsigned int i, count1, count2;
+			const char *const *str1 = array_get(list1, &count1);
+			const char *const *str2 = array_get(list2, &count2);
+			if (count1 != count2)
+				return FALSE;
+			for (i = 0; i < count1; i++) {
+				if (strcmp(str1[i], str2[i]) != 0)
+					return FALSE;
+			}
+			break;
+		}
 		case SET_ALIAS:
+		case SET_FILTER_NAME:
 			break;
 		}
 	}
-	return dest_set;
+	return TRUE;
 }
 
-struct setting_parser_context *
-settings_parser_dup(const struct setting_parser_context *old_ctx,
-		    pool_t new_pool)
+void *settings_defaults_dup(pool_t pool, const struct setting_parser_info *info)
 {
-	struct setting_parser_context *new_ctx;
-	pool_t parser_pool;
-	bool keep_values;
-
-	/* if source and destination pools are the same, there's no need to
-	   duplicate values */
-	keep_values = new_pool == old_ctx->set_pool;
-
-	pool_ref(new_pool);
-	parser_pool = pool_alloconly_create(MEMPOOL_GROWING"dup settings parser",
-					    1024);
-	new_ctx = p_new(parser_pool, struct setting_parser_context, 1);
-	new_ctx->refcount = 1;
-	new_ctx->set_pool = new_pool;
-	new_ctx->parser_pool = parser_pool;
-	new_ctx->flags = old_ctx->flags;
-	new_ctx->str_vars_are_expanded = old_ctx->str_vars_are_expanded;
-	new_ctx->linenum = old_ctx->linenum;
-	new_ctx->error = i_strdup(old_ctx->error);
-
-	new_ctx->info = old_ctx->info;
-	new_ctx->set_struct =
-		settings_dup_full(old_ctx->info,
-				  old_ctx->set_struct,
-				  new_ctx->set_pool, keep_values);
-	new_ctx->change_struct =
-		settings_changes_dup(old_ctx->info,
-				     old_ctx->change_struct,
-				     new_ctx->set_pool);
-	return new_ctx;
+	void *dup = p_malloc(pool, info->struct_size);
+	memcpy(dup, info->defaults, info->struct_size);
+	memcpy(PTR_OFFSET(dup, info->pool_offset1 - 1), &pool, sizeof(pool));
+	return dup;
 }
 
 const char *settings_section_escape(const char *name)
@@ -974,15 +1241,15 @@ const char *settings_section_unescape(const char *name)
 	return str_c(str);
 }
 
-static bool config_binary = FALSE;
+static enum settings_binary config_binary = SETTINGS_BINARY_OTHER;
 
-bool is_config_binary(void)
+void settings_set_config_binary(enum settings_binary binary)
 {
-	return config_binary;
+	config_binary = binary;
 }
 
-void set_config_binary(bool value)
+enum settings_binary settings_get_config_binary(void)
 {
-	config_binary = value;
+	return config_binary;
 }
 

@@ -15,6 +15,7 @@ Makefile.in
 .directory
 compile_commands.json
 *~
+vgcore.*
 
 /configure
 /config.cache
@@ -48,6 +49,9 @@ compile_commands.json
 /README
 /INSTALL
 /version
+/.cache
+/.dir-locals.el
+/.ropeproject
 
 /aclocal.m4
 /m4/libtool.m4
@@ -66,6 +70,7 @@ doc/man/*.7
 doc/stamp-man
 doc/stamp-html
 doc/index.html
+doc/dovecot.conf
 
 doc/example-config/README
 doc/example-config/dovecot.conf
@@ -73,6 +78,7 @@ doc/wiki/*.txt
 doc/wiki/Makefile.am
 src/anvil/anvil
 src/auth/auth
+src/lib-settings/settings-history-core.h
 src/config/all-settings.c
 src/config/config
 src/config/doveconf
@@ -97,10 +103,10 @@ src/lib/event-filter-parser.h
 src/lib/unicodemap.c
 src/lib/UnicodeData.txt
 src/lib-compression/bench-compression
-src/lib-fts/PropList.txt
-src/lib-fts/WordBreakProperty.txt
-src/lib-fts/word-boundary-data.c
-src/lib-fts/word-break-data.c
+src/lib-language/PropList.txt
+src/lib-language/WordBreakProperty.txt
+src/lib-language/word-boundary-data.c
+src/lib-language/word-break-data.c
 src/lib-dict-backend/dict-drivers-register.c
 src/lib-json/json-format
 src/lib-sql/sql-drivers-register.c
@@ -129,3 +135,6 @@ src/lib-imap/fuzz-imap-utf7
 src/lib-imap/fuzz-imap-bodystructure
 src/lib-mail/fuzz-message-parser
 src/lib-smtp/fuzz-smtp-server
+src/lib-var-expand/var-expand-parser.c
+src/lib-var-expand/var-expand-parser.h
+src/lib-var-expand/var-expand-lexer.c

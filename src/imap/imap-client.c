@@ -13,7 +13,6 @@
 #include "ostream.h"
 #include "ostream-multiplex.h"
 #include "time-util.h"
-#include "var-expand.h"
 #include "settings.h"
 #include "master-service.h"
 #include "imap-resp-code.h"
@@ -47,6 +46,7 @@ unsigned int imap_client_count = 0;
 unsigned int imap_feature_condstore = UINT_MAX;
 unsigned int imap_feature_qresync = UINT_MAX;
 unsigned int imap_feature_utf8accept = UINT_MAX;
+unsigned int imap_feature_imap4rev2 = UINT_MAX;
 
 static const char *client_command_state_names[] = {
 	"wait-input",
@@ -85,11 +85,12 @@ static void client_init_urlauth(struct client *client)
 	client->urlauth_ctx = imap_urlauth_init(client->user, &config);
 }
 
-static bool user_has_special_use_mailboxes(struct mail_user *user)
+static void
+imap_unset_capability(struct settings_instance *set_instance, const char *capability)
 {
-	const struct mail_storage_settings *mail_set =
-		mail_user_set_get_storage_set(user);
-	return mail_set->parsed_have_special_use_mailboxes;
+	settings_override(set_instance,
+			  t_strdup_printf("imap_capability/%s", capability),
+			  "no", SETTINGS_OVERRIDE_TYPE_CODE);
 }
 
 struct client *client_create(int fd_in, int fd_out,
@@ -98,7 +99,6 @@ struct client *client_create(int fd_in, int fd_out,
 			     const struct imap_settings *set,
 			     const struct smtp_submit_settings *smtp_set)
 {
-	const struct mail_storage_settings *mail_set;
 	struct client *client;
 	pool_t pool;
 
@@ -134,7 +134,7 @@ struct client *client_create(int fd_in, int fd_out,
 	o_stream_set_flush_callback(client->output, client_output, client);
 
 	p_array_init(&client->module_contexts, client->pool, 5);
-        client->last_input = ioloop_time;
+	client->last_input = ioloop_time;
 	client->to_idle = timeout_add(CLIENT_IDLE_TIMEOUT_MSECS,
 				      client_idle_timeout, client);
 
@@ -145,50 +145,54 @@ struct client *client_create(int fd_in, int fd_out,
 	client->notify_flag_changes = TRUE;
 	p_array_init(&client->enabled_features, client->pool, 8);
 
-	client->capability_string =
-		str_new(client->pool, sizeof(CAPABILITY_STRING)+64);
-
-	if (*set->imap_capability == '\0')
-		str_append(client->capability_string, CAPABILITY_STRING);
-	else if (*set->imap_capability != '+') {
-		str_append(client->capability_string, set->imap_capability);
-	} else {
-		str_append(client->capability_string, CAPABILITY_STRING);
-		str_append_c(client->capability_string, ' ');
-		str_append(client->capability_string, set->imap_capability + 1);
-	}
+	struct settings_instance *set_instance =
+		mail_storage_service_user_get_settings_instance(
+			client->user->service_user);
+	/* All capabilities are enabled by defaults.
+	   Remove the capabilities here that can't work due current settings. */
 	if (client->set->imap_literal_minus)
-		client_add_capability(client, "LITERAL-");
-	else
-		client_add_capability(client, "LITERAL+");
-	if (user->fuzzy_search) {
-		/* Enable FUZZY capability only when it actually has
-		   a chance of working */
-		client_add_capability(client, "SEARCH=FUZZY");
-	}
+		imap_unset_capability(set_instance, "LITERAL+");
+	 else
+		imap_unset_capability(set_instance, "LITERAL-");
+	/* Enable FUZZY capability only when it actually has a chance of working */
+	if (!user->fuzzy_search)
+		imap_unset_capability(set_instance, "SEARCH=FUZZY");
 
-	mail_set = mail_user_set_get_storage_set(user);
-	if (mail_set->mailbox_list_index) {
-		/* NOTIFY is enabled only when mailbox list indexes are
-		   enabled, although even that doesn't necessarily guarantee
-		   it always */
-		client_add_capability(client, "NOTIFY");
-	}
+	/* NOTIFY is enabled only when mailbox list indexes are enabled,
+	   although even that doesn't necessarily guarantee it always */
+	if (!set->mailbox_list_index)
+		imap_unset_capability(set_instance, "NOTIFY");
 
-	if (*set->imap_urlauth_host != '\0' &&
-	    *mail_set->mail_attribute_dict != '\0') {
-		/* Enable URLAUTH capability only when dict is
-		   configured correctly */
+	const char *error;
+	int ret = mailbox_attribute_dict_is_enabled(user, &error);
+	if (ret < 0 && client->init_error == NULL)
+		client->init_error = p_strdup(user->pool, error);
+	bool have_mailbox_attribute_dict = ret > 0;
+
+	/* Enable URLAUTH capability only when dict is configured correctly */
+	if (*set->imap_urlauth_host != '\0' && have_mailbox_attribute_dict)
 		client_init_urlauth(client);
-		client_add_capability(client, "URLAUTH");
-		client_add_capability(client, "URLAUTH=BINARY");
+	else {
+		imap_unset_capability(set_instance, "URLAUTH");
+		imap_unset_capability(set_instance, "URLAUTH=BINARY");
 	}
-	if (set->imap_metadata && *mail_set->mail_attribute_dict != '\0')
-		client_add_capability(client, "METADATA");
-	if (user_has_special_use_mailboxes(user)) {
-		/* Advertise SPECIAL-USE only if there are actually some
-		   SPECIAL-USE flags in mailbox configuration. */
-		client_add_capability(client, "SPECIAL-USE");
+	if (!set->imap_metadata || !have_mailbox_attribute_dict)
+		imap_unset_capability(set_instance, "METADATA");
+	if (!client->set->mail_utf8_extensions)
+		imap_unset_capability(set_instance, "UTF8=ACCEPT");
+	if (!client->set->imap4rev2_enable)
+		imap_unset_capability(set_instance, "IMAP4rev2");
+
+	const struct imap_settings *modified_set;
+	if (settings_get(client->user->event, &imap_setting_parser_info,
+			 0, &modified_set, &error) < 0) {
+		if (client->init_error == NULL)
+			client->init_error = p_strdup(user->pool, error);
+	} else {
+		client->capability_string = str_new(client->pool, 256);
+		imap_write_capability(client->capability_string,
+				      &modified_set->imap_capability);
+		settings_free(modified_set);
 	}
 
 	struct master_service_anvil_session anvil_session;
@@ -229,6 +233,10 @@ void client_create_finish_io(struct client *client)
 
 int client_create_finish(struct client *client, const char **error_r)
 {
+	if (client->init_error != NULL) {
+		*error_r = client->init_error;
+		return -1;
+	}
 	if (mail_namespaces_init(client->user, error_r) < 0)
 		return -1;
 	mail_namespaces_set_storage_callbacks(client->user->namespaces,
@@ -298,38 +306,45 @@ void client_command_cancel(struct client_command_context **_cmd)
 const char *client_stats(struct client *client)
 {
 	const struct var_expand_table logout_tab[] = {
-		{ 'i', dec2str(i_stream_get_absolute_offset(client->input)), "input" },
-		{ 'o', dec2str(client->output->offset), "output" },
-		{ '\0', client->user->session_id, "session" },
-		{ '\0', dec2str(client->fetch_hdr_count), "fetch_hdr_count" },
-		{ '\0', dec2str(client->fetch_hdr_bytes), "fetch_hdr_bytes" },
-		{ '\0', dec2str(client->fetch_body_count), "fetch_body_count" },
-		{ '\0', dec2str(client->fetch_body_bytes), "fetch_body_bytes" },
-		{ '\0', dec2str(client->deleted_count), "deleted" },
-		{ '\0', dec2str(client->expunged_count), "expunged" },
-		{ '\0', dec2str(client->trashed_count), "trashed" },
-		{ '\0', dec2str(client->autoexpunged_count), "autoexpunged" },
-		{ '\0', dec2str(client->append_count), "appended" },
-		{ '\0', NULL, NULL }
+		{ .key = "input", .value = dec2str(i_stream_get_absolute_offset(client->input) + client->logout_stats.input_bytes_extra) },
+		{ .key = "output", .value = dec2str(client->output->offset + client->logout_stats.output_bytes_extra) },
+		{ .key = "session", .value = client->user->session_id },
+		{ .key = "fetch_hdr_count", .value = dec2str(client->logout_stats.fetch_hdr_count) },
+		{ .key = "fetch_hdr_bytes", .value = dec2str(client->logout_stats.fetch_hdr_bytes) },
+		{ .key = "fetch_body_count", .value = dec2str(client->logout_stats.fetch_body_count) },
+		{ .key = "fetch_body_bytes", .value = dec2str(client->logout_stats.fetch_body_bytes) },
+		{ .key = "deleted", .value = dec2str(client->logout_stats.deleted_count) },
+		{ .key = "expunged", .value = dec2str(client->logout_stats.expunged_count) },
+		{ .key = "trashed", .value = dec2str(client->logout_stats.trashed_count) },
+		{ .key = "autoexpunged", .value = dec2str(client->logout_stats.autoexpunged_count) },
+		{ .key = "appended", .value = dec2str(client->logout_stats.append_count) },
+		VAR_EXPAND_TABLE_END
 	};
-	const struct var_expand_table *user_tab =
-		mail_user_var_expand_table(client->user);
-	const struct var_expand_table *tab =
-		t_var_expand_merge_tables(logout_tab, user_tab);
+	const struct var_expand_params *user_params =
+		mail_user_var_expand_params(client->user);
+	const struct var_expand_params params = {
+		.tables_arr = (const struct var_expand_table*[]){
+			logout_tab,
+			user_params->table,
+			NULL
+		},
+		.providers = user_params->providers,
+		.context = user_params->context,
+		.event = client->event,
+	};
 	string_t *str;
 	const char *error;
 
+	event_add_int(client->event, "net_in_bytes", i_stream_get_absolute_offset(client->input));
+	event_add_int(client->event, "net_out_bytes", client->output->offset);
+
 	str = t_str_new(128);
-	if (var_expand_with_funcs(str, client->set->imap_logout_format,
-				  tab, mail_user_var_expand_func_table,
-				  client->user, &error) <= 0) {
+	if (var_expand(str, client->set->imap_logout_format,
+			   &params, &error) < 0) {
 		e_error(client->event,
 			"Failed to expand imap_logout_format=%s: %s",
 			client->set->imap_logout_format, error);
 	}
-
-	event_add_int(client->event, "net_in_bytes", i_stream_get_absolute_offset(client->input));
-	event_add_int(client->event, "net_out_bytes", client->output->offset);
 
 	return str_c(str);
 }
@@ -529,7 +544,7 @@ static void client_default_destroy(struct client *client, const char *reason)
 	   hibernations it could also be doing unnecessarily much work. */
 	imap_refresh_proctitle();
 	if (!client->hibernated) {
-		client->autoexpunged_count = mail_user_autoexpunge(client->user);
+		client->logout_stats.autoexpunged_count = mail_user_autoexpunge(client->user);
 		client_log_disconnect(client, reason);
 	}
 	mail_user_deinit(&client->user);
@@ -593,9 +608,7 @@ void client_add_capability(struct client *client, const char *capability)
 {
 	/* require a single capability at a time (feels cleaner) */
 	i_assert(strchr(capability, ' ') == NULL);
-
-	if (client->set->imap_capability[0] != '\0' &&
-	    client->set->imap_capability[0] != '+') {
+	if (settings_boollist_is_stopped(&client->set->imap_capability)) {
 		/* explicit capability - don't change it */
 		return;
 	}
@@ -1252,11 +1265,11 @@ client_command_failed_early(struct client_command_context **_cmd,
 static bool client_command_input(struct client_command_context *cmd)
 {
 	struct client *client = cmd->client;
-	struct command *command;
+	const struct command *command;
 	const char *tag, *name;
 	int ret;
 
-        if (cmd->func != NULL) {
+	if (cmd->func != NULL) {
 		/* command is being executed - continue it */
 		if (command_exec(cmd)) {
 			/* command execution was finished */
@@ -1553,17 +1566,20 @@ bool client_handle_search_save_ambiguity(struct client_command_context *cmd)
 	return TRUE;
 }
 
-void client_enable(struct client *client, unsigned int feature_idx)
+bool client_enable(struct client *client, unsigned int feature_idx)
 {
 	if (client_has_enabled(client, feature_idx))
-		return;
+		return TRUE;
 
 	const struct imap_feature *feat = imap_feature_idx(feature_idx);
-	feat->callback(client);
+	if (!feat->callback(client))
+		return FALSE;
+
 	/* set after the callback, so the callback can see what features were
 	   previously set */
 	bool value = TRUE;
 	array_idx_set(&client->enabled_features, feature_idx, &value);
+	return TRUE;
 }
 
 bool client_has_enabled(struct client *client, unsigned int feature_idx)
@@ -1575,16 +1591,16 @@ bool client_has_enabled(struct client *client, unsigned int feature_idx)
 	return *featurep;
 }
 
-static void imap_client_enable_condstore(struct client *client)
+static bool imap_client_enable_condstore(struct client *client)
 {
 	struct mailbox_status status;
 	int ret;
 
 	if (client->mailbox == NULL)
-		return;
+		return TRUE;
 
 	if ((client_enabled_mailbox_features(client) & MAILBOX_FEATURE_CONDSTORE) != 0)
-		return;
+		return TRUE;
 
 	ret = mailbox_enable(client->mailbox, MAILBOX_FEATURE_CONDSTORE);
 	if (ret == 0) {
@@ -1602,19 +1618,43 @@ static void imap_client_enable_condstore(struct client *client)
 		client_send_untagged_storage_error(client,
 			mailbox_get_storage(client->mailbox));
 	}
+	return TRUE;
 }
 
-static void imap_client_enable_qresync(struct client *client)
+static bool imap_client_enable_qresync(struct client *client)
 {
 	/* enable also CONDSTORE */
-	client_enable(client, imap_feature_condstore);
+	return client_enable(client, imap_feature_condstore);
 }
 
 #ifdef EXPERIMENTAL_MAIL_UTF8
-static void imap_client_enable_utf8accept(struct client *client)
+static bool imap_client_enable_utf8accept(struct client *client)
 {
+	if (!client->set->mail_utf8_extensions) {
+		e_debug(client->event, "Client attempted to enable UTF8 when it's disabled");
+		return FALSE;
+	}
+
 	if (client->mailbox != NULL)
 		mailbox_enable(client->mailbox, MAILBOX_FEATURE_UTF8ACCEPT);
+	return TRUE;
+}
+#endif
+
+#ifdef EXPERIMENTAL_IMAP4REV2
+static bool imap_client_enable_imap4rev2(struct client *client)
+{
+	if (!client->set->imap4rev2_enable) {
+		e_debug(client->event, "Client attempted to enable IMAP4rev2 while it's disabled on the server.");
+		return FALSE;
+	}
+
+	if (client->mailbox != NULL)
+		mailbox_enable(client->mailbox, MAILBOX_FEATURE_IMAP4REV2);
+
+	/* If IMAP4rev2 is enabled always enable QRESYNC */
+	client_enable(client, imap_feature_qresync);
+	return TRUE;
 }
 #endif
 
@@ -1698,6 +1738,12 @@ void clients_init(void)
 	imap_feature_utf8accept =
 		imap_feature_register("UTF8=ACCEPT", MAILBOX_FEATURE_UTF8ACCEPT,
 				      imap_client_enable_utf8accept);
+#endif
+#ifdef EXPERIMENTAL_IMAP4REV2
+	imap_feature_imap4rev2 =
+		imap_feature_register("IMAP4rev2", MAILBOX_FEATURE_IMAP4REV2,
+				      imap_client_enable_imap4rev2);
+
 #endif
 }
 

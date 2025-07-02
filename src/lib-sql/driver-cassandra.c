@@ -11,15 +11,18 @@
 #include "net.h"
 #include "write-full.h"
 #include "time-util.h"
-#include "var-expand.h"
 #include "safe-memset.h"
+#include "settings.h"
+#include "ssl-settings.h"
 #include "sql-api-private.h"
 
 #ifdef BUILD_CASSANDRA
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+/* <settings checks> */
 #include <cassandra.h>
+/* </settings checks> */
 #include <pthread.h>
 
 #define IS_CONNECTED(db) \
@@ -89,6 +92,156 @@ static const char *cassandra_result_type_prefixes[] = {
 static_assert_array_size(cassandra_result_type_prefixes,
 			 CASSANDRA_RESULT_TYPE_COUNT);
 
+/* <settings checks> */
+static bool
+cassandra_settings_check(void *_set, pool_t pool, const char **error_r);
+
+struct cassandra_settings {
+	pool_t pool;
+
+	ARRAY_TYPE(const_string) hosts;
+	in_port_t port;
+	const char *keyspace;
+	const char *user;
+	const char *password;
+
+	const char *metrics_path;
+	const char *log_level;
+	bool debug_queries;
+	bool log_retries;
+	bool latency_aware_routing;
+
+	const char *read_consistency;
+	const char *write_consistency;
+	const char *delete_consistency;
+	const char *read_fallback_consistency;
+	const char *write_fallback_consistency;
+	const char *delete_fallback_consistency;
+
+	unsigned int connect_timeout_msecs;
+	unsigned int request_timeout_msecs;
+	unsigned int warn_timeout_msecs;
+
+	unsigned int protocol_version;
+	unsigned int io_thread_count;
+	unsigned int heartbeat_interval_secs;
+	unsigned int idle_timeout_secs;
+	unsigned int execution_retry_interval_msecs;
+	unsigned int execution_retry_times;
+	unsigned int page_size;
+
+	const char *ssl;
+
+	/* generated: */
+	CassLogLevel parsed_log_level;
+	CassConsistency parsed_read_consistency;
+	CassConsistency parsed_write_consistency;
+	CassConsistency parsed_delete_consistency;
+	CassConsistency parsed_read_fallback_consistency;
+	CassConsistency parsed_write_fallback_consistency;
+	CassConsistency parsed_delete_fallback_consistency;
+	bool parsed_use_ssl;
+	CassSslVerifyFlags parsed_ssl_verify_flags;
+};
+/* </settings checks> */
+
+#undef DEF
+#define DEF(type, name) \
+	SETTING_DEFINE_STRUCT_##type("cassandra_"#name, name, struct cassandra_settings)
+#undef DEF_SECS
+#define DEF_SECS(name) \
+	SETTING_DEFINE_STRUCT_TIME("cassandra_"#name, name##_secs, struct cassandra_settings)
+#undef DEF_MSECS
+#define DEF_MSECS(name) \
+	SETTING_DEFINE_STRUCT_TIME_MSECS("cassandra_"#name, name##_msecs, struct cassandra_settings)
+static const struct setting_define cassandra_setting_defines[] = {
+	{ .type = SET_FILTER_NAME, .key = "cassandra", },
+
+	DEF(BOOLLIST, hosts),
+	DEF(IN_PORT, port),
+	DEF(STR, keyspace),
+	DEF(STR, user),
+	DEF(STR, password),
+
+	DEF(STR, metrics_path),
+	DEF(ENUM, log_level),
+	DEF(BOOL, debug_queries),
+	DEF(BOOL, log_retries),
+	DEF(BOOL, latency_aware_routing),
+
+	DEF(STR, read_consistency),
+	DEF(STR, write_consistency),
+	DEF(STR, delete_consistency),
+	DEF(STR, read_fallback_consistency),
+	DEF(STR, write_fallback_consistency),
+	DEF(STR, delete_fallback_consistency),
+
+	DEF_MSECS(connect_timeout),
+	DEF_MSECS(request_timeout),
+	DEF_MSECS(warn_timeout),
+
+	DEF(UINT, protocol_version),
+	DEF(UINT, io_thread_count),
+	DEF_SECS(heartbeat_interval),
+	DEF_SECS(idle_timeout),
+	DEF_MSECS(execution_retry_interval),
+	DEF(UINT, execution_retry_times),
+	DEF(UINT, page_size),
+
+	DEF(ENUM, ssl),
+
+	SETTING_DEFINE_LIST_END
+};
+
+static struct cassandra_settings cassandra_default_settings = {
+	.hosts = ARRAY_INIT,
+	.port = 9042,
+	.keyspace = "",
+	.user = "",
+	.password = "",
+
+	.metrics_path = "",
+	.log_level = "warn:critical:error:info:debug:trace",
+	.debug_queries = FALSE,
+	.log_retries = FALSE,
+	.latency_aware_routing = FALSE,
+
+	.read_consistency = "local-quorum",
+	.write_consistency = "local-quorum",
+	.delete_consistency = "local-quorum",
+	.read_fallback_consistency = "",
+	.write_fallback_consistency = "",
+	.delete_fallback_consistency = "",
+
+	.connect_timeout_msecs = SQL_CONNECT_TIMEOUT_SECS * 1000,
+	.request_timeout_msecs = SQL_QUERY_TIMEOUT_SECS * 1000,
+	.warn_timeout_msecs = CASS_QUERY_DEFAULT_WARN_TIMEOUT_MSECS,
+
+	.protocol_version = 0,
+	.io_thread_count = 1,
+	.heartbeat_interval_secs = 30,
+	.idle_timeout_secs = 60,
+	.execution_retry_interval_msecs = 0,
+	.execution_retry_times = 0,
+	.page_size = 0,
+
+	.ssl = "no:cert-only:cert-ip",
+};
+
+const struct setting_parser_info cassandra_setting_parser_info = {
+	.name = "cassandra",
+#ifdef SQL_DRIVER_PLUGINS
+	.plugin_dependency = "libdriver_cassandra",
+#endif
+
+	.defines = cassandra_setting_defines,
+	.defaults = &cassandra_default_settings,
+
+	.struct_size = sizeof(struct cassandra_settings),
+	.pool_offset1 = 1 + offsetof(struct cassandra_settings, pool),
+	.check_func = cassandra_settings_check,
+};
+
 struct cassandra_callback {
 	unsigned int id;
 	struct timeout *to;
@@ -101,23 +254,9 @@ struct cassandra_callback {
 struct cassandra_db {
 	struct sql_db api;
 
-	char *hosts, *keyspace, *table_prefix, *user, *password;
-	CassConsistency read_consistency, write_consistency, delete_consistency;
-	CassConsistency read_fallback_consistency, write_fallback_consistency;
-	CassConsistency delete_fallback_consistency;
-	CassLogLevel log_level;
-	bool debug_queries;
-	bool log_retries;
-	bool latency_aware_routing;
-	bool init_ssl;
-	unsigned int protocol_version;
-	unsigned int num_threads;
-	unsigned int connect_timeout_msecs, request_timeout_msecs;
-	unsigned int warn_timeout_msecs;
-	unsigned int heartbeat_interval_secs, idle_timeout_secs;
-	unsigned int execution_retry_interval_msecs, execution_retry_times;
-	unsigned int page_size;
-	in_port_t port;
+	const struct cassandra_settings *set;
+	const struct ssl_settings *ssl_set;
+	char *table_prefix;
 
 	CassCluster *cluster;
 	CassSession *session;
@@ -132,13 +271,6 @@ struct cassandra_db {
 	ARRAY(struct cassandra_callback *) callbacks;
 	ARRAY(struct cassandra_result *) results;
 	unsigned int callback_ids;
-
-	char *metrics_path;
-	char *ssl_ca_file;
-	char *ssl_cert_file;
-	char *ssl_private_key_file;
-	char *ssl_private_key_password;
-	CassSslVerifyFlags ssl_verify_flags;
 
 	struct timeout *to_metrics;
 	uint64_t counters[CASSANDRA_COUNTER_COUNT];
@@ -253,6 +385,7 @@ struct cassandra_sql_prepared_statement {
 extern const struct sql_db driver_cassandra_db;
 extern const struct sql_result driver_cassandra_result;
 
+/* <settings checks> */
 static struct {
 	CassConsistency consistency;
 	const char *name;
@@ -281,6 +414,7 @@ static struct {
 	{ CASS_LOG_DEBUG, "debug" },
 	{ CASS_LOG_TRACE, "trace" }
 };
+/* </settings checks> */
 
 static struct event_category event_category_cassandra = {
 	.parent = &event_category_sql,
@@ -289,6 +423,7 @@ static struct event_category event_category_cassandra = {
 
 static pthread_t main_thread_id;
 static bool main_thread_id_set;
+static ARRAY(struct cassandra_db *) cassandra_db_cache;
 
 static void driver_cassandra_prepare_pending(struct cassandra_db *db);
 static void
@@ -369,6 +504,7 @@ static void driver_cassandra_init_log(void)
 	}
 }
 
+/* <settings checks> */
 static int consistency_parse(const char *str, CassConsistency *consistency_r)
 {
 	unsigned int i;
@@ -394,6 +530,76 @@ static int log_level_parse(const char *str, CassLogLevel *log_level_r)
 	}
 	return -1;
 }
+
+static bool
+cassandra_settings_check(void *_set, pool_t pool ATTR_UNUSED,
+			 const char **error_r)
+{
+	struct cassandra_settings *set = _set;
+	const struct {
+		const char *set_name;
+		const char *set_value;
+		const CassConsistency *empty_default;
+		CassConsistency *output;
+	} consistencies[] = {
+		{ "read_consistency", set->read_consistency, NULL,
+		  &set->parsed_read_consistency },
+		{ "write_consistency", set->write_consistency, NULL,
+		  &set->parsed_write_consistency },
+		{ "delete_consistency", set->delete_consistency, NULL,
+		  &set->parsed_delete_consistency },
+		/* Parse fallback consistencies after the ones above, so
+		   empty_default can access already checked consistency
+		   values. */
+		{ "read_fallback_consistency", set->read_fallback_consistency,
+		  &set->parsed_read_consistency,
+		  &set->parsed_read_fallback_consistency },
+		{ "write_fallback_consistency", set->write_fallback_consistency,
+		  &set->parsed_write_consistency,
+		  &set->parsed_write_fallback_consistency },
+		{ "delete_fallback_consistency", set->delete_fallback_consistency,
+		  &set->parsed_delete_consistency,
+		  &set->parsed_delete_fallback_consistency },
+	};
+
+	for (unsigned int i = 0; i < N_ELEMENTS(consistencies); i++) {
+		if (consistencies[i].set_value[0] == '\0' &&
+		    consistencies[i].empty_default != NULL) {
+			*consistencies[i].output =
+				*consistencies[i].empty_default;
+		} else if (consistency_parse(consistencies[i].set_value,
+					     consistencies[i].output) < 0) {
+			*error_r = t_strdup_printf(
+				"Unknown cassandra_%s: %s",
+				consistencies[i].set_name,
+				consistencies[i].set_value);
+			return FALSE;
+		}
+	}
+	if (log_level_parse(set->log_level, &set->parsed_log_level) < 0) {
+		*error_r = t_strdup_printf(
+			"Unknown cassandra_log_level: %s", set->log_level);
+		return FALSE;
+	}
+
+	if (strcmp(set->ssl, "no") != 0) {
+		set->parsed_use_ssl = TRUE;
+		if (strcmp(set->ssl, "cert-only") == 0) {
+			set->parsed_ssl_verify_flags =
+				CASS_SSL_VERIFY_PEER_CERT;
+		} else if (strcmp(set->ssl, "cert-ip") == 0) {
+			set->parsed_ssl_verify_flags =
+				CASS_SSL_VERIFY_PEER_CERT |
+				CASS_SSL_VERIFY_PEER_IDENTITY;
+		} else {
+			*error_r = t_strdup_printf(
+				"Unsupported cassandra_ssl: '%s'", set->ssl);
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+/* </settings checks> */
 
 static void driver_cassandra_set_state(struct cassandra_db *db,
 				       enum sql_db_state state)
@@ -642,263 +848,6 @@ driver_cassandra_escape_string(struct sql_db *db ATTR_UNUSED,
 	return str_c(escaped);
 }
 
-static int driver_cassandra_parse_connect_string(struct cassandra_db *db,
-						 const char *connect_string,
-						 const char **error_r)
-{
-	const char *const *args, *key, *value, *error;
-	string_t *hosts = t_str_new(64);
-	bool read_fallback_set = FALSE, write_fallback_set = FALSE;
-	bool delete_fallback_set = FALSE;
-
-	db->log_level = CASS_LOG_WARN;
-	db->read_consistency = CASS_CONSISTENCY_LOCAL_QUORUM;
-	db->write_consistency = CASS_CONSISTENCY_LOCAL_QUORUM;
-	db->delete_consistency = CASS_CONSISTENCY_LOCAL_QUORUM;
-	db->connect_timeout_msecs = SQL_CONNECT_TIMEOUT_SECS*1000;
-	db->request_timeout_msecs = SQL_QUERY_TIMEOUT_SECS*1000;
-	db->warn_timeout_msecs = CASS_QUERY_DEFAULT_WARN_TIMEOUT_MSECS;
-
-	args = t_strsplit_spaces(connect_string, " ");
-	for (; *args != NULL; args++) {
-		value = strchr(*args, '=');
-		if (value == NULL) {
-			*error_r = t_strdup_printf(
-				"Missing value in connect string: %s", *args);
-			return -1;
-		}
-		key = t_strdup_until(*args, value++);
-
-		if (str_begins_with(key, "ssl_"))
-			db->init_ssl = TRUE;
-
-		if (strcmp(key, "host") == 0) {
-			if (str_len(hosts) > 0)
-				str_append_c(hosts, ',');
-			str_append(hosts, value);
-		} else if (strcmp(key, "port") == 0) {
-			if (net_str2port(value, &db->port) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid port: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "dbname") == 0 ||
-			   strcmp(key, "keyspace") == 0) {
-			i_free(db->keyspace);
-			db->keyspace = i_strdup(value);
-		} else if (strcmp(key, "user") == 0) {
-			i_free(db->user);
-			db->user = i_strdup(value);
-		} else if (strcmp(key, "password") == 0) {
-			i_free(db->password);
-			db->password = i_strdup(value);
-		} else if (strcmp(key, "read_consistency") == 0) {
-			if (consistency_parse(value, &db->read_consistency) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown read_consistency: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "read_fallback_consistency") == 0) {
-			if (consistency_parse(value, &db->read_fallback_consistency) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown read_fallback_consistency: %s", value);
-				return -1;
-			}
-			read_fallback_set = TRUE;
-		} else if (strcmp(key, "write_consistency") == 0) {
-			if (consistency_parse(value,
-					      &db->write_consistency) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown write_consistency: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "write_fallback_consistency") == 0) {
-			if (consistency_parse(value,
-					      &db->write_fallback_consistency) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown write_fallback_consistency: %s",
-					value);
-				return -1;
-			}
-			write_fallback_set = TRUE;
-		} else if (strcmp(key, "delete_consistency") == 0) {
-			if (consistency_parse(value,
-					      &db->delete_consistency) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown delete_consistency: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "delete_fallback_consistency") == 0) {
-			if (consistency_parse(value,
-					      &db->delete_fallback_consistency) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown delete_fallback_consistency: %s",
-					value);
-				return -1;
-			}
-			delete_fallback_set = TRUE;
-		} else if (strcmp(key, "log_level") == 0) {
-			if (log_level_parse(value, &db->log_level) < 0) {
-				*error_r = t_strdup_printf(
-					"Unknown log_level: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "debug_queries") == 0) {
-			db->debug_queries = TRUE;
-		} else if (strcmp(key, "log_retries") == 0) {
-			db->log_retries = TRUE;
-		} else if (strcmp(key, "latency_aware_routing") == 0) {
-			db->latency_aware_routing = TRUE;
-		} else if (strcmp(key, "version") == 0) {
-			if (str_to_uint(value, &db->protocol_version) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid version: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "num_threads") == 0) {
-			if (str_to_uint(value, &db->num_threads) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid num_threads: %s", value);
-				return -1;
-			}
-		} else if (strcmp(key, "heartbeat_interval") == 0) {
-			if (str_parse_get_interval(value, &db->heartbeat_interval_secs,
-						   &error) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid heartbeat_interval '%s': %s",
-					value, error);
-				return -1;
-			}
-		} else if (strcmp(key, "idle_timeout") == 0) {
-			if (str_parse_get_interval(value, &db->idle_timeout_secs,
-						   &error) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid idle_timeout '%s': %s",
-					value, error);
-				return -1;
-			}
-		} else if (strcmp(key, "connect_timeout") == 0) {
-			if (str_parse_get_interval_msecs(value,
-							 &db->connect_timeout_msecs,
-							 &error) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid connect_timeout '%s': %s",
-					value, error);
-				return -1;
-			}
-		} else if (strcmp(key, "request_timeout") == 0) {
-			if (str_parse_get_interval_msecs(value,
-							 &db->request_timeout_msecs,
-							 &error) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid request_timeout '%s': %s",
-					value, error);
-				return -1;
-			}
-		} else if (strcmp(key, "warn_timeout") == 0) {
-			if (str_parse_get_interval_msecs(value,
-							 &db->warn_timeout_msecs,
-							 &error) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid warn_timeout '%s': %s",
-					value, error);
-				return -1;
-			}
-		} else if (strcmp(key, "metrics") == 0) {
-			i_free(db->metrics_path);
-			db->metrics_path = i_strdup(value);
-		} else if (strcmp(key, "execution_retry_interval") == 0) {
-			if (str_parse_get_interval_msecs(value,
-							 &db->execution_retry_interval_msecs,
-							 &error) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid execution_retry_interval '%s': %s",
-					value, error);
-				return -1;
-			}
-#ifndef HAVE_CASSANDRA_SPECULATIVE_POLICY
-			*error_r = t_strdup_printf(
-	"This cassandra version does not support execution_retry_interval");
-			return -1;
-#endif
-		} else if (strcmp(key, "execution_retry_times") == 0) {
-			if (str_to_uint(value, &db->execution_retry_times) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid execution_retry_times %s",
-					value);
-				return -1;
-			}
-#ifndef HAVE_CASSANDRA_SPECULATIVE_POLICY
-			*error_r = t_strdup_printf(
-	"This cassandra version does not support execution_retry_times");
-			return -1;
-#endif
-		} else if (strcmp(key, "page_size") == 0) {
-			if (str_to_uint(value, &db->page_size) < 0) {
-				*error_r = t_strdup_printf(
-					"Invalid page_size: %s",
-					value);
-				return -1;
-			}
-		} else if (strcmp(key, "ssl_ca") == 0) {
-			db->ssl_ca_file = i_strdup(value);
-		} else if (strcmp(key, "ssl_cert_file") == 0) {
-			db->ssl_cert_file = i_strdup(value);
-		} else if (strcmp(key, "ssl_private_key_file") == 0) {
-			db->ssl_private_key_file = i_strdup(value);
-		} else if (strcmp(key, "ssl_private_key_password") == 0) {
-			db->ssl_private_key_password = i_strdup(value);
-		} else if (strcmp(key, "ssl_verify") == 0) {
-			if (strcmp(value, "none") == 0) {
-				db->ssl_verify_flags = CASS_SSL_VERIFY_NONE;
-			} else if (strcmp(value, "cert") == 0) {
-				db->ssl_verify_flags = CASS_SSL_VERIFY_PEER_CERT;
-			} else if (strcmp(value, "cert-ip") == 0) {
-				db->ssl_verify_flags =
-					CASS_SSL_VERIFY_PEER_CERT |
-					CASS_SSL_VERIFY_PEER_IDENTITY;
-			} else {
-				*error_r = t_strdup_printf(
-					"Unsupported ssl_verify flags: '%s'",
-					value);
-				return -1;
-			}
-		} else {
-			*error_r = t_strdup_printf(
-				"Unknown connect string: %s", key);
-			return -1;
-		}
-	}
-
-	if (!read_fallback_set)
-		db->read_fallback_consistency = db->read_consistency;
-	if (!write_fallback_set)
-		db->write_fallback_consistency = db->write_consistency;
-	if (!delete_fallback_set)
-		db->delete_fallback_consistency = db->delete_consistency;
-
-	if (str_len(hosts) == 0) {
-		*error_r = t_strdup_printf("No hosts given in connect string");
-		return -1;
-	}
-	if (db->keyspace == NULL) {
-		*error_r = t_strdup_printf("No dbname given in connect string");
-		return -1;
-	} else {
-		i_free(db->table_prefix);
-		db->table_prefix = i_strdup_printf("%s.", db->keyspace);
-	}
-
-	if ((db->ssl_cert_file != NULL && db->ssl_private_key_file == NULL) ||
-	    (db->ssl_cert_file == NULL && db->ssl_private_key_file != NULL)) {
-		*error_r = "ssl_cert_file and ssl_private_key_file need to be both set";
-		return -1;
-	}
-
-	db->hosts = i_strdup(str_c(hosts));
-	return 0;
-}
-
 static void
 driver_cassandra_get_metrics_json(struct cassandra_db *db, string_t *dest)
 {
@@ -951,17 +900,18 @@ driver_cassandra_get_metrics_json(struct cassandra_db *db, string_t *dest)
 
 static void driver_cassandra_metrics_write(struct cassandra_db *db)
 {
-	struct var_expand_table tab[] = {
-		{ '\0', NULL, NULL }
-	};
 	string_t *path = t_str_new(64);
 	string_t *data;
 	const char *error;
 	int fd;
 
-	if (var_expand(path, db->metrics_path, tab, &error) <= 0) {
+	const struct var_expand_params params = {
+		.event = db->api.event,
+	};
+
+	if (var_expand(path, db->set->metrics_path, &params, &error) < 0) {
 		e_error(db->api.event, "Failed to expand metrics_path=%s: %s",
-			db->metrics_path, error);
+			db->set->metrics_path, error);
 		return;
 	}
 
@@ -983,103 +933,118 @@ static void driver_cassandra_free(struct cassandra_db **_db)
 	*_db = NULL;
 
 	event_unref(&db->api.event);
-	i_free(db->metrics_path);
-	i_free(db->hosts);
 	i_free(db->error);
 	i_free(db->table_prefix);
-	i_free(db->keyspace);
-	i_free(db->user);
-	i_free(db->password);
-	i_free(db->ssl_ca_file);
-	i_free(db->ssl_cert_file);
-	i_free(db->ssl_private_key_file);
-	i_free_and_null(db->ssl_private_key_password);
 	array_free(&db->api.module_contexts);
 	if (db->ssl != NULL)
 		cass_ssl_free(db->ssl);
+	settings_free(db->set);
+	settings_free(db->ssl_set);
 	i_free(db);
 }
 
 static int driver_cassandra_init_ssl(struct cassandra_db *db, const char **error_r)
 {
-	buffer_t *buf = t_buffer_create(512);
+	const struct ssl_settings *ssl_set = db->ssl_set;
+	struct settings_file file;
 	CassError c_err;
+
+	i_assert(ssl_set != NULL);
 
 	db->ssl = cass_ssl_new();
 	i_assert(db->ssl != NULL);
 
-	if (db->ssl_ca_file != NULL) {
-		if (buffer_append_full_file(buf, db->ssl_ca_file, SIZE_MAX,
-					    error_r) < 0)
-			return -1;
-		if ((c_err = cass_ssl_add_trusted_cert(db->ssl, str_c(buf))) != CASS_OK) {
+	if (ssl_set->ssl_client_ca_file[0] != '\0') {
+		settings_file_get(ssl_set->ssl_client_ca_file,
+				  unsafe_data_stack_pool, &file);
+		if ((c_err = cass_ssl_add_trusted_cert(db->ssl, file.content)) != CASS_OK) {
 			*error_r = cass_error_desc(c_err);
 			return -1;
 		}
 	}
 
-	if (db->ssl_private_key_file != NULL && db->ssl_cert_file != NULL) {
-		buffer_set_used_size(buf, 0);
-		if (buffer_append_full_file(buf, db->ssl_private_key_file,
-					    SIZE_MAX, error_r) < 0)
-			return -1;
-		c_err = cass_ssl_set_private_key(db->ssl, str_c(buf),
-					         db->ssl_private_key_password);
-		safe_memset(buffer_get_modifiable_data(buf, NULL), 0, buf->used);
+	if (ssl_set->ssl_client_cert_file[0] != '\0') {
+		settings_file_get(ssl_set->ssl_client_key_file,
+				  unsafe_data_stack_pool, &file);
+		c_err = cass_ssl_set_private_key(db->ssl, file.content,
+				ssl_set->ssl_client_key_password);
 		if (c_err != CASS_OK) {
 			*error_r = cass_error_desc(c_err);
 			return -1;
 		}
 
-		buffer_set_used_size(buf, 0);
-		if (buffer_append_full_file(buf, db->ssl_cert_file, SIZE_MAX, error_r) < 0)
-			return -1;
-		if ((c_err = cass_ssl_set_cert(db->ssl, str_c(buf))) != CASS_OK) {
+		settings_file_get(ssl_set->ssl_client_cert_file,
+				  unsafe_data_stack_pool, &file);
+		if ((c_err = cass_ssl_set_cert(db->ssl, file.content)) != CASS_OK) {
 			*error_r = cass_error_desc(c_err);
 			return -1;
 		}
 	}
 
-	cass_ssl_set_verify_flags(db->ssl, db->ssl_verify_flags);
-
+	if (!ssl_set->ssl_client_require_valid_cert)
+		cass_ssl_set_verify_flags(db->ssl, CASS_SSL_VERIFY_NONE);
+	else {
+		cass_ssl_set_verify_flags(db->ssl,
+					  db->set->parsed_ssl_verify_flags);
+	}
 	return 0;
 }
 
-static int driver_cassandra_init_full_v(const struct sql_settings *set,
-					struct sql_db **db_r,
-					const char **error_r)
+static struct cassandra_db *
+driver_cassandra_db_cache_find(const struct cassandra_settings *set,
+			       const struct ssl_settings *ssl_set)
 {
 	struct cassandra_db *db;
-	int ret;
 
-	db = i_new(struct cassandra_db, 1);
-	db->api = driver_cassandra_db;
-	db->fd_pipe[0] = db->fd_pipe[1] = -1;
-	db->api.event = event_create(set->event_parent);
-	event_add_category(db->api.event, &event_category_cassandra);
-	event_set_append_log_prefix(db->api.event, "cassandra: ");
+	array_foreach_elem(&cassandra_db_cache, db) {
+		if (settings_equal(&cassandra_setting_parser_info,
+				   set, db->set, NULL) &&
+		    (strcmp(set->ssl, "no") == 0 ||
+		     settings_equal(&ssl_setting_parser_info,
+				    ssl_set, db->set, NULL)))
+			return db;
+	}
+	return NULL;
+}
 
-	T_BEGIN {
-		ret = driver_cassandra_parse_connect_string(db,
-			set->connect_string, error_r);
-	} T_END_PASS_STR_IF(ret < 0, error_r);
+static int
+driver_cassandra_init_from_set(struct event *event_parent,
+			       const struct cassandra_settings *set,
+			       const struct ssl_settings *ssl_set,
+			       struct cassandra_db **db_r, const char **error_r)
+{
+	struct cassandra_db *db;
 
-	if (ret < 0) {
-		driver_cassandra_free(&db);
+	if (array_is_empty(&set->hosts)) {
+		*error_r = "cassandra_hosts is empty";
+		return -1;
+	}
+	if (set->keyspace[0] == '\0') {
+		*error_r = "cassandra_keyspace is empty";
 		return -1;
 	}
 
-	if (db->init_ssl && driver_cassandra_init_ssl(db, error_r) < 0) {
+	db = i_new(struct cassandra_db, 1);
+	db->api = driver_cassandra_db;
+	db->set = set;
+	db->ssl_set = ssl_set;
+	db->fd_pipe[0] = db->fd_pipe[1] = -1;
+	db->api.event = event_create(event_parent);
+	event_add_category(db->api.event, &event_category_cassandra);
+	event_add_str(db->api.event, "sql_driver", "cassandra");
+	event_set_append_log_prefix(db->api.event, "cassandra: ");
+
+	if (set->parsed_use_ssl && driver_cassandra_init_ssl(db, error_r) < 0) {
 		driver_cassandra_free(&db);
 		return -1;
 	}
 
 	driver_cassandra_init_log();
-	cass_log_set_level(db->log_level);
-	if (db->log_level >= CASS_LOG_DEBUG)
+	cass_log_set_level(set->parsed_log_level);
+	if (set->parsed_log_level >= CASS_LOG_DEBUG)
 		event_set_forced_debug(db->api.event, TRUE);
 
-	if (db->protocol_version > 0 && db->protocol_version < 4) {
+	if (set->protocol_version > 0 && set->protocol_version < 4) {
 		/* binding with column indexes requires v4 */
 		db->api.v.prepared_statement_init = NULL;
 		db->api.v.prepared_statement_deinit = NULL;
@@ -1089,54 +1054,89 @@ static int driver_cassandra_init_full_v(const struct sql_settings *set,
 	db->timestamp_gen = cass_timestamp_gen_monotonic_new();
 	db->cluster = cass_cluster_new();
 
-	cass_cluster_set_ssl(db->cluster, db->ssl);
 	cass_cluster_set_timestamp_gen(db->cluster, db->timestamp_gen);
-	cass_cluster_set_connect_timeout(db->cluster, db->connect_timeout_msecs);
-	cass_cluster_set_request_timeout(db->cluster, db->request_timeout_msecs);
-	cass_cluster_set_contact_points(db->cluster, db->hosts);
-	if (db->user != NULL && db->password != NULL)
-		cass_cluster_set_credentials(db->cluster, db->user, db->password);
-	if (db->port != 0)
-		cass_cluster_set_port(db->cluster, db->port);
-	if (db->protocol_version != 0)
-		cass_cluster_set_protocol_version(db->cluster, db->protocol_version);
-	if (db->num_threads != 0)
-		cass_cluster_set_num_threads_io(db->cluster, db->num_threads);
-	if (db->latency_aware_routing)
+	cass_cluster_set_connect_timeout(db->cluster, set->connect_timeout_msecs);
+	cass_cluster_set_request_timeout(db->cluster, set->request_timeout_msecs);
+	cass_cluster_set_contact_points(db->cluster,
+		p_array_const_string_join(unsafe_data_stack_pool,
+					  &set->hosts, ","));
+	if (set->user[0] != '\0' && set->password[0] != '\0')
+		cass_cluster_set_credentials(db->cluster, set->user, set->password);
+	cass_cluster_set_port(db->cluster, set->port);
+	if (set->protocol_version != 0)
+		cass_cluster_set_protocol_version(db->cluster, set->protocol_version);
+	cass_cluster_set_num_threads_io(db->cluster, set->io_thread_count);
+	if (set->latency_aware_routing)
 		cass_cluster_set_latency_aware_routing(db->cluster, cass_true);
-	if (db->heartbeat_interval_secs != 0)
-		cass_cluster_set_connection_heartbeat_interval(db->cluster,
-			db->heartbeat_interval_secs);
-	if (db->log_retries) {
+	cass_cluster_set_connection_heartbeat_interval(db->cluster,
+		set->heartbeat_interval_secs);
+	if (set->log_retries) {
 		db->default_policy = cass_retry_policy_default_new();
 		db->logging_policy = cass_retry_policy_logging_new(db->default_policy);
 		cass_cluster_set_retry_policy(db->cluster, db->logging_policy);
 	}
-	if (db->idle_timeout_secs != 0)
-		cass_cluster_set_connection_idle_timeout(db->cluster,
-			db->idle_timeout_secs);
+	cass_cluster_set_connection_idle_timeout(db->cluster,
+						 set->idle_timeout_secs);
 #ifdef HAVE_CASSANDRA_SPECULATIVE_POLICY
-	if (db->execution_retry_times > 0 && db->execution_retry_interval_msecs > 0)
+	if (set->execution_retry_times > 0 && set->execution_retry_interval_msecs > 0)
 		cass_cluster_set_constant_speculative_execution_policy(
-			db->cluster, db->execution_retry_interval_msecs,
-			db->execution_retry_times);
+			db->cluster, set->execution_retry_interval_msecs,
+			set->execution_retry_times);
 #endif
-	if (db->ssl != NULL) {
+	if (set->parsed_use_ssl) {
 		e_debug(db->api.event, "Enabling TLS for cluster");
 		cass_cluster_set_ssl(db->cluster, db->ssl);
 	}
 	db->session = cass_session_new();
-	if (db->metrics_path != NULL)
+	if (set->metrics_path[0] != '\0')
 		db->to_metrics = timeout_add(1000, driver_cassandra_metrics_write,
 					     db);
 	i_array_init(&db->results, 16);
 	i_array_init(&db->callbacks, 16);
 	i_array_init(&db->pending_prepares, 16);
+	db->table_prefix = i_strdup_printf("%s.", set->keyspace);
 	if (!main_thread_id_set) {
 		main_thread_id = pthread_self();
 		main_thread_id_set = TRUE;
 	}
 
+	*db_r = db;
+	return 0;
+}
+
+static int
+driver_cassandra_init_v(struct event *event, struct sql_db **db_r,
+			const char **error_r)
+{
+	const struct cassandra_settings *set;
+	const struct ssl_settings *ssl_set = NULL;
+
+	if (settings_get(event, &cassandra_setting_parser_info, 0,
+			 &set, error_r) < 0)
+		return -1;
+
+	if (strcmp(set->ssl, "no") != 0) {
+		if (ssl_client_settings_get(event, &ssl_set, error_r) < 0) {
+			settings_free(set);
+			return -1;
+		}
+	}
+
+	struct cassandra_db *db =
+		driver_cassandra_db_cache_find(set, ssl_set);
+	if (db != NULL) {
+		settings_free(set);
+		settings_free(ssl_set);
+	} else {
+		if (driver_cassandra_init_from_set(event, set, ssl_set,
+						   &db, error_r) < 0)
+			return -1;
+		sql_init_common(&db->api);
+		array_push_back(&cassandra_db_cache, &db);
+		/* Add an extra reference to the db, so it won't be freed while
+		   it's still in the cache array. */
+	}
+	db->api.refcount++;
 	*db_r = &db->api;
 	return 0;
 }
@@ -1169,17 +1169,11 @@ static void driver_cassandra_deinit_v(struct sql_db *_db)
 static void driver_cassandra_result_unlink(struct cassandra_db *db,
 					   struct cassandra_result *result)
 {
-	struct cassandra_result *const *results;
-	unsigned int i, count;
+	unsigned int i;
 
-	results = array_get(&db->results, &count);
-	for (i = 0; i < count; i++) {
-		if (results[i] == result) {
-			array_delete(&db->results, i, 1);
-			return;
-		}
-	}
-	i_unreached();
+	if (!array_lsearch_ptr_idx(&db->results, result, &i))
+		i_unreached();
+	array_delete(&db->results, i, 1);
 }
 
 static void driver_cassandra_log_result(struct cassandra_result *result,
@@ -1233,11 +1227,12 @@ static void driver_cassandra_log_result(struct cassandra_result *result,
 		e->add_str("error", result->error);
 
 	struct event *event = e->event();
-	if (db->debug_queries)
+	if (db->set->debug_queries)
 		event_set_forced_debug(event, TRUE);
-	if (reply_usecs/1000 >= db->warn_timeout_msecs) {
+	if (reply_usecs/1000 >= db->set->warn_timeout_msecs) {
 		db->counters[CASSANDRA_COUNTER_TYPE_QUERY_SLOW]++;
-		e_warning(event, "%s", str_c(str));
+		e_warning(event, "%s (query took longer than %ums)", str_c(str),
+			  db->set->warn_timeout_msecs);
 	} else {
 		e_debug(event, "%s", str_c(str));
 	}
@@ -1537,8 +1532,10 @@ static void driver_cassandra_init_statement(struct cassandra_result *result)
 	else
 		cass_statement_set_is_idempotent(result->statement, cass_true);
 #endif
-	if (db->page_size > 0 && result->batch == NULL)
-		cass_statement_set_paging_size(result->statement, db->page_size);
+	if (db->set->page_size > 0 && result->batch == NULL) {
+		cass_statement_set_paging_size(result->statement,
+					       db->set->page_size);
+	}
 }
 
 static void driver_cassandra_result_send_query(struct cassandra_result *result)
@@ -1615,8 +1612,9 @@ cassandra_result_connect_and_send_query(struct cassandra_result *result)
 	result->row_pool = pool_alloconly_create("cassandra result", 512);
 	switch (result->query_type) {
 	case CASSANDRA_QUERY_TYPE_READ:
-		result->consistency = db->read_consistency;
-		result->fallback_consistency = db->read_fallback_consistency;
+		result->consistency = db->set->parsed_read_consistency;
+		result->fallback_consistency =
+			db->set->parsed_read_fallback_consistency;
 		break;
 	case CASSANDRA_QUERY_TYPE_READ_MORE:
 		/* consistency is already set and we don't want to fallback
@@ -1624,12 +1622,14 @@ cassandra_result_connect_and_send_query(struct cassandra_result *result)
 		result->fallback_consistency = result->consistency;
 		break;
 	case CASSANDRA_QUERY_TYPE_WRITE:
-		result->consistency = db->write_consistency;
-		result->fallback_consistency = db->write_fallback_consistency;
+		result->consistency = db->set->parsed_write_consistency;
+		result->fallback_consistency =
+			db->set->parsed_write_fallback_consistency;
 		break;
 	case CASSANDRA_QUERY_TYPE_DELETE:
-		result->consistency = db->delete_consistency;
-		result->fallback_consistency = db->delete_fallback_consistency;
+		result->consistency = db->set->parsed_delete_consistency;
+		result->fallback_consistency =
+			db->set->parsed_delete_fallback_consistency;
 		break;
 	case CASSANDRA_QUERY_TYPE_COUNT:
 		i_unreached();
@@ -1893,7 +1893,7 @@ static int driver_cassandra_result_next_page(struct cassandra_result *result)
 {
 	struct cassandra_db *db = container_of(result->api.db, struct cassandra_db, api);
 
-	if (db->page_size == 0) {
+	if (db->set->page_size == 0) {
 		/* no paging */
 		return 0;
 	}
@@ -2081,18 +2081,13 @@ static void
 cassandra_prepared_statement_remove_pending(struct cassandra_sql_statement *stmt)
 {
 	struct cassandra_sql_prepared_statement *prep = stmt->prep;
-	struct cassandra_sql_statement *const *iter_stmt;
+	unsigned int idx;
 
 	if (prep == NULL)
 		return;
 
-	array_foreach(&prep->pending_statements, iter_stmt) {
-		if (stmt == *iter_stmt) {
-			array_delete(&prep->pending_statements,
-				array_foreach_idx(&prep->pending_statements, iter_stmt), 1);
-			break;
-		}
-	}
+	if (array_lsearch_ptr_idx(&prep->pending_statements, stmt, &idx))
+		array_delete(&prep->pending_statements, idx, 1);
 }
 
 static void cassandra_sql_statement_free(struct cassandra_sql_statement *stmt)
@@ -2514,8 +2509,9 @@ prepare_finish_pending_statements(struct cassandra_sql_prepared_statement *prep_
 	array_append_array(&copy, &prep_stmt->pending_statements);
 	array_clear(&prep_stmt->pending_statements);
 
-	array_foreach_elem(&copy, stmt)
+	array_foreach_elem(&copy, stmt) T_BEGIN {
 		prepare_finish_statement(stmt);
+	} T_END;
 }
 
 static void prepare_callback(CassFuture *future, void *context)
@@ -2870,7 +2866,7 @@ const struct sql_db driver_cassandra_db = {
 	.flags = SQL_DB_FLAG_PREP_STATEMENTS,
 
 	.v = {
-		.init_full = driver_cassandra_init_full_v,
+		.init = driver_cassandra_init_v,
 		.deinit = driver_cassandra_deinit_v,
 		.connect = driver_cassandra_connect,
 		.disconnect = driver_cassandra_disconnect,
@@ -2925,16 +2921,21 @@ const struct sql_result driver_cassandra_result = {
 
 const char *driver_cassandra_version = DOVECOT_ABI_VERSION;
 
-void driver_cassandra_init(void);
-void driver_cassandra_deinit(void);
-
 void driver_cassandra_init(void)
 {
+	i_array_init(&cassandra_db_cache, 4);
 	sql_driver_register(&driver_cassandra_db);
 }
 
 void driver_cassandra_deinit(void)
 {
+	struct cassandra_db *db;
+
+	array_foreach_elem(&cassandra_db_cache, db) {
+		struct sql_db *_db = &db->api;
+		sql_unref(&_db);
+	}
+	array_free(&cassandra_db_cache);
 	sql_driver_unregister(&driver_cassandra_db);
 }
 

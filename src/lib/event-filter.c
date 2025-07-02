@@ -302,6 +302,46 @@ const char *event_filter_find_field_exact(struct event_filter *filter,
 	return NULL;
 }
 
+static bool
+event_filter_node_has_field_prefix(struct event_filter_node *node,
+				   const char *key, const char *prefix)
+{
+	switch (node->op) {
+	case EVENT_FILTER_OP_CMP_EQ:
+		if (node->type == EVENT_FILTER_NODE_TYPE_EVENT_FIELD_EXACT &&
+		    strcmp(node->field.key, key) == 0 &&
+		    node->field.value_type == EVENT_FIELD_VALUE_TYPE_STR &&
+		    str_begins_with(node->field.value.str, prefix))
+			return TRUE;
+		break;
+	case EVENT_FILTER_OP_AND:
+	case EVENT_FILTER_OP_OR:
+		if (event_filter_node_has_field_prefix(
+				node->children[0], key, prefix) ||
+		    event_filter_node_has_field_prefix(
+				node->children[1], key, prefix))
+			return TRUE;
+		break;
+	case EVENT_FILTER_OP_NOT:
+		return FALSE;
+	default:
+		break;
+	}
+	return FALSE;
+}
+
+bool event_filter_has_field_prefix(struct event_filter *filter,
+				   const char *key, const char *prefix)
+{
+	const struct event_filter_query_internal *query;
+
+	array_foreach(&filter->queries, query) {
+		if (event_filter_node_has_field_prefix(query->expr, key, prefix))
+			return TRUE;
+	}
+	return FALSE;
+}
+
 bool event_filter_category_to_log_type(const char *name,
 				       enum event_filter_log_type *log_type_r)
 {
@@ -393,9 +433,22 @@ clone_expr(pool_t pool, struct event_filter_node *old)
 static void
 event_filter_merge_with_context_internal(struct event_filter *dest,
 					 const struct event_filter *src,
+					 enum event_filter_merge_op op,
 					 void *new_context, bool with_context)
 {
 	const struct event_filter_query_internal *int_query;
+	enum event_filter_node_op node_op;
+
+	switch (op) {
+	case EVENT_FILTER_MERGE_OP_OR:
+		node_op = EVENT_FILTER_OP_OR;
+		break;
+	case EVENT_FILTER_MERGE_OP_AND:
+		node_op = EVENT_FILTER_OP_AND;
+		break;
+	default:
+		i_unreached();
+	}
 
 	array_foreach(&src->queries, int_query) T_BEGIN {
 		void *context = with_context ? new_context : int_query->context;
@@ -404,8 +457,7 @@ event_filter_merge_with_context_internal(struct event_filter *dest,
 		new = event_filter_get_or_alloc_internal_query(dest, context);
 
 		add_node(dest->pool, &new->expr,
-			 clone_expr(dest->pool, int_query->expr),
-			 EVENT_FILTER_OP_OR);
+			 clone_expr(dest->pool, int_query->expr), node_op);
 		dest->named_queries_only = dest->named_queries_only &&
 			filter_node_requires_event_name(int_query->expr);
 	} T_END;
@@ -428,16 +480,18 @@ bool event_filter_remove_queries_with_context(struct event_filter *filter,
 }
 
 void event_filter_merge(struct event_filter *dest,
-			const struct event_filter *src)
+			const struct event_filter *src,
+			enum event_filter_merge_op op)
 {
-	event_filter_merge_with_context_internal(dest, src, NULL, FALSE);
+	event_filter_merge_with_context_internal(dest, src, op, NULL, FALSE);
 }
 
 void event_filter_merge_with_context(struct event_filter *dest,
 				     const struct event_filter *src,
+				     enum event_filter_merge_op op,
 				     void *new_context)
 {
-	event_filter_merge_with_context_internal(dest, src, new_context, TRUE);
+	event_filter_merge_with_context_internal(dest, src, op, new_context, TRUE);
 }
 
 static void
@@ -730,9 +784,9 @@ event_filter_handle_numeric_operation(enum event_filter_node_op op,
 }
 
 static bool
-event_match_field(struct event *event, struct event_filter_node *node,
-		  bool use_strcmp, const char *source_filename,
-		  unsigned int source_linenum)
+event_match_field(struct event_filter *filter, struct event *event,
+		  struct event_filter_node *node, bool use_strcmp,
+		  const char *source_filename, unsigned int source_linenum)
 {
 	const struct event_field *field;
 	struct event_field duration;
@@ -787,7 +841,13 @@ event_match_field(struct event *event, struct event_filter_node *node,
 				wanted_field->value.str[0] == '\0';
 		}
 		T_BEGIN {
-			ret = cmp_value(field->value.str, wanted_field, cmp_flags);
+			if (filter->cmp_key != NULL &&
+			    strcmp(wanted_field->key, filter->cmp_key) == 0) {
+				ret = filter->cmp_key_func(field->value.str,
+					wanted_field_value_str(wanted_field));
+			} else {
+				ret = cmp_value(field->value.str, wanted_field, cmp_flags);
+			}
 		} T_END;
 		return ret;
 	case EVENT_FIELD_VALUE_TYPE_INTMAX:
@@ -941,7 +1001,8 @@ event_match_field(struct event *event, struct event_filter_node *node,
 }
 
 static bool
-event_filter_query_match_cmp(struct event_filter_node *node,
+event_filter_query_match_cmp(struct event_filter *filter,
+			     struct event_filter_node *node,
 			     struct event *event, const char *source_filename,
 			     unsigned int source_linenum,
 			     enum event_filter_log_type log_type)
@@ -976,17 +1037,20 @@ event_filter_query_match_cmp(struct event_filter_node *node,
 		case EVENT_FILTER_NODE_TYPE_EVENT_CATEGORY:
 			return event_has_category(event, node, log_type);
 		case EVENT_FILTER_NODE_TYPE_EVENT_FIELD_EXACT:
-			return event_match_field(event, node, TRUE, source_filename, source_linenum);
+			return event_match_field(filter, event, node, TRUE,
+					source_filename, source_linenum);
 		case EVENT_FILTER_NODE_TYPE_EVENT_FIELD_WILDCARD:
 		case EVENT_FILTER_NODE_TYPE_EVENT_FIELD_NUMERIC_WILDCARD:
-			return event_match_field(event, node, FALSE, source_filename, source_linenum);
+			return event_match_field(filter, event, node, FALSE,
+					source_filename, source_linenum);
 	}
 
 	i_unreached();
 }
 
 bool
-event_filter_query_match_eval(struct event_filter_node *node,
+event_filter_query_match_eval(struct event_filter *filter,
+			      struct event_filter_node *node,
 			      struct event *event, const char *source_filename,
 			      unsigned int source_linenum,
 			      enum event_filter_log_type log_type)
@@ -997,33 +1061,29 @@ event_filter_query_match_eval(struct event_filter_node *node,
 	case EVENT_FILTER_OP_CMP_LT:
 	case EVENT_FILTER_OP_CMP_GE:
 	case EVENT_FILTER_OP_CMP_LE:
-		return event_filter_query_match_cmp(node, event, source_filename,
-						    source_linenum, log_type);
+		return event_filter_query_match_cmp(filter, node, event,
+				source_filename, source_linenum, log_type);
 	case EVENT_FILTER_OP_AND:
-		return event_filter_query_match_eval(node->children[0], event,
-						     source_filename, source_linenum,
-						     log_type) &&
-		       event_filter_query_match_eval(node->children[1], event,
-						     source_filename, source_linenum,
-						     log_type);
+		return event_filter_query_match_eval(filter, node->children[0],
+			event, source_filename, source_linenum, log_type) &&
+			event_filter_query_match_eval(filter, node->children[1],
+				event, source_filename, source_linenum, log_type);
 	case EVENT_FILTER_OP_OR:
-		return event_filter_query_match_eval(node->children[0], event,
-						     source_filename, source_linenum,
-						     log_type) ||
-		       event_filter_query_match_eval(node->children[1], event,
-						     source_filename, source_linenum,
-						     log_type);
+		return event_filter_query_match_eval(filter, node->children[0],
+				event, source_filename, source_linenum, log_type) ||
+			event_filter_query_match_eval(filter, node->children[1],
+				event, source_filename, source_linenum, log_type);
 	case EVENT_FILTER_OP_NOT:
-		return !event_filter_query_match_eval(node->children[0], event,
-						      source_filename, source_linenum,
-						      log_type);
+		return !event_filter_query_match_eval(filter, node->children[0],
+				event, source_filename, source_linenum, log_type);
 	}
 
 	i_unreached();
 }
 
 static bool
-event_filter_query_match(const struct event_filter_query_internal *query,
+event_filter_query_match(struct event_filter *filter,
+			 const struct event_filter_query_internal *query,
 			 struct event *event, const char *source_filename,
 			 unsigned int source_linenum,
 			 const struct failure_context *ctx)
@@ -1033,8 +1093,9 @@ event_filter_query_match(const struct event_filter_query_internal *query,
 	i_assert(ctx->type < N_ELEMENTS(event_filter_log_type_map));
 	log_type = event_filter_log_type_map[ctx->type].log_type;
 
-	return event_filter_query_match_eval(query->expr, event, source_filename,
-					     source_linenum, log_type);
+	return event_filter_query_match_eval(filter, query->expr, event,
+					     source_filename, source_linenum,
+					     log_type);
 }
 
 static bool
@@ -1071,11 +1132,23 @@ bool event_filter_match_source(struct event_filter *filter, struct event *event,
 		return FALSE;
 
 	array_foreach(&filter->queries, query) {
-		if (event_filter_query_match(query, event, source_filename,
-					     source_linenum, ctx))
+		if (event_filter_query_match(filter, query, event,
+					     source_filename, source_linenum,
+					     ctx))
 			return TRUE;
 	}
 	return FALSE;
+}
+
+struct event_filter_node *
+event_filter_get_root_node(struct event_filter *filter, unsigned int idx)
+{
+	if (idx >= array_count(&filter->queries))
+		return NULL;
+
+	const struct event_filter_query_internal *query =
+		array_idx(&filter->queries, idx);
+	return query->expr;
 }
 
 struct event_filter_match_iter {
@@ -1114,7 +1187,7 @@ void *event_filter_match_iter_next(struct event_filter_match_iter *iter)
 
 		iter->idx++;
 		if (query->context != NULL &&
-		    event_filter_query_match(query, iter->event,
+		    event_filter_query_match(iter->filter, query, iter->event,
 					     iter->event->source_filename,
 					     iter->event->source_linenum,
 					     iter->failure_ctx))
@@ -1129,6 +1202,16 @@ void event_filter_match_iter_deinit(struct event_filter_match_iter **_iter)
 
 	*_iter = NULL;
 	i_free(iter);
+}
+
+void event_filter_register_cmp(struct event_filter *filter, const char *key,
+			       event_filter_cmp *cmp)
+{
+	/* for now we need to support just one */
+	i_assert(filter->cmp_key == NULL);
+
+	filter->cmp_key = p_strdup(filter->pool, key);
+	filter->cmp_key_func = cmp;
 }
 
 static void

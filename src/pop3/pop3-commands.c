@@ -635,7 +635,7 @@ pop3_get_uid(struct client *client, struct mail *mail, string_t *str,
 		} else if (hdr_md5[0] == '\0') {
 			e_error(client->event,
 				"UIDL: Header MD5 not found "
-				"(pop3_uidl_format=%%m not supported by storage?)");
+				"(pop3_uidl_format=%%{md5} not supported by storage?)");
 			return -1;
 		}
 	}
@@ -649,7 +649,7 @@ pop3_get_uid(struct client *client, struct mail *mail, string_t *str,
 		} else if (filename[0] == '\0') {
 			e_error(client->event,
 				"UIDL: File name not found "
-				"(pop3_uidl_format=%%f not supported by storage?)");
+				"(pop3_uidl_format=%%{filename} not supported by storage?)");
 			return -1;
 		}
 	}
@@ -663,26 +663,29 @@ pop3_get_uid(struct client *client, struct mail *mail, string_t *str,
 		} else if (guid[0] == '\0') {
 			e_error(client->event,
 				"UIDL: Message GUID not found "
-				"(pop3_uidl_format=%%g not supported by storage?)");
+				"(pop3_uidl_format=%%{guid} not supported by storage?)");
 			return -1;
 		}
 	}
 
-	const struct var_expand_table tab[] = {
-		{ 'v', dec2str(client->uid_validity), "uidvalidity" },
-		{ 'u', uid_str, "uid" },
-		{ 'm', hdr_md5, "md5" },
-		{ 'f', filename, "filename" },
-		{ 'g', guid, "guid" },
-		{ '\0', NULL, NULL }
+	const struct var_expand_params params = {
+		.table = (const struct var_expand_table[]) {
+			{ .key = "uidvalidity", .value = dec2str(client->uid_validity) },
+			{ .key = "uid", .value = uid_str },
+			{ .key = "md5", .value = hdr_md5 },
+			{ .key = "filename", .value = filename },
+			{ .key = "guid", .value = guid },
+			VAR_EXPAND_TABLE_END
+		},
+		.event = client->event,
 	};
 	const char *error;
 
-	if (var_expand(str, client->inbox_ns->mail_set->pop3_uidl_format,
-		       tab, &error) <= 0) {
+	if (var_expand(str, client->mail_set->pop3_uidl_format,
+			   &params, &error) < 0) {
 		e_error(client->event,
 			"UIDL: Failed to expand pop3_uidl_format=%s: %s",
-			client->inbox_ns->mail_set->pop3_uidl_format, error);
+			client->mail_set->pop3_uidl_format, error);
 		return -1;
 	}
 	return 0;

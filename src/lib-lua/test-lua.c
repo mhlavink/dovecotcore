@@ -1,6 +1,7 @@
 /* Copyright (c) 2018 Dovecot authors, see the included COPYING file */
 
 #include "test-lib.h"
+#include "settings.h"
 #include "dlua-script-private.h"
 
 #include <math.h>
@@ -32,14 +33,12 @@ static void check_table_get_##name##_ok(struct dlua_script *script,	\
 	/* check string key */						\
 	ret = dlua_table_get_##name##_by_str(script->L, idx,		\
 					     str_key, &value);		\
-	test_assert(ret == 1);						\
-	test_assert(value == expected_value);				\
+	test_assert(ret == 1 && value == expected_value);		\
 									\
 	/* check int key */						\
 	ret = dlua_table_get_##name##_by_int(script->L, idx,		\
 					     int_key, &value);		\
-	test_assert(ret == 1);						\
-	test_assert(value == expected_value);				\
+	test_assert(ret == 1 && value == expected_value);		\
 }									\
 static void check_table_get_##name##_err(struct dlua_script *script,	\
 					 int idx, int expected_ret,	\
@@ -74,7 +73,7 @@ static void check_table_get_string_ok(struct dlua_script *script,
 				      const char *str_key,
 				      lua_Integer int_key)
 {
-	const char *value;
+	const char *value = NULL;
 	int ret;
 
 	/* check string key */
@@ -197,10 +196,13 @@ static void test_lua(void)
 
 	const char *error = NULL;
 	struct dlua_script *script = NULL;
+	struct settings_simple test_set;
 
 	test_begin("lua script");
+	settings_simple_init(&test_set, NULL);
 
-	test_assert(dlua_script_create_string(luascript, &script, NULL, &error) == 0);
+	test_assert(dlua_script_create_string(luascript, &script,
+					      test_set.event, &error) == 0);
 	if (error != NULL)
 		i_fatal("dlua_script_init failed: %s", error);
 
@@ -352,6 +354,7 @@ static void test_lua(void)
 	lua_pop(script->L, 1);
 
 	dlua_script_unref(&script);
+	settings_simple_deinit(&test_set);
 
 	test_end();
 }
@@ -513,11 +516,33 @@ static void test_compat_tointegerx_and_isinteger(void)
 	test_end();
 }
 
+static void test_lua_base64(void)
+{
+	test_begin("lua base64");
+
+	struct dlua_script *script;
+	const char *error;
+
+	if (dlua_script_create_file(TEST_LUA_SCRIPT_DIR "/test-lua-base64.lua",
+				    &script, NULL, &error) < 0)
+		i_fatal("%s", error);
+
+	dlua_dovecot_register(script);
+	dlua_register(script, "test_assert", dlua_test_assert);
+
+	test_assert(dlua_script_init(script, &error) == 0);
+	test_assert(dlua_pcall(script->L, "test_base64", 0, 0, &error) == 0);
+
+	dlua_script_unref(&script);
+	test_end();
+}
+
 int main(void) {
 	void (*tests[])(void) = {
 		test_lua,
 		test_tls,
 		test_compat_tointegerx_and_isinteger,
+		test_lua_base64,
 		NULL
 	};
 

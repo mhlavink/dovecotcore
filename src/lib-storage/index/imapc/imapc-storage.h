@@ -6,12 +6,8 @@
 #include "imapc-client.h"
 
 #define IMAPC_STORAGE_NAME "imapc"
-/* storage_name separator */
-#define IMAPC_LIST_STORAGE_NAME_ESCAPE_CHAR '%'
 /* fs_name separator */
-#define IMAPC_LIST_FS_NAME_ESCAPE_CHAR '%'
-/* vname separator */
-#define IMAPC_LIST_VNAME_ESCAPE_CHAR '~'
+#define IMAPC_LIST_FS_NAME_ESCAPE_CHAR "%"
 
 struct imap_arg;
 struct imapc_untagged_reply;
@@ -208,7 +204,7 @@ struct imapc_simple_context {
 #define IMAPC_STORAGE(s)	container_of(s, struct imapc_storage, storage)
 #define IMAPC_MAILBOX(s)	container_of(s, struct imapc_mailbox, box)
 
-int imapc_storage_client_create(struct mail_namespace *ns,
+int imapc_storage_client_create(struct mailbox_list *list,
 				struct imapc_storage_client **client_r,
 				const char **error_r);
 void imapc_storage_client_unref(struct imapc_storage_client **client);

@@ -15,7 +15,6 @@
 #define MAILBOX_LIST_NAME_INDEX "index"
 #define MAILBOX_LIST_NAME_NONE "none"
 
-#define MAILBOX_LIST_INDEX_DEFAULT_PREFIX "dovecot.list.index"
 #define MAILBOX_LOG_FILE_NAME "dovecot.mailbox.log"
 
 #define T_MAILBOX_LIST_ERR_NOT_FOUND(list, name) \
@@ -114,8 +113,8 @@ struct mailbox_list {
 /* private: */
 	pool_t pool;
 	struct mail_namespace *ns;
-	struct mailbox_list_settings set;
 	const struct mail_storage_settings *mail_set;
+	const struct mailbox_settings *default_box_set;
 	enum mailbox_list_flags flags;
 
 	/* may not be set yet, use mailbox_list_get_permissions() to access */
@@ -167,6 +166,7 @@ struct mailbox_list_iterate_context {
 	struct imap_match_glob *glob;
 	struct mailbox_list_autocreate_iterate_context *autocreate_ctx;
 	struct mailbox_info specialuse_info;
+	char *specialuse_info_flags;
 
 	ARRAY(union mailbox_list_iterate_module_context *) module_contexts;
 	HASH_TABLE(const char *, void*) found_mailboxes;
@@ -190,10 +190,6 @@ extern struct mailbox_list_module_register mailbox_list_module_register;
 void mailbox_lists_init(void);
 void mailbox_lists_deinit(void);
 
-void mailbox_list_settings_init_defaults(struct mailbox_list_settings *set_r);
-int mailbox_list_settings_parse(struct mail_user *user, const char *data,
-				struct mailbox_list_settings *set_r,
-				const char **error_r);
 const char *
 mailbox_list_escape_name_params(const char *vname, const char *ns_prefix,
 				char ns_sep, char list_sep, char escape_char,
@@ -212,9 +208,9 @@ const char *mailbox_list_default_get_vname(struct mailbox_list *list,
 					   const char *storage_name);
 const char *mailbox_list_get_unexpanded_path(struct mailbox_list *list,
 					     enum mailbox_list_path_type type);
-bool mailbox_list_set_get_root_path(const struct mailbox_list_settings *set,
-				    enum mailbox_list_path_type type,
-				    const char **path_r);
+bool mailbox_list_default_get_root_path(struct mailbox_list *list,
+					enum mailbox_list_path_type type,
+					const char **path_r);
 
 int mailbox_list_delete_index_control(struct mailbox_list *list,
 				      const char *name);

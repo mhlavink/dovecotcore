@@ -5,7 +5,9 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib-http \
 	-I$(top_srcdir)/src/lib-dcrypt \
 	-I$(top_srcdir)/src/lib-dict \
-	-I$(top_srcdir)/src/lib-settings
+	-I$(top_srcdir)/src/lib-settings \
+	-I$(top_srcdir)/src/lib-settings \
+	-I$(top_srcdir)/src/lib-var-expand
 
 noinst_LTLIBRARIES=liboauth2.la
 
@@ -36,12 +38,15 @@ test_libs = \
 	../lib-dcrypt/libdcrypt.la \
 	../lib-http/libhttp.la \
 	../lib-json/libjson.la \
+	../lib-dns-client/libdns-client.la  \
 	../lib-dns/libdns.la \
 	../lib-ssl-iostream/libssl_iostream.la \
 	../lib-master/libmaster.la \
 	../lib-auth-client/libauth-client.la \
 	../lib-dict/libdict.la \
 	../lib-settings/libsettings.la \
+	../lib-dns/libdns.la \
+	../lib-var-expand/libvar_expand.la \
 	../lib-test/libtest.la \
 	../lib/liblib.la \
 	$(MODULE_LIBS)
@@ -51,12 +56,15 @@ test_deps = \
 	../lib-dcrypt/libdcrypt.la \
 	../lib-http/libhttp.la \
 	../lib-json/libjson.la \
+	../lib-dns-client/libdns-client.la  \
 	../lib-dns/libdns.la \
 	../lib-ssl-iostream/libssl_iostream.la \
 	../lib-master/libmaster.la \
 	../lib-auth-client/libauth-client.la \
 	../lib-dict/libdict.la \
 	../lib-settings/libsettings.la \
+	../lib-dns/libdns.la \
+	../lib-var-expand/libvar_expand.la \
 	../lib-test/libtest.la \
 	../lib/liblib.la
 

@@ -11,20 +11,15 @@ struct service_settings imap_urlauth_login_service_settings = {
 	.protocol = "imap",
 	.type = "login",
 	.executable = "imap-urlauth-login",
-	.user = "$default_login_user",
+	.user = "$SET:default_login_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "token-login",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
-	.process_limit = 0,
-	.client_limit = 0,
-	.service_count = 1,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+	.restart_request_count = 1,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,

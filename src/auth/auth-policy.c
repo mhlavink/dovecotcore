@@ -16,24 +16,12 @@
 #include "json-ostream.h"
 #include "master-service.h"
 #include "settings.h"
-#include "master-service-ssl-settings.h"
 #include "auth-request.h"
 #include "auth-penalty.h"
 #include "auth-settings.h"
 #include "auth-policy.h"
 #include "auth-common.h"
 #include "iostream-ssl.h"
-
-#define AUTH_POLICY_DNS_SOCKET_PATH "dns-client"
-
-static struct http_client_settings http_client_set = {
-	.dns_client_socket_path = AUTH_POLICY_DNS_SOCKET_PATH,
-	.max_connect_attempts = 1,
-	.max_idle_time_msecs = 10000,
-	.max_parallel_connections = 100,
-	.debug = 0,
-	.user_agent = "dovecot/auth-policy-client"
-};
 
 static char *auth_policy_json_template;
 
@@ -155,23 +143,12 @@ auth_policy_open_and_close_to_key(struct json_ostream *json_output,
 
 void auth_policy_init(void)
 {
-	const struct master_service_ssl_settings *master_ssl_set =
-		settings_get_or_fatal(master_service_get_event(master_service),
-			&master_service_ssl_setting_parser_info);
-	struct ssl_iostream_settings ssl_set;
-	i_zero(&ssl_set);
-
-	http_client_set.request_absolute_timeout_msecs =
-		global_auth_settings->policy_server_timeout_msecs;
-	if (global_auth_settings->debug)
-		http_client_set.debug = 1;
-
-	master_service_ssl_client_settings_to_iostream_set(
-		master_ssl_set, pool_datastack_create(), &ssl_set);
-	http_client_set.ssl = &ssl_set;
-	http_client_set.event_parent = auth_event;
-	http_client = http_client_init(&http_client_set);
-	settings_free(master_ssl_set);
+	const char *error;
+	struct event *event = event_create(auth_event);
+	settings_event_add_filter_name(event, "auth_policy");
+	if (http_client_init_auto(event, &http_client, &error) < 0)
+		i_fatal("%s", error);
+	event_unref(&event);
 
 	/* prepare template */
 
@@ -179,26 +156,23 @@ void auth_policy_init(void)
 	const struct policy_template_keyvalue *kvptr;
 	string_t *template = t_str_new(64);
 	struct json_ostream *json_output;
-	const char **ptr;
-	const char *key = NULL;
-	const char **list = t_strsplit_spaces(
-		global_auth_settings->policy_request_attributes, "= ");
+
+	const struct auth_policy_request_settings *set;
+	if (settings_get(auth_event, &auth_policy_request_setting_parser_info,
+			 SETTINGS_GET_FLAG_NO_EXPAND, &set, &error) < 0)
+		i_fatal("%s", error);
 
 	t_array_init(&attribute_pairs, 8);
-	for (ptr = list; *ptr != NULL; ptr++) {
-		struct policy_template_keyvalue pair;
-
-		if (key == NULL) {
-			key = *ptr;
-		} else {
-			pair.key = key;
-			pair.value = *ptr;
-			key = NULL;
-			array_push_back(&attribute_pairs, &pair);
-		}
+	unsigned int i, count;
+	const char *const *list =
+		array_get(&set->policy_request_attributes, &count);
+	i_assert(count % 2 == 0);
+	for (i = 0; i < count; i += 2) {
+		struct policy_template_keyvalue *pair =
+			array_append_space(&attribute_pairs);
+		pair->key = list[i];
+		pair->value = list[i + 1];
 	}
-	if (key != NULL)
-		i_fatal("auth_policy_request_attributes contains invalid value");
 
 	/* then we sort it */
 	array_sort(&attribute_pairs, auth_policy_attribute_comparator);
@@ -229,6 +203,7 @@ void auth_policy_init(void)
 			  "auth-policy: Currently in log-only mode. Ignoring "
 			  "tarpit and disconnect instructions from policy server");
 	}
+	settings_free(set);
 }
 
 void auth_policy_deinit(void)
@@ -507,24 +482,13 @@ policy_get_var_expand_table(struct auth_request *auth_request,
 
 	table = auth_request_get_var_expand_table_full(
 			auth_request, auth_request->fields.user,
-			auth_policy_escape_function, &count);
-	table[0].key = '\0';
-	table[0].long_key = "hashed_password";
+			&count);
+	table[0].key = "hashed_password";
 	table[0].value = hashed_password;
-	table[1].key = '\0';
-	table[1].long_key = "requested_username";
+	table[1].key = "requested_username";
 	table[1].value = requested_username;
-	table[2].key = '\0';
-	table[2].long_key = "fail_type";
+	table[2].key = "fail_type";
 	table[2].value = auth_policy_fail_type(auth_request);
-	if (table[0].value != NULL) {
-		table[0].value = auth_policy_escape_function(table[0].value,
-							     auth_request);
-	}
-	if (table[1].value != NULL) {
-		table[1].value = auth_policy_escape_function(table[1].value,
-							     auth_request);
-	}
 
 	return table;
 }
@@ -583,7 +547,7 @@ auth_policy_create_json(struct policy_lookup_ctx *context,
 					       auth_policy_json_template,
 					       context->request, var_table,
 					       auth_policy_escape_function,
-					       &error) <= 0) {
+					       &error) < 0) {
 		e_error(context->event,
 			"Failed to expand auth policy template: %s", error);
 	}

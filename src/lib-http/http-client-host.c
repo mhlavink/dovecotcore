@@ -12,6 +12,7 @@
 #include "time-util.h"
 #include "dns-lookup.h"
 #include "http-response-parser.h"
+#include "settings.h"
 
 #include "http-client-private.h"
 
@@ -115,6 +116,9 @@ static void
 http_client_host_shared_dns_callback(const struct dns_lookup_result *result,
 				     struct http_client_host_shared *hshared)
 {
+	/* We ended up here because dns_lookup_abort() was used */
+	if (result->ret == EAI_CANCELED)
+		return;
 	struct http_client_host *host;
 
 	hshared->dns_lookup = NULL;
@@ -137,50 +141,39 @@ http_client_host_shared_dns_callback(const struct dns_lookup_result *result,
 }
 
 static void
-http_client_host_shared_lookup(struct http_client_host_shared *hshared)
+http_client_host_shared_lookup(struct http_client_host *host)
 {
+	struct http_client_host_shared *hshared = host->shared;
 	struct http_client_context *cctx = hshared->cctx;
-	struct dns_lookup_settings dns_set;
-	int ret;
 
 	i_assert(!hshared->explicit_ip);
 	i_assert(hshared->dns_lookup == NULL);
 
 	if (cctx->dns_client != NULL) {
-		e_debug(hshared->event, "Performing asynchronous DNS lookup");
+		e_debug(host->client->event, "Performing asynchronous DNS lookup");
+		/* Note: dns_client_lookup() takes DNS settings from cctx->dns_client
+		   and may differ from host->client DNS settings */
 		(void)dns_client_lookup(cctx->dns_client, hshared->name,
-					hshared->event,
+					host->client->event,
 					http_client_host_shared_dns_callback,
 					hshared, &hshared->dns_lookup);
-	} else if (cctx->dns_client_socket_path != NULL) {
-		i_assert(cctx->dns_lookup_timeout_msecs > 0);
-		e_debug(hshared->event, "Performing asynchronous DNS lookup");
-		i_zero(&dns_set);
-		dns_set.dns_client_socket_path = cctx->dns_client_socket_path;
-		dns_set.timeout_msecs = cctx->dns_lookup_timeout_msecs;
-		dns_set.ioloop = cctx->ioloop;
-		dns_set.event_parent = hshared->event;
-		(void)dns_lookup(hshared->name, &dns_set,
+	} else {
+		struct ioloop *prev_ioloop = current_ioloop;
+		/* host->client->event is used in order to
+		   get client-specific DNS settings. */
+		e_debug(host->client->event, "Performing asynchronous DNS lookup");
+		io_loop_set_current(cctx->ioloop);
+		(void)dns_lookup(hshared->name, NULL, host->client->event,
 				 http_client_host_shared_dns_callback,
 				 hshared, &hshared->dns_lookup);
-	} else {
-		struct ip_addr *ips;
-		unsigned int ips_count;
-
-		ret = net_gethostbyname(hshared->name, &ips, &ips_count);
-		if (ret != 0) {
-			http_client_host_shared_lookup_failure(
-				hshared, net_gethosterror(ret));
-			return;
-		}
-
-		http_client_host_shared_lookup_success(hshared, ips, ips_count);
+		io_loop_set_current(prev_ioloop);
 	}
 }
 
 static int
-http_client_host_shared_refresh(struct http_client_host_shared *hshared)
+http_client_host_shared_refresh(struct http_client_host *host)
 {
+	struct http_client_host_shared *hshared = host->shared;
 	if (hshared->unix_local)
 		return 0;
 	if (hshared->explicit_ip)
@@ -199,7 +192,7 @@ http_client_host_shared_refresh(struct http_client_host_shared *hshared)
 			"need to refresh DNS lookup");
 	}
 
-	http_client_host_shared_lookup(hshared);
+	http_client_host_shared_lookup(host);
 	if (hshared->dns_lookup != NULL)
 		return -1;
 	return (hshared->ips_count > 0 ? 1 : -1);
@@ -474,7 +467,7 @@ void http_client_host_check_idle(struct http_client_host *host)
 
 int http_client_host_refresh(struct http_client_host *host)
 {
-	return http_client_host_shared_refresh(host->shared);
+	return http_client_host_shared_refresh(host);
 }
 
 bool http_client_host_get_ip_idx(struct http_client_host *host,

@@ -13,6 +13,7 @@ struct http_client_request;
 struct http_client;
 struct http_client_context;
 
+struct dns_client;
 struct ssl_iostream_settings;
 
 /*
@@ -20,17 +21,12 @@ struct ssl_iostream_settings;
  */
 
 struct http_client_settings {
-	/* a) If dns_client is set, all lookups are done via it.
-	   b) If dns_client_socket_path is set, each DNS lookup does its own
-	   dns-lookup UNIX socket connection.
-	   c) Otherwise, blocking gethostbyname() lookups are used. */
-	struct dns_client *dns_client;
-	const char *dns_client_socket_path;
+	pool_t pool;
+	/* A copy of base_dir setting. FIXME: this should not be here. */
+	const char *base_dir;
 	/* How long to cache DNS records internally
 	   (default = HTTP_CLIENT_DEFAULT_DNS_TTL_MSECS) */
 	unsigned int dns_ttl_msecs;
-
-	const struct ssl_iostream_settings *ssl;
 
 	/* User-Agent: header (default: none) */
 	const char *user_agent;
@@ -38,7 +34,7 @@ struct http_client_settings {
 	/* Proxy on unix socket */
 	const char *proxy_socket_path;
 	/* URL for normal proxy (ignored if proxy_socket_path is set) */
-	const struct http_url *proxy_url;
+	const char *proxy_url;
 	/* Credentials for proxy */
 	const char *proxy_username;
 	const char *proxy_password;
@@ -57,32 +53,43 @@ struct http_client_settings {
 	/* Maximum number of pipelined requests per connection (default = 1) */
 	unsigned int max_pipelined_requests;
 
-	/* Don't automatically act upon redirect responses */
-	bool no_auto_redirect;
+	/* FALSE = Don't automatically act upon redirect responses. The
+	   redirects are returned as a regular response. TRUE = Handle
+	   redirects as long as request_max_redirects isn't reached. */
+	bool auto_redirect;
 
-	/* Never automatically retry requests */
-	bool no_auto_retry;
+	/* FALSE = Never automatically retry requests. Explicit
+	   http_client_request_try_retry() calls can still retry requests
+	   as long as request_max_attempts isn't reached. */
+	bool auto_retry;
 
-	/* If we use a proxy, delegate SSL negotiation to proxy, rather than
-	   creating a CONNECT tunnel through the proxy for the SSL link */
-	bool no_ssl_tunnel;
+	/* FALSE = If we use a proxy, delegate SSL negotiation to proxy, rather
+	   than creating a CONNECT tunnel through the proxy for the SSL link */
+	bool proxy_ssl_tunnel;
 
 	/* Maximum number of redirects for a request
-	   (default = 0; redirects refused)
+	   (default = 0; redirects result in
+	   HTTP_CLIENT_REQUEST_ERROR_INVALID_REDIRECT)
 	 */
-	unsigned int max_redirects;
+	unsigned int request_max_redirects;
 
-	/* Maximum number of attempts for a request */
-	unsigned int max_attempts;
+	/* Maximum number of attempts for a request. 0 means the same as 1. */
+	unsigned int request_max_attempts;
+	/* If non-zero, override max_attempts for GET/HEAD requests. */
+	unsigned int read_request_max_attempts;
+	/* If non-zero, override max_attempts for PUT/POST requests. */
+	unsigned int write_request_max_attempts;
+	/* If non-zero, override max_attempts for DELETE requests. */
+	unsigned int delete_request_max_attempts;
 
 	/* Maximum number of connection attempts to a host before all associated
 	   requests fail.
 
-	   if > 1, the maximum will be enforced across all IPs for that host,
+	   if > 0, the maximum will be enforced across all IPs for that host,
 	   meaning that IPs may be tried more than once eventually if the number
 	   of IPs is smaller than the specified maximum attempts. If the number
 	   of IPs is higher than the maximum attempts, not all IPs are tried.
-	   If <= 1, all IPs are tried at most once.
+	   If 0, all IPs are tried at most once.
 	 */
 	unsigned int max_connect_attempts;
 
@@ -94,7 +101,9 @@ struct http_client_settings {
 	unsigned int connect_backoff_max_time_msecs;
 
 	/* Response header limits */
-	struct http_header_limits response_hdr_limits;
+	uoff_t response_hdr_max_size;
+	uoff_t response_hdr_max_field_size;
+	unsigned int response_hdr_max_fields;
 
 	/* Max total time to wait for HTTP request to finish this can be
 	   overridden/reset for individual requests using
@@ -105,6 +114,12 @@ struct http_client_settings {
 	/* Max time to wait for HTTP request to finish before retrying.
 	   (default = HTTP_CLIENT_DEFAULT_REQUEST_TIMEOUT_MSECS) */
 	unsigned int request_timeout_msecs;
+	/* If non-zero, override request_timeout for GET/HEAD requests. */
+	unsigned int read_request_timeout_msecs;
+	/* If non-zero, override request_timeout for PUT/POST requests. */
+	unsigned int write_request_timeout_msecs;
+	/* If non-zero, override request_timeout for DELETE requests. */
+	unsigned int delete_request_timeout_msecs;
 	/* Max time to wait for connect() (and SSL handshake) to finish before
 	   retrying. (default = request_timeout_msecs) */
 	unsigned int connect_timeout_msecs;
@@ -122,17 +137,14 @@ struct http_client_settings {
 	/* The kernel send/receive buffer sizes used for the connection sockets.
 	   Configuring this is mainly useful for the test suite. The kernel
 	   defaults are used when these settings are 0. */
-	size_t socket_send_buffer_size;
-	size_t socket_recv_buffer_size;
+	uoff_t socket_send_buffer_size;
+	uoff_t socket_recv_buffer_size;
 
-	/* Event to use as parent for the http client event. For specific
-	   requests this can be overridden with http_client_request_set_event().
-	 */
-	struct event *event_parent;
-
-	/* Enable logging debug messages */
-	bool debug;
+	/* generated: */
+	struct http_url *parsed_proxy_url;
 };
+
+extern const struct setting_parser_info http_client_setting_parser_info;
 
 /*
  * Request
@@ -140,28 +152,28 @@ struct http_client_settings {
 
 enum http_client_request_error {
 	/* The request was aborted. */
-	HTTP_CLIENT_REQUEST_ERROR_ABORTED = HTTP_RESPONSE_STATUS_INTERNAL,
+	HTTP_CLIENT_REQUEST_ERROR_ABORTED = 9000,
 	/* Failed to parse HTTP target url. */
-	HTTP_CLIENT_REQUEST_ERROR_INVALID_URL,
+	HTTP_CLIENT_REQUEST_ERROR_INVALID_URL = 9001,
 	/* Failed to perform DNS lookup for the host. */
-	HTTP_CLIENT_REQUEST_ERROR_HOST_LOOKUP_FAILED,
+	HTTP_CLIENT_REQUEST_ERROR_HOST_LOOKUP_FAILED = 9002,
 	/* Failed to setup any connection for the host and client settings
 	   allowed no more attempts. */
-	HTTP_CLIENT_REQUEST_ERROR_CONNECT_FAILED,
+	HTTP_CLIENT_REQUEST_ERROR_CONNECT_FAILED = 9003,
 	/* Service returned an invalid redirect response for this request */
-	HTTP_CLIENT_REQUEST_ERROR_INVALID_REDIRECT,
+	HTTP_CLIENT_REQUEST_ERROR_INVALID_REDIRECT = 9004,
 	/* The connection was lost unexpectedly while handling the request and
 	   client settings allowed no more attempts */
-	HTTP_CLIENT_REQUEST_ERROR_CONNECTION_LOST,
+	HTTP_CLIENT_REQUEST_ERROR_CONNECTION_LOST = 9005,
 	/* The input stream passed to the request using
 	   http_client_request_set_payload() returned an error while sending the
 	   request. */
-	HTTP_CLIENT_REQUEST_ERROR_BROKEN_PAYLOAD,
+	HTTP_CLIENT_REQUEST_ERROR_BROKEN_PAYLOAD = 9006,
 	/* The service returned a bad response. */
-	HTTP_CLIENT_REQUEST_ERROR_BAD_RESPONSE,
+	HTTP_CLIENT_REQUEST_ERROR_BAD_RESPONSE = 9007,
 	/* The request timed out (either this was the last attempt or the
 	   absolute timeout was hit) */
-	HTTP_CLIENT_REQUEST_ERROR_TIMED_OUT,
+	HTTP_CLIENT_REQUEST_ERROR_TIMED_OUT = 9008,
 };
 
 enum http_request_state {
@@ -432,6 +444,10 @@ void http_client_request_submit(struct http_client_request *req);
    callback. It returns false if the request cannot be retried */
 bool http_client_request_try_retry(struct http_client_request *req);
 
+/* Fail the request. This can also be used instead of submitting the request to
+   cause the request callback to be called later on with the specified error. */
+void http_client_request_error(struct http_client_request **req,
+			       unsigned int status, const char *error);
 /* Abort the request immediately. It may still linger for a while when it is
    already sent to the service, but the callback will not be called anymore. */
 void http_client_request_abort(struct http_client_request **req);
@@ -467,14 +483,28 @@ void http_client_request_start_tunnel(struct http_client_request *req,
  * Client
  */
 
-/* Create a client using the global shared client context. */
-struct http_client *http_client_init(const struct http_client_settings *set);
+/* Initialize settings with defaults. Must be used if settings struct is
+   filled manually. */
+void http_client_settings_init(pool_t pool, struct http_client_settings *set_r);
+/* Create a client using the global shared client context. The parent event can
+   be overridden for specific requests with http_client_request_set_event(). */
+struct http_client *http_client_init(const struct http_client_settings *set,
+				     struct event *event_parent);
+/* Same as http_client_init(), but pull settings automatically. */
+int http_client_init_auto(struct event *event_parent,
+			  struct http_client **client_r, const char **error_r);
 /* Create a client without a shared context. */
 struct http_client *
-http_client_init_private(const struct http_client_settings *set);
+http_client_init_private(const struct http_client_settings *set,
+			 struct event *event_parent);
+/* Same as http_client_init_private(), but pull settings automatically. */
+int http_client_init_private_auto(struct event *event_parent,
+				  struct http_client **client_r,
+				  const char **error_r);
 struct http_client *
 http_client_init_shared(struct http_client_context *cctx,
-			const struct http_client_settings *set) ATTR_NULL(1);
+			const struct http_client_settings *set,
+			struct event *event_parent) ATTR_NULL(1);
 void http_client_deinit(struct http_client **_client);
 
 /* Switch this client to the current ioloop */
@@ -483,6 +513,13 @@ struct ioloop *http_client_switch_ioloop(struct http_client *client);
 /* Blocks until all currently submitted requests are handled */
 void http_client_wait(struct http_client *client);
 
+/* Specify the SSL settings. By default lib-ssl-iostream automatically looks
+   them up from settings. */
+void http_client_set_ssl_settings(struct http_client *client,
+				  const struct ssl_iostream_settings *ssl);
+/* Do all lookups using the specified DNS client. */
+void http_client_set_dns_client(struct http_client *client,
+				struct dns_client *dns_client);
 /* Returns the total number of pending HTTP requests. */
 unsigned int http_client_get_pending_request_count(struct http_client *client);
 
@@ -490,8 +527,7 @@ unsigned int http_client_get_pending_request_count(struct http_client *client);
  * Client shared context
  */
 
-struct http_client_context *
-http_client_context_create(const struct http_client_settings *set);
+struct http_client_context *http_client_context_create(void);
 void http_client_context_ref(struct http_client_context *cctx);
 void http_client_context_unref(struct http_client_context **_cctx);
 

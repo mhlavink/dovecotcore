@@ -60,10 +60,12 @@ struct auth_request_fields {
 	/* realm for the request, may be specified by some auth mechanisms */
 	const char *realm;
 
-	const char *service, *mech_name, *session_id, *local_name, *client_id;
+	const char *protocol, *mech_name, *session_id, *local_name, *client_id;
 	struct ip_addr local_ip, remote_ip, real_local_ip, real_remote_ip;
 	in_port_t local_port, remote_port, real_local_port, real_remote_port;
 	const char *ssl_ja3_hash;
+	const char *ssl_client_cert_fp;
+	const char *ssl_client_cert_pubkey_fp;
 
         /* extra_fields are returned in authentication reply. Fields prefixed
            with "userdb_" are automatically placed to userdb_reply instead. */
@@ -79,6 +81,10 @@ struct auth_request_fields {
 	size_t delayed_credentials_size;
 
 	enum auth_request_conn_secured conn_secured;
+	struct {
+		const char *type;
+		buffer_t *data;
+	} channel_binding;
 
 	/* Authentication was successfully finished, including policy checks
 	   and such. There may still be some final delay or final SASL
@@ -129,6 +135,10 @@ struct auth_request {
 	enum passdb_result passdb_result;
 
 	const struct mech_module *mech;
+	/* Protocol-specific settings */
+	const struct auth_settings *protocol_set;
+	/* Currently active settings. May be the same as protocol_set, but
+	   changes to passdb and userdb specific settings. */
 	const struct auth_settings *set;
         struct auth_passdb *passdb;
         struct auth_userdb *userdb;
@@ -136,9 +146,6 @@ struct auth_request {
 	/* passdb lookups have a handler, userdb lookups don't */
 	struct auth_request_handler *handler;
         struct auth_master_connection *master;
-
-	/* FIXME: Remove this once mech-oauth2 correctly does the processing */
-	const char *openid_config_url;
 
 	unsigned int connect_uid;
 	unsigned int client_pid;
@@ -271,6 +278,8 @@ bool auth_request_import_info(struct auth_request *request,
 			      const char *key, const char *value);
 bool auth_request_import_auth(struct auth_request *request,
 			      const char *key, const char *value);
+void auth_request_import_continue(struct auth_request *request,
+				  const char *key, const char *value);
 bool auth_request_import_master(struct auth_request *request,
 				const char *key, const char *value);
 
@@ -286,6 +295,11 @@ void auth_request_lookup_credentials(struct auth_request *request,
 				     lookup_credentials_callback_t *callback);
 void auth_request_lookup_user(struct auth_request *request,
 			      userdb_callback_t *callback);
+
+void auth_request_start_channel_binding(struct auth_request *request,
+					const char *type);
+int auth_request_accept_channel_binding(struct auth_request *request,
+					buffer_t **data_r);
 
 bool auth_request_set_username(struct auth_request *request,
 			       const char *username, const char **error_r);
@@ -319,6 +333,20 @@ void auth_request_set_field_keyvalue(struct auth_request *request,
 void auth_request_set_fields(struct auth_request *request,
 			     const char *const *fields,
 			     const char *default_scheme) ATTR_NULL(3);
+void auth_request_set_strlist(struct auth_request *request,
+			      const ARRAY_TYPE(const_string) *strlist,
+			      const char *default_scheme);
+
+int auth_request_set_passdb_fields(struct auth_request *request,
+				   struct auth_fields *fields);
+int auth_request_set_passdb_fields_ex(struct auth_request *request, void *context,
+				      const char *default_password_scheme,
+				      const struct var_expand_provider *fn_table);
+
+int auth_request_set_userdb_fields(struct auth_request *request,
+				   struct auth_fields *fields);
+int auth_request_set_userdb_fields_ex(struct auth_request *request, void *context,
+				      const struct var_expand_provider *fn_table);
 
 void auth_request_init_userdb_reply(struct auth_request *request);
 void auth_request_set_userdb_field(struct auth_request *request,
@@ -326,6 +354,8 @@ void auth_request_set_userdb_field(struct auth_request *request,
 void auth_request_set_userdb_field_values(struct auth_request *request,
 					  const char *name,
 					  const char *const *values);
+void auth_request_set_userdb_strlist(struct auth_request *request,
+				     const ARRAY_TYPE(const_string) *strlist);
 /* returns -1 = failed, 0 = callback is called later, 1 = finished */
 int auth_request_proxy_finish(struct auth_request *request,
 			      auth_request_proxy_cb_t *callback);
@@ -397,7 +427,6 @@ struct event_passthrough *
 auth_request_finished_event(struct auth_request *request, struct event *event);
 void auth_request_log_finished(struct auth_request *request);
 void auth_request_master_user_login_finish(struct auth_request *request);
-const char *auth_request_get_log_prefix_db(struct auth_request *auth_request);
 void auth_request_fields_init(struct auth_request *request);
 
 void auth_request_passdb_lookup_begin(struct auth_request *request);

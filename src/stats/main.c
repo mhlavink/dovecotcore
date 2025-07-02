@@ -6,7 +6,7 @@
 #include "settings.h"
 #include "master-service.h"
 #include "master-service-settings.h"
-#include "master-service-ssl-settings.h"
+#include "ssl-settings.h"
 #include "stats-settings.h"
 #include "stats-event-category.h"
 #include "stats-metrics.h"
@@ -15,7 +15,6 @@
 #include "client-reader.h"
 #include "client-http.h"
 
-const struct master_service_ssl_settings *master_ssl_set;
 struct stats_metrics *stats_metrics;
 time_t stats_startup_time;
 
@@ -52,9 +51,6 @@ static void main_init(void)
 	stats_settings =
 		settings_get_or_fatal(master_service_get_event(master_service),
 				      &stats_setting_parser_info);
-	master_ssl_set =
-		settings_get_or_fatal(master_service_get_event(master_service),
-				      &master_service_ssl_setting_parser_info);
 
 	stats_startup_time = ioloop_time;
 	if (stats_metrics_init(master_service_get_event(master_service),
@@ -63,7 +59,7 @@ static void main_init(void)
 	stats_event_categories_init();
 	client_readers_init();
 	client_writers_init();
-	client_http_init(stats_settings);
+	client_http_init(master_service_get_event(master_service));
 	stats_services_init();
 }
 
@@ -76,7 +72,6 @@ static void main_deinit(void)
 	stats_event_categories_deinit();
 	stats_metrics_deinit(&stats_metrics);
 	settings_free(stats_settings);
-	settings_free(master_ssl_set);
 }
 
 int main(int argc, char *argv[])

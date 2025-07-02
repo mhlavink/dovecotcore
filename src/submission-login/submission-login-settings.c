@@ -16,20 +16,17 @@ struct service_settings submission_login_service_settings = {
 	.protocol = "submission",
 	.type = "login",
 	.executable = "submission-login",
-	.user = "$default_login_user",
+	.user = "$SET:default_login_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "login",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
-	.process_limit = 0,
-	.client_limit = 0,
-	.service_count = 1,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+#ifndef DOVECOT_PRO_EDITION
+	.restart_request_count = 1,
+#endif
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -61,20 +58,30 @@ const struct setting_keyvalue submission_login_service_settings_defaults[] = {
 
 static const struct setting_define submission_login_setting_defines[] = {
 	DEF(STR, hostname),
+	DEF(BOOL, mail_utf8_extensions),
 
 	DEF(SIZE, submission_max_mail_size),
-	DEF(STR, submission_client_workarounds),
-	DEF(STR, submission_backend_capabilities),
+	DEF(BOOLLIST, submission_client_workarounds),
+	DEF(BOOLLIST, submission_backend_capabilities),
 
 	SETTING_DEFINE_LIST_END
 };
 
 static const struct submission_login_settings submission_login_default_settings = {
 	.hostname = "",
+	.mail_utf8_extensions = FALSE,
 
 	.submission_max_mail_size = 0,
-	.submission_client_workarounds = "",
-	.submission_backend_capabilities = NULL
+	.submission_client_workarounds = ARRAY_INIT,
+	.submission_backend_capabilities = ARRAY_INIT,
+};
+
+static const struct setting_keyvalue submission_login_default_settings_keyvalue[] = {
+#ifdef DOVECOT_PRO_EDITION
+	{ "service/submission-login/service_process_limit", "%{system:cpu_count}" },
+	{ "service/submission-login/service_process_min_avail", "%{system:cpu_count}" },
+#endif
+	{ NULL, NULL },
 };
 
 const struct setting_parser_info submission_login_setting_parser_info = {
@@ -82,6 +89,7 @@ const struct setting_parser_info submission_login_setting_parser_info = {
 
 	.defines = submission_login_setting_defines,
 	.defaults = &submission_login_default_settings,
+	.default_settings = submission_login_default_settings_keyvalue,
 
 	.struct_size = sizeof(struct submission_login_settings),
 	.pool_offset1 = 1 + offsetof(struct submission_login_settings, pool),
@@ -114,10 +122,10 @@ submission_login_settings_parse_workarounds(
 	struct submission_login_settings *set, const char **error_r)
 {
 	enum submission_login_client_workarounds client_workarounds = 0;
-        const struct submission_login_client_workaround_list *list;
+	const struct submission_login_client_workaround_list *list;
 	const char *const *str;
 
-        str = t_strsplit_spaces(set->submission_client_workarounds, " ,");
+	str = settings_boollist_get(&set->submission_client_workarounds);
 	for (; *str != NULL; str++) {
 		list = submission_login_client_workaround_list;
 		for (; list->name != NULL; list++) {
@@ -143,6 +151,12 @@ submission_login_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 {
 	struct submission_login_settings *set = _set;
 
+#ifndef EXPERIMENTAL_MAIL_UTF8
+	if (set->mail_utf8_extensions) {
+		*error_r = "Dovecot not built with --enable-experimental-mail-utf8";
+		return FALSE;
+	}
+#endif
 	if (submission_login_settings_parse_workarounds(set, error_r) < 0)
 		return FALSE;
 

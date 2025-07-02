@@ -202,25 +202,19 @@ server_input_line_type(struct client *client, const char *line)
 
 static void client_init_ssl(struct client *client)
 {
-	struct ssl_iostream_context *ssl_ctx;
-	struct ssl_iostream_settings ssl_set;
 	const char *error;
 
 	io_remove(&client->io_server);
 
-	doveadm_get_ssl_settings(&ssl_set, pool_datastack_create());
-	ssl_set.verbose = doveadm_debug;
-
-	if (ssl_iostream_client_context_cache_get(&ssl_set, &ssl_ctx,
-						  &error) < 0)
-		i_fatal("Failed to initialize SSL context: %s", error);
-
-	if (io_stream_create_ssl_client(ssl_ctx, client->host, &ssl_set,
-					client->event,
-					&client->input, &client->output,
-					&client->ssl_iostream, &error) < 0)
+	const struct ssl_iostream_client_autocreate_parameters parameters = {
+		.event_parent = client->event,
+		.host = client->host,
+		.flags = 0,
+	};
+	if (io_stream_autocreate_ssl_client(&parameters,
+					    &client->input, &client->output,
+					    &client->ssl_iostream, &error) < 0)
 		i_fatal("STARTTLS failed: %s", error);
-	ssl_iostream_context_unref(&ssl_ctx);
 	client->io_server = io_add_istream(client->input, server_input, client);
 
 	if (ssl_iostream_handshake(client->ssl_iostream) < 0) {
@@ -267,7 +261,8 @@ static void server_input(struct client *client)
 
 			e_info(client->event, "<Compression started>");
 			input = client->handler->create_istream(client->input);
-			output = client->handler->create_ostream(client->output, 6);
+			output = client->handler->
+				create_ostream_auto(client->output, client->event);
 			i_stream_unref(&client->input);
 			o_stream_unref(&client->output);
 			client->input = input;

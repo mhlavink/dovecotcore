@@ -4,12 +4,17 @@
 struct mail_search_arg;
 struct mail_search_build_context;
 
+enum mail_search_register_arg_flags {
+	MAIL_SEARCH_REGISTER_IMAP4REV1 = BIT(1),
+};
+
 struct mail_search_register_arg {
 	const char *key;
 
 	/* returns parsed arg or NULL if error. error message is set to ctx. */
 	struct mail_search_arg *
 		(*build)(struct mail_search_build_context *ctx);
+	enum mail_search_register_arg_flags flags;
 };
 
 typedef struct mail_search_arg *
@@ -40,7 +45,8 @@ mail_search_register_find(struct mail_search_register *reg, const char *key);
 bool mail_search_register_get_fallback(struct mail_search_register *reg,
 				       mail_search_register_fallback_t **fallback_r);
 
-struct mail_search_register *mail_search_register_get_imap(void);
+struct mail_search_register *mail_search_register_get_imap4rev1(void);
+struct mail_search_register *mail_search_register_get_imap4rev2(void);
 struct mail_search_register *mail_search_register_get_human(void);
 
 #endif

@@ -84,7 +84,7 @@ static void mdbox_map_deinit_cleanup(struct mdbox_map *map)
 
 	const struct mail_index_header *hdr =
 		mail_index_get_header(map->view);
-	if (dbox_mailbox_list_cleanup(map->storage->storage.storage.user,
+	if (dbox_mailbox_list_cleanup(&map->storage->storage.storage,
 				      map->path, hdr->last_temp_file_scan) > 0)
 		index_mailbox_view_update_last_temp_file_scan(map->view);
 }
@@ -93,6 +93,8 @@ void mdbox_map_deinit(struct mdbox_map **_map)
 {
 	struct mdbox_map *map = *_map;
 
+	if (map == NULL)
+		return;
 	*_map = NULL;
 
 	mdbox_map_deinit_cleanup(map);

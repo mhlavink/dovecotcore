@@ -82,8 +82,7 @@ smtp_client_transaction_mail_free(struct smtp_client_transaction_mail **_mail)
 
 	struct smtp_client_transaction *trans = mail->trans;
 
-	if (mail->cmd_mail_from != NULL)
-		smtp_client_command_abort(&mail->cmd_mail_from);
+	smtp_client_command_abort(&mail->cmd_mail_from);
 	DLLIST2_REMOVE(&trans->mail_head, &trans->mail_tail, mail);
 	pool_unref(&mail->pool);
 }
@@ -223,7 +222,7 @@ smtp_client_transaction_rcpt_free(
 		trans->rcpts_count--;
 	}
 
-	if (!rcpt->finished) {
+	if (!rcpt->finished && !rcpt->discarded) {
 		struct smtp_reply failure;
 
 		trans->rcpts_aborted++;
@@ -245,6 +244,19 @@ smtp_client_transaction_rcpt_free(
 		i_assert(rcpt->pool != NULL);
 		pool_unref(&rcpt->pool);
 	}
+}
+
+static void
+smtp_client_transaction_rcpt_discard(
+	struct smtp_client_transaction_rcpt **_rcpt)
+{
+	struct smtp_client_transaction_rcpt *rcpt = *_rcpt;
+
+	if (rcpt == NULL)
+		return;
+
+	rcpt->discarded = TRUE;
+	smtp_client_transaction_rcpt_free(_rcpt);
 }
 
 static void
@@ -285,8 +297,8 @@ smtp_client_transaction_rcpt_approved(
 		rcpt->event = prcpt->event;
 		event_ref(rcpt->event);
 
-		/* Free the old object, thereby removing it from the queue */
-		smtp_client_transaction_rcpt_free(&prcpt);
+		/* Discard the old object, thereby removing it from the queue */
+		smtp_client_transaction_rcpt_discard(&prcpt);
 	}
 
 	/* Recipient is approved */
@@ -593,15 +605,9 @@ void smtp_client_transaction_abort(struct smtp_client_transaction *trans)
 
 		smtp_client_transaction_rcpt_free(&rcpt);
 	}
-	if (trans->cmd_data != NULL)
-		smtp_client_command_abort(&trans->cmd_data);
-	if (trans->cmd_rset != NULL)
-		smtp_client_command_abort(&trans->cmd_rset);
-	if (trans->cmd_plug != NULL)
-		smtp_client_command_abort(&trans->cmd_plug);
-	trans->cmd_data = NULL;
-	trans->cmd_rset = NULL;
-	trans->cmd_plug = NULL;
+	smtp_client_command_abort(&trans->cmd_data);
+	smtp_client_command_abort(&trans->cmd_rset);
+	smtp_client_command_abort(&trans->cmd_plug);
 
 	smtp_client_connection_abort_transaction(conn, trans);
 
@@ -690,19 +696,14 @@ void smtp_client_transaction_destroy(struct smtp_client_transaction **_trans)
 	   We cannot fully abort (destroy) these commands, as this may be
 	   called from a callback. */
 	for (mail = trans->mail_head; mail != NULL; mail = mail->next) {
-		if (mail->cmd_mail_from != NULL)
-			smtp_client_command_drop_callback(mail->cmd_mail_from);
+		smtp_client_command_drop_callback(mail->cmd_mail_from);
 	}
 	for (rcpt = trans->rcpts_queue_head; rcpt != NULL; rcpt = rcpt->next) {
-		if (rcpt->cmd_rcpt_to != NULL)
-			smtp_client_command_drop_callback(rcpt->cmd_rcpt_to);
+		smtp_client_command_drop_callback(rcpt->cmd_rcpt_to);
 	}
-	if (trans->cmd_data != NULL)
-		smtp_client_command_drop_callback(trans->cmd_data);
-	if (trans->cmd_rset != NULL)
-		smtp_client_command_drop_callback(trans->cmd_rset);
-	if (trans->cmd_plug != NULL)
-		smtp_client_command_abort(&trans->cmd_plug);
+	smtp_client_command_drop_callback(trans->cmd_data);
+	smtp_client_command_drop_callback(trans->cmd_rset);
+	smtp_client_command_abort(&trans->cmd_plug);
 
 	/* Free any approved recipients early */
 	while (trans->rcpts_count > 0) {
@@ -801,9 +802,7 @@ void smtp_client_transaction_fail_reply(struct smtp_client_transaction *trans,
 	/* Plug */
 	if (trans->failure == NULL)
 		trans->failure = smtp_reply_clone(trans->pool, reply);
-	if (trans->cmd_plug != NULL)
-		smtp_client_command_abort(&trans->cmd_plug);
-	trans->cmd_plug = NULL;
+	smtp_client_command_abort(&trans->cmd_plug);
 
 	trans->failing = FALSE;
 
@@ -1238,8 +1237,7 @@ smtp_client_transaction_send_data(struct smtp_client_transaction *trans)
 		smtp_client_transaction_try_complete(trans);
 	}
 
-	if (trans->cmd_plug != NULL)
-		smtp_client_command_abort(&trans->cmd_plug);
+	smtp_client_command_abort(&trans->cmd_plug);
 	trans->cmd_last = NULL;
 
 	if (failure.status != 0)
@@ -1325,8 +1323,7 @@ smtp_client_transaction_send_reset(struct smtp_client_transaction *trans)
 		smtp_client_transaction_try_complete(trans);
 	}
 
-	if (trans->cmd_plug != NULL)
-		smtp_client_command_abort(&trans->cmd_plug);
+	smtp_client_command_abort(&trans->cmd_plug);
 	trans->cmd_last = NULL;
 
 	if (failure.status != 0)

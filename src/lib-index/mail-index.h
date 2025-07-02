@@ -44,8 +44,8 @@ enum mail_index_open_flags {
 
 enum mail_index_header_compat_flags {
 	/* All fields in these index files are in little-endian format.
-	   If the current CPU endianess doesn't match this, the indexes can't
-	   be used. There is currently no support to translate endianess. */
+	   If the current CPU endianness doesn't match this, the indexes can't
+	   be used. There is currently no support to translate endianness. */
 	MAIL_INDEX_COMPAT_LITTLE_ENDIAN		= 0x01
 };
 
@@ -187,7 +187,7 @@ struct mail_keywords {
 	unsigned int count;
 	int refcount;
 
-        /* variable sized list of keyword indexes */
+	/* variable sized list of keyword indexes */
 	unsigned int idx[FLEXIBLE_ARRAY_MEMBER];
 };
 
@@ -634,7 +634,7 @@ void mail_index_lookup_first(struct mail_index_view *view,
 void mail_index_append(struct mail_index_transaction *t, uint32_t uid,
 		       uint32_t *seq_r);
 /* Assign new UIDs for mails with uid=0 or uid<min_allowed_uid. All the new
-   UIDs are >= first_new_uid, an also higher than the highest seen uid (i.e. it
+   UIDs are >= first_new_uid, and also higher than the highest seen uid (i.e. it
    doesn't try to fill UID gaps). Assumes that mailbox is locked in a way that
    UIDs can be safely assigned. Returns UIDs for all assigned messages, in
    their sequence order (so UIDs are not necessary ascending). */

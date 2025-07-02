@@ -1,6 +1,16 @@
 #ifndef MASTER_SERVICE_SETTINGS_H
 #define MASTER_SERVICE_SETTINGS_H
 
+#define MASTER_SERVICE_BINARY_CONFIG_DEFAULTS "<default config>"
+
+/* <settings checks> */
+#ifdef DOVECOT_PRO_EDITION
+#  define VERBOSE_PROCTITLE_DEFAULT TRUE
+#else
+#  define VERBOSE_PROCTITLE_DEFAULT FALSE
+#endif
+/* </settings checks> */
+
 struct master_service;
 
 struct master_service_settings {
@@ -16,9 +26,9 @@ struct master_service_settings {
 	const char *log_core_filter;
 	const char *process_shutdown_filter;
 	const char *syslog_facility;
-	const char *import_environment;
 	const char *stats_writer_socket_path;
 	const char *dovecot_storage_version;
+	ARRAY_TYPE(const_string) import_environment;
 	bool version_ignore;
 	bool shutdown_clients;
 	bool verbose_proctitle;
@@ -59,9 +69,9 @@ struct master_service_settings_input {
 };
 
 struct master_service_settings_output {
-	/* if service was not given for lookup, this contains names of services
-	   that have more specific settings */
-	const char *const *specific_services;
+	/* Contains the list of all names used for protocol name { .. } and
+	   protocol !name { .. } filters. */
+	const char *const *specific_protocols;
 	/* Configuration file fd. Returned if input.return_config_fd=TRUE. */
 	int config_fd;
 
@@ -82,5 +92,13 @@ int master_service_settings_read_simple(struct master_service *service,
 
 const struct master_service_settings *
 master_service_get_service_settings(struct master_service *service);
+/* Return the import_environment setting as a space-separated concatenated
+   string of key=value pairs. The values might contain %variables to expand. */
+const char *
+master_service_get_import_environment_keyvals(struct master_service *service);
+
+const char *
+master_service_get_binary_config_cache_path(const char *cache_dir,
+					    const char *main_path);
 
 #endif

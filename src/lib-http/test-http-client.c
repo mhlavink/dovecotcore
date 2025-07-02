@@ -10,9 +10,13 @@
 #include "dns-lookup.h"
 #include "iostream-ssl.h"
 #include "iostream-openssl.h"
+#include "settings.h"
+#include "lib-event-private.h"
 
 #include <fcntl.h>
 #include <unistd.h>
+
+static struct settings_root *set_root;
 
 struct http_test_request {
 	struct io *io;
@@ -346,18 +350,34 @@ static void run_http_post(struct http_client *http_client, const char *url_str,
 	http_client_request_submit(http_req);
 }
 
+static bool
+test_event_callback(struct event *event,
+		    enum event_callback_type type,
+		    struct failure_context *ctx ATTR_UNUSED,
+		    const char *fmt ATTR_UNUSED,
+		    va_list args ATTR_UNUSED)
+{
+	if (type == EVENT_CALLBACK_TYPE_CREATE && event->parent == NULL)
+		event_set_ptr(event, SETTINGS_EVENT_ROOT, set_root);
+	return TRUE;
+}
+
 int main(int argc, char *argv[])
 {
 	struct dns_client *dns_client;
-	struct dns_lookup_settings dns_set;
 	struct http_client_settings http_set;
 	struct http_client_context *http_cctx;
 	struct http_client *http_client1, *http_client2, *http_client3, *http_client4;
 	struct ssl_iostream_settings ssl_set;
 	struct stat st;
 	const char *error;
+	const char *dns_client_socket_path = PKG_RUNDIR"/dns-client";
 
 	lib_init();
+	set_root = settings_root_init();
+	settings_root_override(set_root, "dns_client_timeout", "30s", SETTINGS_OVERRIDE_TYPE_CODE);
+	event_register_callback(test_event_callback);
+
 	ssl_iostream_openssl_init();
 	ioloop = io_loop_create();
 	io_loop_set_running(ioloop);
@@ -366,45 +386,64 @@ int main(int argc, char *argv[])
 	   the binary in all systems (but is in others! so linking
 	   safe-memset.lo directly causes them to fail.) If safe_memset() isn't
 	   included, libssl-iostream plugin loading fails. */
-	i_zero_safe(&dns_set);
-	dns_set.dns_client_socket_path = PKG_RUNDIR"/dns-client";
-	dns_set.timeout_msecs = 30*1000;
-	dns_set.idle_timeout_msecs = UINT_MAX;
 
+	struct dns_client_parameters params = {
+		.idle_timeout_msecs = UINT_MAX,
+	};
+	struct event *event = event_create(NULL);
 	/* check if there is a DNS client */
-	if (access(dns_set.dns_client_socket_path, R_OK|W_OK) == 0) {
-		dns_client = dns_client_init(&dns_set);
+	if (access(dns_client_socket_path, R_OK|W_OK) == 0) {
+		if (dns_client_init(&params, event, &dns_client, &error) < 0)
+			i_fatal("%s", error);
 
 		if (dns_client_connect(dns_client, &error) < 0)
 			i_fatal("Couldn't initialize DNS client: %s", error);
 	} else {
 		dns_client = NULL;
+		settings_root_override(set_root, "dns_client_socket_path", "", SETTINGS_OVERRIDE_TYPE_CODE);
 	}
 	i_zero(&ssl_set);
+	ssl_set.pool = null_pool;
 	ssl_set.allow_invalid_cert = TRUE;
 	if (stat("/etc/ssl/certs", &st) == 0 && S_ISDIR(st.st_mode))
 		ssl_set.ca_dir = "/etc/ssl/certs"; /* debian */
-	if (stat("/etc/ssl/certs", &st) == 0 && S_ISREG(st.st_mode))
-		ssl_set.ca_file = "/etc/pki/tls/cert.pem"; /* redhat */
+	if (stat("/etc/ssl/certs", &st) == 0 && S_ISREG(st.st_mode)) {
+		/* redhat */
+		const char *ca_value;
+		if (settings_parse_read_file("/etc/pki/tls/cert.pem",
+					     "/etc/pki/tls/cert.pem",
+					     unsafe_data_stack_pool, NULL,
+					     &ca_value, &error) < 0)
+			i_fatal("%s", error);
+		settings_file_get(ca_value, unsafe_data_stack_pool,
+				  &ssl_set.ca);
+	}
 
-	i_zero(&http_set);
-	http_set.ssl = &ssl_set;
-	http_set.dns_client = dns_client;
+	http_client_settings_init(null_pool, &http_set);
 	http_set.max_idle_time_msecs = 5*1000;
 	http_set.max_parallel_connections = 4;
 	http_set.max_pipelined_requests = 4;
-	http_set.max_redirects = 2;
+	http_set.request_max_redirects = 2;
 	http_set.request_timeout_msecs = 10*1000;
-	http_set.max_attempts = 1;
-	http_set.debug = TRUE;
+	http_set.request_max_attempts = 1;
 	http_set.rawlog_dir = "/tmp/http-test";
 
-	http_cctx = http_client_context_create(&http_set);
+	http_cctx = http_client_context_create();
 
-	http_client1 = http_client_init_shared(http_cctx, NULL);
-	http_client2 = http_client_init_shared(http_cctx, NULL);
-	http_client3 = http_client_init_shared(http_cctx, NULL);
-	http_client4 = http_client_init_shared(http_cctx, NULL);
+	event_set_forced_debug(event, TRUE);
+	http_client1 = http_client_init_shared(http_cctx, &http_set, event);
+	http_client2 = http_client_init_shared(http_cctx, &http_set, event);
+	http_client3 = http_client_init_shared(http_cctx, &http_set, event);
+	http_client4 = http_client_init_shared(http_cctx, &http_set, event);
+
+	http_client_set_ssl_settings(http_client1, &ssl_set);
+	http_client_set_ssl_settings(http_client2, &ssl_set);
+	http_client_set_ssl_settings(http_client3, &ssl_set);
+	http_client_set_ssl_settings(http_client4, &ssl_set);
+	http_client_set_dns_client(http_client1, dns_client);
+	http_client_set_dns_client(http_client2, dns_client);
+	http_client_set_dns_client(http_client3, dns_client);
+	http_client_set_dns_client(http_client4, dns_client);
 
 	switch (argc) {
 	case 1:
@@ -453,6 +492,8 @@ int main(int argc, char *argv[])
 	http_client_deinit(&http_client2);
 	http_client_deinit(&http_client3);
 	http_client_deinit(&http_client4);
+	settings_root_deinit(&set_root);
+	event_unref(&event);
 
 	http_client_context_unref(&http_cctx);
 
@@ -462,5 +503,6 @@ int main(int argc, char *argv[])
 	io_loop_destroy(&ioloop);
 	ssl_iostream_context_cache_free();
 	ssl_iostream_openssl_deinit();
+	event_unregister_callback(test_event_callback);
 	lib_deinit();
 }

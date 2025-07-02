@@ -339,6 +339,8 @@ static void test_attachment_flags_during_header_fetch(void)
 		.driver = "sdbox",
 		.extra_input = (const char *const[]) {
 			"mail_attachment_detection_options=add-flags",
+			"mail_always_cache_fields=flags",
+			"mail_cache_fields=flags",
 			"mail_never_cache_fields=mime.parts",
 			NULL
 		},
@@ -741,7 +743,7 @@ int main(int argc, char **argv)
 	master_service = master_service_init("test-mail",
 					     MASTER_SERVICE_FLAG_STANDALONE |
 					     MASTER_SERVICE_FLAG_DONT_SEND_STATS |
-					     MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+					     MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 					     MASTER_SERVICE_FLAG_NO_SSL_INIT |
 					     MASTER_SERVICE_FLAG_NO_INIT_DATASTACK_FRAME,
 					     &argc, &argv, "");

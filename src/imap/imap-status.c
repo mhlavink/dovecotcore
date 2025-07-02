@@ -30,7 +30,9 @@ int imap_status_parse_items(struct client_command_context *cmd,
 		item = t_str_ucase(item);
 		if (strcmp(item, "MESSAGES") == 0)
 			flags |= IMAP_STATUS_ITEM_MESSAGES;
-		else if (strcmp(item, "RECENT") == 0)
+		else if (strcmp(item, "RECENT") == 0 &&
+			 ((client_enabled_mailbox_features(cmd->client) &
+			   MAILBOX_FEATURE_IMAP4REV2) == 0))
 			flags |= IMAP_STATUS_ITEM_RECENT;
 		else if (strcmp(item, "UIDNEXT") == 0)
 			flags |= IMAP_STATUS_ITEM_UIDNEXT;
@@ -76,7 +78,7 @@ int imap_status_get_result(struct client *client, struct mailbox *box,
 	if (HAS_ALL_BITS(items->flags, IMAP_STATUS_ITEM_UNSEEN))
 		status |= STATUS_UNSEEN;
 	if (HAS_ALL_BITS(items->flags, IMAP_STATUS_ITEM_HIGHESTMODSEQ)) {
-		client_enable(client, imap_feature_condstore);
+		(void)client_enable(client, imap_feature_condstore);
 		status |= STATUS_HIGHESTMODSEQ;
 	}
 	if (HAS_ANY_BITS(items->flags, IMAP_STATUS_ITEM_SIZE |
@@ -138,7 +140,8 @@ int imap_status_send(struct client *client, const char *mailbox_mutf7,
 	prefix_len = str_len(str);
 	if (HAS_ALL_BITS(items->flags, IMAP_STATUS_ITEM_MESSAGES))
 		str_printfa(str, "MESSAGES %u ", status->messages);
-	if (HAS_ALL_BITS(items->flags, IMAP_STATUS_ITEM_RECENT))
+	if ((client_enabled_mailbox_features(client) & MAILBOX_FEATURE_IMAP4REV2) == 0 &&
+	    HAS_ALL_BITS(items->flags, IMAP_STATUS_ITEM_RECENT))
 		str_printfa(str, "RECENT %u ", status->recent);
 	if (HAS_ALL_BITS(items->flags, IMAP_STATUS_ITEM_UIDNEXT))
 		str_printfa(str, "UIDNEXT %u ", status->uidnext);

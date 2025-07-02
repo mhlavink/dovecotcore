@@ -44,8 +44,9 @@ struct inet_listener_settings {
 	pool_t pool;
 	const char *name;
 	const char *type;
-	const char *address;
 	in_port_t port;
+	/* copied from master_settings: */
+	ARRAY_TYPE(const_string) listen;
 	bool ssl;
 	bool reuse_port;
 	bool haproxy;
@@ -61,7 +62,7 @@ struct service_settings {
 	const char *user;
 	const char *group;
 	const char *privileged_group;
-	const char *extra_groups;
+	ARRAY_TYPE(const_string) extra_groups;
 	const char *chroot;
 
 	bool drop_priv_before_exec;
@@ -69,8 +70,8 @@ struct service_settings {
 	unsigned int process_min_avail;
 	unsigned int process_limit;
 	unsigned int client_limit;
-	unsigned int service_count;
-	unsigned int idle_kill;
+	unsigned int restart_request_count;
+	unsigned int idle_kill_interval;
 	uoff_t vsz_limit;
 
 	ARRAY_TYPE(const_string) unix_listeners;

@@ -12,9 +12,9 @@
 
 static void auth_client_connected(int *server_fd)
 {
-	struct auth *auth = auth_default_service();
+	struct auth *auth = auth_default_protocol();
 	int fd = net_accept(*server_fd, NULL, NULL);
-	auth_client_connection_create(auth, fd, TEST_AUTH_CLIENT_SOCKET, FALSE, FALSE);
+	auth_client_connection_create(auth, fd, TEST_AUTH_CLIENT_SOCKET, 0);
 }
 
 static void
@@ -55,7 +55,7 @@ static void test_auth_client(void)
 	struct auth_request_info reqinfo = {
 		.mech = "plain",
 		.client_id = "1",
-		.service = "default",
+		.protocol = "default",
 		.session_id = "1",
 	};
 	(void)auth_client_request_new(client, &reqinfo, test_callback, client);
@@ -78,7 +78,7 @@ int main(int argc, char *argv[])
 		NULL
 	};
 	const enum master_service_flags service_flags =
-		MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+		MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 		MASTER_SERVICE_FLAG_STANDALONE |
 		MASTER_SERVICE_FLAG_STD_CLIENT |
 		MASTER_SERVICE_FLAG_DONT_SEND_STATS;

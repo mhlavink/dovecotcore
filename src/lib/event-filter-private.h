@@ -24,6 +24,9 @@ struct event_filter {
 	int refcount;
 	ARRAY(struct event_filter_query_internal) queries;
 
+	const char *cmp_key;
+	event_filter_cmp *cmp_key_func;
+
 	bool fragment;
 	bool named_queries_only;
 };
@@ -117,9 +120,13 @@ int event_filter_parser_parse(struct event_filter_parser_state *state);
 void event_filter_parser_set_extra(void *user, void *yyscanner);
 void event_filter_parser_error(void *scan, const char *e);
 
+struct event_filter_node *
+event_filter_get_root_node(struct event_filter *filter, unsigned int idx);
+
 /* the following are exposed to allow for unit testing */
 bool
-event_filter_query_match_eval(struct event_filter_node *node,
+event_filter_query_match_eval(struct event_filter *filter,
+			      struct event_filter_node *node,
 			      struct event *event, const char *source_filename,
 			      unsigned int source_linenum,
 			      enum event_filter_log_type log_type);

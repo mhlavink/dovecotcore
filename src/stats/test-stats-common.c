@@ -15,7 +15,6 @@ struct event_category child_test_category = {
 };
 
 pool_t test_pool;
-const struct master_service_ssl_settings *master_ssl_set = NULL;
 struct stats_metrics *stats_metrics = NULL;
 time_t stats_startup_time;
 
@@ -57,6 +56,8 @@ void test_init(const char *const settings_blob[])
 	test_pool = pool_alloconly_create(MEMPOOL_GROWING"test pool", 2048);
 	stats_startup_time = time(NULL);
 
+	settings_info_register(&stats_metric_group_by_setting_parser_info);
+	settings_info_register(&stats_metric_group_by_method_setting_parser_info);
 	/* register test categories */
 	stats_event_category_register(test_category.name, NULL);
 	stats_event_category_register(child_test_category.name,

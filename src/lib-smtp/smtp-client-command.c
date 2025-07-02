@@ -186,6 +186,8 @@ void smtp_client_command_abort(struct smtp_client_command **_cmd)
 		return;
 	*_cmd = NULL;
 
+	i_assert(cmd->refcount > 0);
+
 	struct smtp_client_connection *conn = cmd->conn;
 	enum smtp_client_command_state state = cmd->state;
 	bool disconnected =
@@ -284,6 +286,8 @@ void smtp_client_command_abort(struct smtp_client_command **_cmd)
 
 void smtp_client_command_drop_callback(struct smtp_client_command *cmd)
 {
+	if (cmd == NULL)
+		return;
 	cmd->callback = NULL;
 	cmd->context = NULL;
 }
@@ -300,6 +304,7 @@ void smtp_client_command_fail_reply(struct smtp_client_command **_cmd,
 	struct smtp_client_connection *conn = cmd->conn;
 	enum smtp_client_command_state state = cmd->state;
 	smtp_client_command_callback_t *callback = cmd->callback;
+	void *context = cmd->context;
 
 	if (state >= SMTP_CLIENT_COMMAND_STATE_FINISHED)
 		return;
@@ -320,8 +325,7 @@ void smtp_client_command_fail_reply(struct smtp_client_command **_cmd,
 		return;
 	}
 
-	cmd->callback = NULL;
-
+	smtp_client_command_drop_callback(cmd);
 	smtp_client_connection_ref(conn);
 	smtp_client_command_ref(cmd);
 
@@ -337,8 +341,10 @@ void smtp_client_command_fail_reply(struct smtp_client_command **_cmd,
 		}
 		e_debug(e->event(), "Failed: %s", smtp_reply_log(reply));
 
-		if (callback != NULL)
-			(void)callback(reply, cmd->context);
+		if (callback != NULL) {
+			while (cmd->replies_seen++ < cmd->replies_expected)
+				(void)callback(reply, context);
+		}
 	}
 
 	tmp_cmd = cmd;

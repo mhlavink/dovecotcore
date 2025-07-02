@@ -12,7 +12,6 @@
 #include "restrict-access.h"
 #include "write-full.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-interface.h"
 #include "master-service.h"
 #include "master-service-settings.h"
@@ -26,6 +25,7 @@
 #include "imap-commands.h"
 #include "imap-feature.h"
 #include "imap-fetch.h"
+#include "imap-list.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -244,6 +244,7 @@ client_add_input_finalize(struct client *client)
 }
 
 int client_create_from_input(const struct mail_storage_service_input *input,
+			     const struct imap_logout_stats *stats,
 			     int fd_in, int fd_out,
 			     enum client_create_flags flags,
 			     struct client **client_r, const char **error_r)
@@ -299,6 +300,9 @@ int client_create_from_input(const struct mail_storage_service_input *input,
 			       event, mail_user, imap_set, smtp_set);
 	client->userdb_fields = input->userdb_fields == NULL ? NULL :
 		p_strarray_dup(client->pool, input->userdb_fields);
+	/* For imap_logout_format statistics: */
+	if (stats != NULL)
+		client->logout_stats = *stats;
 	event_unref(&event);
 	*client_r = client;
 	return 0;
@@ -323,7 +327,7 @@ static void main_stdio_run(const char *username)
 	if ((value = getenv("LOCAL_IP")) != NULL)
 		(void)net_addr2ip(value, &input.local_ip);
 
-	if (client_create_from_input(&input, STDIN_FILENO, STDOUT_FILENO,
+	if (client_create_from_input(&input, NULL, STDIN_FILENO, STDOUT_FILENO,
 				     0, &client, &error) < 0)
 		i_fatal("%s", error);
 
@@ -383,7 +387,7 @@ login_request_finished(const struct login_server_request *request,
 					request->auth_req.data_size,
 					&imap_request);
 
-	if (client_create_from_input(&input, request->fd, request->fd,
+	if (client_create_from_input(&input, NULL, request->fd, request->fd,
 				     create_flags, &client, &error) < 0) {
 		int fd = request->fd;
 		struct ostream *output =
@@ -554,6 +558,7 @@ int main(int argc, char *argv[])
 	imap_features_init();
 	clients_init();
 	imap_master_clients_init();
+	imap_list_init();
 	/* this is needed before settings are read */
 	verbose_proctitle = !IS_STANDALONE() &&
 		getenv(MASTER_VERBOSE_PROCTITLE_ENV) != NULL;
@@ -600,6 +605,7 @@ int main(int argc, char *argv[])
 		login_server_deinit(&login_server);
 	mail_storage_service_deinit(&storage_service);
 
+	imap_list_deinit();
 	imap_fetch_handlers_deinit();
 	imap_features_deinit();
 

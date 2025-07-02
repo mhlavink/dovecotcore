@@ -18,8 +18,12 @@ enum master_service_flags {
 	/* Log to configured log file instead of stderr. By default when
 	   _FLAG_STANDALONE is set, logging is done to stderr. */
 	MASTER_SERVICE_FLAG_DONT_LOG_TO_STDERR	= 0x04,
-	/* Don't read settings, but use whatever is in environment */
-	MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS	= 0x10,
+	/* Use only default settings (by executing doveconf -dF) */
+	MASTER_SERVICE_FLAG_CONFIG_DEFAULTS	= 0x10,
+	/* Use only built-in settings (do not execute doveconf). If any
+	   settings are overridden, their infos must be registered with
+	   settings_info_register(). Used by unit tests. */
+	MASTER_SERVICE_FLAG_CONFIG_BUILTIN	= 0x20,
 	/* Use MASTER_LOGIN_NOTIFY_FD to track login overflow state */
 	MASTER_SERVICE_FLAG_TRACK_LOGIN_STATE	= 0x40,
 	/* If master sends SIGINT, don't die even if we don't have clients */
@@ -144,9 +148,10 @@ bool master_service_parse_option(struct master_service *service,
 void master_service_init_finish(struct master_service *service);
 
 /* import_environment is a space-separated list of environment keys or
-   key=values. The key=values are immediately added to the environment.
-   All the keys are added to DOVECOT_PRESERVE_ENVS environment so they're
-   preserved by master_service_env_clean(). */
+   key=values. If the values contain %variables they are expanded and
+   immediately added to the environment, this can i_fatal() if the %variables
+   are invalid. All the keys are added to DOVECOT_PRESERVE_ENVS environment so
+   they're preserved by master_service_env_clean(). */
 void master_service_import_environment(const char *import_environment);
 /* Clean environment from everything except the ones listed in
    DOVECOT_PRESERVE_ENVS environment. */
@@ -209,18 +214,20 @@ unsigned int master_service_get_client_limit(struct master_service *service);
 unsigned int master_service_get_process_limit(struct master_service *service);
 /* Returns service { process_min_avail } */
 unsigned int master_service_get_process_min_avail(struct master_service *service);
-/* Returns the service's idle_kill timeout in seconds. Normally master handles
-   sending the kill request when the process has no clients, but some services
-   with permanent client connections may need to handle this themselves. */
-unsigned int master_service_get_idle_kill_secs(struct master_service *service);
+/* Returns the service's idle_kill_interval timeout in seconds. Normally master
+   handles sending the kill request when the process has no clients, but some
+   services with permanent client connections may need to handle this
+   themselves. */
+unsigned int
+master_service_get_idle_kill_interval_secs(struct master_service *service);
 
 /* Set maximum number of client connections we will handle before shutting
    down. */
-void master_service_set_service_count(struct master_service *service,
-				      unsigned int count);
+void master_service_set_restart_request_count(struct master_service *service,
+					      unsigned int count);
 /* Returns the number of client connections we will handle before shutting
    down. The value is decreased only after connection has been closed. */
-unsigned int master_service_get_service_count(struct master_service *service);
+unsigned int master_service_get_restart_request_count(struct master_service *service);
 /* Return the number of listener sockets. */
 unsigned int master_service_get_socket_count(struct master_service *service);
 /* Returns the name of the listener socket, or "" if none is specified. */

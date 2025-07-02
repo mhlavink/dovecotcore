@@ -9,19 +9,25 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib \
 	-I$(top_srcdir)/src/lib-test \
 	-I$(top_srcdir)/src/lib-dns \
+	-I$(top_srcdir)/src/lib-ldap \
 	-I$(top_srcdir)/src/lib-mail \
+	-I$(top_srcdir)/src/lib-http \
 	-I$(top_srcdir)/src/lib-settings \
 	-I$(top_srcdir)/src/lib-master \
 	-I$(top_srcdir)/src/lib-pop3 \
 	-I$(top_srcdir)/src/imap-urlauth \
+	-I$(top_srcdir)/src/lib-storage \
+	-I$(top_srcdir)/src/lib-var-expand \
 	-DPKG_RUNDIR=\""$(rundir)"\" \
 	-DPKG_STATEDIR=\""$(statedir)"\" \
 	-DPKG_LIBEXECDIR=\""$(pkglibexecdir)"\" \
+	-DDATADIR=\"$(pkgdatadir)\" \
 	-DEXAMPLE_CONFIG_DIR=\""$(exampledir)"\" \
 	-DMODULEDIR=\""$(moduledir)"\" \
 	-DSSLDIR=\""$(ssldir)\"" \
 	-DSYSCONFDIR=\""$(pkgsysconfdir)"\" \
-	$(BINARY_CFLAGS)
+	$(BINARY_CFLAGS) \
+	$(SQL_CFLAGS)
 
 noinst_LTLIBRARIES = libconfig.la
 
@@ -70,6 +76,7 @@ noinst_HEADERS = \
 	all-settings.h \
 	config-connection.h \
 	config-dump-full.h \
+	default-settings-import.h \
 	old-set-parser.h \
 	sysinfo-get.h
 
@@ -95,7 +102,7 @@ test_libs = \
 	$(noinst_LTLIBRARIES) \
 	$(LIBDOVECOT)
 
-test_config_parser_CFLAGS = $(AM_CPPFLAGS)
+test_config_parser_CFLAGS = $(AM_CFLAGS)
 test_config_parser_SOURCES = test-config-parser.c
 test_config_parser_LDADD = $(test_libs)
 test_config_parser_DEPENDENCIES = $(LIBDOVECOT_DEPS) $(noinst_LTLIBRARIES)

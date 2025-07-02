@@ -19,8 +19,8 @@
 #include "auth-client.h"
 #include "dsasl-client.h"
 #include "master-service-settings.h"
-#include "master-service-ssl-settings.h"
 #include "login-proxy.h"
+#include "settings-parser.h"
 
 #include <unistd.h>
 #include <syslog.h>
@@ -37,14 +37,14 @@ struct login_client_list *login_client_list;
 bool closing_down, login_debug;
 struct anvil_client *anvil;
 const char *login_rawlog_dir = NULL;
-unsigned int initial_service_count;
+unsigned int initial_restart_request_count;
 struct login_module_register login_module_register;
 ARRAY_TYPE(string) global_alt_usernames;
 bool login_ssl_initialized;
 
 const struct login_settings *global_login_settings;
-const struct master_service_ssl_settings *global_ssl_settings;
-const struct master_service_ssl_server_settings *global_ssl_server_settings;
+const struct ssl_settings *global_ssl_settings;
+const struct ssl_server_settings *global_ssl_server_settings;
 void **global_other_settings;
 
 static ARRAY(struct ip_addr) login_source_v4_ips_array;
@@ -276,25 +276,17 @@ void login_anvil_init(void)
 }
 
 static void
-parse_login_source_ips(const char *ips_str)
+parse_login_source_ips(const ARRAY_TYPE(const_string) *ips_str)
 {
 	const char *const *tmp;
 	struct ip_addr *tmp_ips;
-	bool skip_nonworking = FALSE;
 	unsigned int i, tmp_ips_count;
 	int ret;
 
-	if (ips_str[0] == '?') {
-		/* try binding to the IP immediately. if it doesn't
-		   work, skip it. (this allows using the same config file for
-		   all the servers.) */
-		skip_nonworking = TRUE;
-		ips_str++;
-	}
 	i_array_init(&login_source_v4_ips_array, 4);
 	i_array_init(&login_source_v6_ips_array, 4);
 
-	for (tmp = t_strsplit_spaces(ips_str, ", "); *tmp != NULL; tmp++) {
+	for (tmp = settings_boollist_get(ips_str); *tmp != NULL; tmp++) {
 		ret = net_gethostbyname(*tmp, &tmp_ips, &tmp_ips_count);
 		if (ret != 0) {
 			i_error("login_source_ips: net_gethostbyname(%s) failed: %s",
@@ -302,8 +294,6 @@ parse_login_source_ips(const char *ips_str)
 			continue;
 		}
 		for (i = 0; i < tmp_ips_count; i++) {
-			if (skip_nonworking && net_try_bind(&tmp_ips[i]) < 0)
-				continue;
 			if (tmp_ips[i].family == AF_INET)
 				array_push_back(&login_source_v4_ips_array, &tmp_ips[i]);
 			else if (tmp_ips[i].family == AF_INET6)
@@ -324,7 +314,7 @@ static void login_load_modules(void)
 {
 	struct module_dir_load_settings mod_set;
 
-	if (global_login_settings->login_plugins[0] == '\0')
+	if (array_is_empty(&global_login_settings->login_plugins))
 		return;
 
 	i_zero(&mod_set);
@@ -335,23 +325,24 @@ static void login_load_modules(void)
 	mod_set.debug = login_debug;
 
 	modules = module_dir_load(global_login_settings->login_plugin_dir,
-				  global_login_settings->login_plugins,
+				  settings_boollist_get(&global_login_settings->login_plugins),
 				  &mod_set);
 	module_dir_init(modules);
 }
 
 static void login_ssl_init(void)
 {
-	struct ssl_iostream_settings ssl_set;
+	const struct ssl_iostream_settings *ssl_set;
 	const char *error;
 
-	if (strcmp(global_ssl_settings->ssl, "no") == 0)
+	if (strcmp(global_ssl_server_settings->ssl, "no") == 0)
 		return;
 
-	master_service_ssl_server_settings_to_iostream_set(global_ssl_settings,
-		global_ssl_server_settings, pool_datastack_create(), &ssl_set);
-	if (io_stream_ssl_global_init(&ssl_set, &error) < 0)
+	ssl_server_settings_to_iostream_set(global_ssl_settings,
+		global_ssl_server_settings, &ssl_set);
+	if (io_stream_ssl_global_init(ssl_set, &error) < 0)
 		i_fatal("Failed to initialize SSL library: %s", error);
+	settings_free(ssl_set);
 	login_ssl_initialized = TRUE;
 }
 
@@ -385,7 +376,7 @@ static void main_preinit(void)
 		master_service_get_client_limit(master_service)*6;
 	io_loop_set_max_fd_count(current_ioloop, max_fds);
 
-	i_assert(strcmp(global_ssl_settings->ssl, "no") == 0 ||
+	i_assert(strcmp(global_ssl_server_settings->ssl, "no") == 0 ||
 		 login_ssl_initialized);
 
 	if (global_login_settings->mail_max_userip_connections > 0)
@@ -393,9 +384,9 @@ static void main_preinit(void)
 
 	/* read the login_source_ips before chrooting so it can access
 	   /etc/hosts */
-	parse_login_source_ips(global_login_settings->login_source_ips);
+	parse_login_source_ips(&global_login_settings->login_source_ips);
 	if (login_source_v4_ips_count > 0) {
-		/* randomize the initial index in case service_count=1
+		/* randomize the initial index in case restart_service_count=1
 		   (although in that case it's unlikely this setting is
 		   even used..) */
 		login_source_v4_ips_idx = i_rand_limit(login_source_v4_ips_count);
@@ -408,7 +399,7 @@ static void main_preinit(void)
 	restrict_access_by_env(0, NULL);
 	if (login_debug)
 		restrict_access_allow_coredumps(TRUE);
-	initial_service_count = master_service_get_service_count(master_service);
+	initial_restart_request_count = master_service_get_restart_request_count(master_service);
 
 	if (restrict_access_get_current_chroot() == NULL) {
 		if (chdir("login") < 0)
@@ -436,7 +427,7 @@ static void main_init(const char *login_socket)
 	auth_client = auth_client_init(login_socket, (unsigned int)getpid(),
 				       FALSE);
 	auth_client_connect(auth_client);
-        auth_client_set_connect_notify(auth_client, auth_connect_notify, NULL);
+	auth_client_set_connect_notify(auth_client, auth_connect_notify, NULL);
 	login_client_list = login_client_list_init(master_service,
 						   post_login_socket);
 
@@ -524,12 +515,10 @@ int login_binary_run(struct login_binary *binary,
 			 SETTINGS_GET_FLAG_NO_EXPAND,
 			 &global_login_settings, &error) < 0)
 		i_fatal("%s", error);
-	global_ssl_settings = settings_get_or_fatal(
-		master_service_get_event(master_service),
-		&master_service_ssl_setting_parser_info);
-	global_ssl_server_settings = settings_get_or_fatal(
-		master_service_get_event(master_service),
-		&master_service_ssl_server_setting_parser_info);
+	if (ssl_server_settings_get(master_service_get_event(master_service),
+				    &global_ssl_settings,
+				    &global_ssl_server_settings, &error) < 0)
+		i_fatal("%s", error);
 
 	if (argv[optind] != NULL)
 		login_socket = argv[optind];
@@ -545,5 +534,5 @@ int login_binary_run(struct login_binary *binary,
 	array_free(&login_source_v4_ips_array);
 	array_free(&login_source_v6_ips_array);
 	master_service_deinit(&master_service);
-        return 0;
+	return 0;
 }

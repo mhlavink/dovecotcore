@@ -210,6 +210,19 @@ extern struct doveadm_cmd_ver2 doveadm_cmd_mailbox_cache_decision;
 extern struct doveadm_cmd_ver2 doveadm_cmd_mailbox_cache_remove;
 extern struct doveadm_cmd_ver2 doveadm_cmd_mailbox_cache_purge;
 extern struct doveadm_cmd_ver2 doveadm_cmd_rebuild_attachments;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_get;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_put;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_copy;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_stat;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_metadata;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_delete;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_iter;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_fs_iter_dirs;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_dict_get;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_dict_set;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_dict_unset;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_dict_inc;
+extern struct doveadm_cmd_ver2 doveadm_cmd_mail_dict_iter;
 
 #define DOVEADM_CMD_MAIL_COMMON \
 DOVEADM_CMD_PARAM('A', "all-users", CMD_PARAM_BOOL, 0) \

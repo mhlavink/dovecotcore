@@ -4,21 +4,24 @@
 #include "array.h"
 #include "event-filter.h"
 #include "path-util.h"
+#include "hostpid.h"
 #include "fdpass.h"
 #include "write-full.h"
 #include "str.h"
+#include "sha2.h"
+#include "hex-binary.h"
+#include "restrict-access.h"
 #include "syslog-util.h"
 #include "eacces-error.h"
 #include "env-util.h"
 #include "execv-const.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "stats-client.h"
 #include "master-service-private.h"
-#include "master-service-ssl-settings.h"
 #include "master-service-settings.h"
 
 #include <unistd.h>
+#include <fcntl.h>
 #include <time.h>
 #include <sys/stat.h>
 
@@ -42,12 +45,11 @@ static const struct setting_define master_service_setting_defines[] = {
 	DEF(STR, log_path),
 	DEF(STR, info_log_path),
 	DEF(STR, debug_log_path),
-	DEF(STR, log_timestamp),
+	DEF(STR_NOVARS, log_timestamp),
 	DEF(STR, log_debug),
 	DEF(STR, log_core_filter),
 	DEF(STR, process_shutdown_filter),
 	DEF(STR, syslog_facility),
-	DEF(STR, import_environment),
 	DEF(STR, stats_writer_socket_path),
 	DEF(STR, dovecot_storage_version),
 	DEF(BOOL, version_ignore),
@@ -57,21 +59,11 @@ static const struct setting_define master_service_setting_defines[] = {
 	DEF(STR, haproxy_trusted_networks),
 	DEF(TIME, haproxy_timeout),
 
+	{ .type = SET_STRLIST, .key = "import_environment",
+	  .offset = offsetof(struct master_service_settings, import_environment) },
+
 	SETTING_DEFINE_LIST_END
 };
-
-/* <settings checks> */
-#ifdef HAVE_LIBSYSTEMD
-#  define ENV_SYSTEMD " LISTEN_PID LISTEN_FDS NOTIFY_SOCKET"
-#else
-#  define ENV_SYSTEMD ""
-#endif
-#ifdef DEBUG
-#  define ENV_GDB " GDB DEBUG_SILENT"
-#else
-#  define ENV_GDB ""
-#endif
-/* </settings checks> */
 
 static const struct master_service_settings master_service_default_settings = {
 	.base_dir = PKG_RUNDIR,
@@ -85,15 +77,35 @@ static const struct master_service_settings master_service_default_settings = {
 	.log_core_filter = "",
 	.process_shutdown_filter = "",
 	.syslog_facility = "mail",
-	.import_environment = "TZ CORE_OUTOFMEM CORE_ERROR PATH" ENV_SYSTEMD ENV_GDB,
+	.import_environment = ARRAY_INIT,
 	.stats_writer_socket_path = "stats-writer",
 	.dovecot_storage_version = "",
 	.version_ignore = FALSE,
 	.shutdown_clients = TRUE,
-	.verbose_proctitle = FALSE,
+	.verbose_proctitle = VERBOSE_PROCTITLE_DEFAULT,
 
 	.haproxy_trusted_networks = "",
 	.haproxy_timeout = 3
+};
+
+static const struct setting_keyvalue master_service_default_settings_keyvalue[] = {
+	{ "import_environment/TZ", "%{env:TZ}" },
+	{ "import_environment/CORE_OUTOFMEM", "%{env:CORE_OUTOFMEM}" },
+	{ "import_environment/CORE_ERROR", "%{env:CORE_ERROR}" },
+	{ "import_environment/PATH", "%{env:PATH}" },
+#ifdef HAVE_LIBSYSTEMD
+	{ "import_environment/LISTEN_PID", "%{env:LISTEN_PID}" },
+	{ "import_environment/LISTEN_FDS", "%{env:LISTEN_FDS}" },
+	{ "import_environment/NOTIFY_SOCKET", "%{env:NOTIFY_SOCKET}" },
+#endif
+#ifdef __GLIBC__
+	{ "import_environment/MALLOC_MMAP_THRESHOLD_", "131072" },
+#endif
+#ifdef DEBUG
+	{ "import_environment/GDB", "%{env:GDB}" },
+	{ "import_environment/DEBUG_SILENT", "%{env:DEBUG_SILENT}" },
+#endif
+	{ NULL, NULL },
 };
 
 const struct setting_parser_info master_service_setting_parser_info = {
@@ -101,6 +113,7 @@ const struct setting_parser_info master_service_setting_parser_info = {
 
 	.defines = master_service_setting_defines,
 	.defaults = &master_service_default_settings,
+	.default_settings = master_service_default_settings_keyvalue,
 
 	.pool_offset1 = 1 + offsetof(struct master_service_settings, pool),
 	.struct_size = sizeof(struct master_service_settings),
@@ -197,7 +210,7 @@ master_service_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 		return FALSE;
 	/* doveconf / config checks dovecot_storage_version separately.
 	   This check shouldn't fail e.g. "doveconf -d" command. */
-	if (!is_config_binary() &&
+	if (settings_get_config_binary() == SETTINGS_BINARY_OTHER &&
 	    !storage_version_check(set->dovecot_storage_version, error_r))
 		return FALSE;
 	return TRUE;
@@ -245,8 +258,12 @@ master_service_exec_config(struct master_service *service,
 
 	t_array_init(&conf_argv, 11 + (service->argc + 1) + 1);
 	strarr_push(&conf_argv, DOVECOT_CONFIG_BIN_PATH);
-	strarr_push(&conf_argv, "-c");
-	strarr_push(&conf_argv, service->config_path);
+	if ((service->flags & MASTER_SERVICE_FLAG_CONFIG_DEFAULTS) != 0)
+		strarr_push(&conf_argv, "-d");
+	else {
+		strarr_push(&conf_argv, "-c");
+		strarr_push(&conf_argv, service->config_path);
+	}
 
 	if (input->check_full_config)
 		strarr_push(&conf_argv, "-C");
@@ -307,17 +324,47 @@ config_exec_fallback(struct master_service *service,
 	errno = saved_errno;
 }
 
+static int master_service_binary_config_cache_get(const char *cache_dir,
+						  const char *input_path)
+{
+	if (cache_dir == NULL)
+		return -1;
+
+	const char *cache_path =
+		master_service_get_binary_config_cache_path(cache_dir, input_path);
+	int fd = open(cache_path, O_RDONLY);
+	if (fd == -1 && errno != ENOENT)
+		i_error("Binary config cache: open(%s) failed: %m", cache_path);
+	return fd;
+}
+
 static int
 master_service_open_config(struct master_service *service,
 			   const struct master_service_settings_input *input,
-			   const char **path_r, const char **error_r)
+			   const char *cache_dir,
+			   const char **path_r, bool *cached_config_r,
+			   const char **error_r)
 {
 	struct stat st;
 	const char *path;
 	int fd = -1;
 
-	*path_r = path = input->config_path != NULL ? input->config_path :
-		master_service_get_config_path(service);
+	if ((service->flags & MASTER_SERVICE_FLAG_CONFIG_DEFAULTS) != 0)
+		path = MASTER_SERVICE_BINARY_CONFIG_DEFAULTS;
+	else if (input->config_path != NULL)
+		path = input->config_path;
+	else
+		path = master_service_get_config_path(service);
+	*path_r = path;
+	*cached_config_r = FALSE;
+
+	if ((fd = master_service_binary_config_cache_get(cache_dir, path)) != -1) {
+		*cached_config_r = TRUE;
+		return fd;
+	}
+
+	if ((service->flags & MASTER_SERVICE_FLAG_CONFIG_DEFAULTS) != 0)
+		master_service_exec_config(service, input);
 
 	if (!service->config_path_from_master &&
 	    !service->config_path_changed_with_param &&
@@ -425,12 +472,16 @@ master_service_append_config_overrides(struct master_service *service)
 	}
 }
 
-int master_service_settings_read(struct master_service *service,
+static int
+master_service_settings_read_int(struct master_service *service,
 				 const struct master_service_settings_input *input,
+				 const char *cache_dir,
 				 struct master_service_settings_output *output_r,
 				 const char **error_r)
 {
 	const char *path = NULL, *value, *error;
+	bool cached_config = FALSE;
+	bool import_environment_missing = FALSE;
 	int ret, fd = -1;
 
 	i_zero(output_r);
@@ -449,12 +500,13 @@ int master_service_settings_read(struct master_service *service,
 		if (str_to_int(value, &fd) < 0 || fd < 0)
 			i_fatal("Invalid "DOVECOT_CONFIG_FD_ENV": %s", value);
 		path = t_strdup_printf("<"DOVECOT_CONFIG_FD_ENV" %d>", fd);
-	} else if ((service->flags & MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS) == 0) {
+	} else if ((service->flags & MASTER_SERVICE_FLAG_CONFIG_BUILTIN) == 0) {
 		/* Open config via socket if possible. If it doesn't work,
 		   execute doveconf -F. */
 		T_BEGIN {
-			fd = master_service_open_config(service, input, &path,
-							&error);
+			fd = master_service_open_config(service, input,
+							cache_dir, &path,
+							&cached_config, &error);
 		} T_END_PASS_STR_IF(fd == -1, &error);
 		if (fd == -1) {
 			if (errno == EACCES)
@@ -462,6 +514,13 @@ int master_service_settings_read(struct master_service *service,
 			*error_r = t_strdup_printf(
 				"Failed to read configuration: %s", error);
 			return -1;
+		}
+		if (getenv(MASTER_IS_PARENT_ENV) == NULL) {
+			/* Standalone program read the config via socket or
+			   config cache (not via executing doveconf).
+			   import_environment setting still needs to be
+			   processed. */
+			import_environment_missing = TRUE;
 		}
 	} else if (!settings_has_mmap(service->settings_root)) {
 		/* Use default settings. Set dovecot_storage_version to the
@@ -489,10 +548,18 @@ int master_service_settings_read(struct master_service *service,
 		enum settings_read_flags read_flags =
 			!input->no_protocol_filter ? 0 :
 			SETTINGS_READ_NO_PROTOCOL_FILTER;
+		if (cached_config)
+			read_flags |= SETTINGS_READ_CHECK_CACHE_TIMESTAMPS;
 		ret = settings_read(service->settings_root, fd, path,
 				    service_name, protocol_name, read_flags,
-				    &output_r->specific_services,
+				    &output_r->specific_protocols,
 				    &error);
+		if (ret == 0 && cached_config) {
+			/* out-of-date binary config cache */
+			i_close_fd(&fd);
+			return master_service_settings_read_int(service, input,
+						NULL, output_r, error_r);
+		}
 		if (input->return_config_fd)
 			output_r->config_fd = fd;
 		else
@@ -539,7 +606,25 @@ int master_service_settings_read(struct master_service *service,
 
 	if (service->set->shutdown_clients)
 		master_service_set_die_with_master(master_service, TRUE);
+
+	if (import_environment_missing) {
+		const char *import_environment =
+			master_service_get_import_environment_keyvals(service);
+		master_service_import_environment(import_environment);
+		/* DOVECOT_HOST* environments may have changed */
+		hostpid_init();
+	}
 	return 0;
+}
+
+int master_service_settings_read(struct master_service *service,
+				 const struct master_service_settings_input *input,
+				 struct master_service_settings_output *output_r,
+				 const char **error_r)
+{
+	return master_service_settings_read_int(service, input,
+						getenv("DOVECOT_CONFIG_CACHE"),
+						output_r, error_r);
 }
 
 int master_service_settings_read_simple(struct master_service *service,
@@ -556,4 +641,45 @@ const struct master_service_settings *
 master_service_get_service_settings(struct master_service *service)
 {
 	return service->set;
+}
+
+const char *
+master_service_get_import_environment_keyvals(struct master_service *service)
+{
+	ARRAY_TYPE(const_string) arr = service->set->import_environment;
+	unsigned int len = array_count(&arr);
+	string_t *keyvals = t_str_new(64);
+	for (unsigned int i = 0; i < len; i += 2) {
+		const char *const *key = array_idx(&arr, i);
+		const char *const *val = array_idx(&arr, i + 1);
+		str_append(keyvals, t_strdup_printf("%s=%s", *key, *val));
+
+		if (i + 2 < len)
+			str_append_c(keyvals, ' ');
+	}
+	return str_c(keyvals);
+}
+
+const char *
+master_service_get_binary_config_cache_path(const char *cache_dir,
+					    const char *main_path)
+{
+	struct sha256_ctx hash;
+	sha256_init(&hash);
+	sha256_loop(&hash, main_path, strlen(main_path) + 1);
+	uid_t euid = geteuid();
+	sha256_loop(&hash, &euid, sizeof(euid));
+	gid_t egid = getegid();
+	sha256_loop(&hash, &egid, sizeof(egid));
+	unsigned int groups_count;
+	const gid_t *groups = restrict_get_groups_list(&groups_count);
+	sha256_loop(&hash, groups, sizeof(*groups) * groups_count);
+	unsigned char digest[SHA256_RESULTLEN];
+	sha256_result(&hash, digest);
+
+	string_t *cache_path = t_str_new(128);
+	str_append(cache_path, cache_dir);
+	str_append(cache_path, "/binary.conf.");
+	binary_to_hex_append(cache_path, digest, sizeof(digest));
+	return str_c(cache_path);
 }

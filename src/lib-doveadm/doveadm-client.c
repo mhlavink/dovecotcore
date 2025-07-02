@@ -92,14 +92,7 @@ void doveadm_client_settings_dup(const struct doveadm_client_settings *src,
 
 	dest_r->username = p_strdup(pool, src->username);
 	dest_r->password = p_strdup(pool, src->password);
-
 	dest_r->ssl_flags = src->ssl_flags;
-	dest_r->ssl_set = *ssl_iostream_settings_dup(pool, &src->ssl_set);
-	if (src->ssl_ctx != NULL) {
-		dest_r->ssl_ctx = src->ssl_ctx;
-		ssl_iostream_context_ref(dest_r->ssl_ctx);
-	}
-
 	dest_r->log_passthrough = src->log_passthrough;
 }
 
@@ -559,32 +552,29 @@ static bool doveadm_client_input_one(struct doveadm_client *conn)
 static int doveadm_client_init_ssl(struct doveadm_client *conn,
 				   const char **error_r)
 {
-	struct ssl_iostream_settings ssl_set = conn->set.ssl_set;
+	enum ssl_iostream_flags ssl_flags = 0;
 	const char *error;
 
 	if (conn->set.ssl_flags == 0)
 		return 0;
 
 	if ((conn->set.ssl_flags & AUTH_PROXY_SSL_FLAG_ANY_CERT) != 0)
-		ssl_set.allow_invalid_cert = TRUE;
-	if (ssl_set.allow_invalid_cert)
-		ssl_set.verbose_invalid_cert = TRUE;
-
-	if (conn->set.ssl_ctx == NULL &&
-	    ssl_iostream_client_context_cache_get(&ssl_set, &conn->set.ssl_ctx,
-						  &error) < 0) {
-		*error_r = t_strdup_printf(
-			"Couldn't initialize SSL client: %s", error);
-		return -1;
-	}
+		ssl_flags |= SSL_IOSTREAM_FLAG_ALLOW_INVALID_CERT;
 
 	const char *hostname =
 		conn->set.hostname != NULL ? conn->set.hostname : "";
 	connection_input_halt(&conn->conn);
-	if (io_stream_create_ssl_client(conn->set.ssl_ctx, hostname, &ssl_set,
-					conn->conn.event,
-					&conn->conn.input, &conn->conn.output,
-					&conn->ssl_iostream, &error) < 0) {
+	const struct ssl_iostream_client_autocreate_parameters parameters = {
+		.event_parent = conn->conn.event,
+		.host = hostname,
+		.flags = ssl_flags,
+		.application_protocols = (const char *const[]) {
+			"doveadm", NULL
+		},
+	};
+	if (io_stream_autocreate_ssl_client(&parameters,
+					    &conn->conn.input, &conn->conn.output,
+					    &conn->ssl_iostream, &error) < 0) {
 		*error_r = t_strdup_printf(
 			"Couldn't initialize SSL client: %s", error);
 		return -1;
@@ -687,6 +677,7 @@ doveadm_client_create_failed(struct doveadm_client_dns_lookup_context *ctx)
 		.error  = ctx->error,
 	};
 	doveadm_client_callback(conn, &reply);
+	event_unref(&conn->conn.event);
 	pool_unref(&conn->pool);
 }
 
@@ -724,16 +715,10 @@ static int doveadm_client_dns_lookup(struct doveadm_client *conn,
 {
 	struct doveadm_client_dns_lookup_context *ctx =
 		p_new(conn->pool, struct doveadm_client_dns_lookup_context, 1);
-	struct dns_lookup_settings dns_set;
-
-	i_zero(&dns_set);
-	dns_set.dns_client_socket_path = conn->set.dns_client_socket_path;
-	dns_set.timeout_msecs = DOVEADM_CLIENT_DNS_TIMEOUT_MSECS;
-	dns_set.event_parent = conn->conn.event;
 
 	ctx->conn = conn;
 
-	if (dns_lookup(conn->set.hostname, &dns_set,
+	if (dns_lookup(conn->set.hostname, NULL, conn->conn.event,
 		       doveadm_client_dns_lookup_callback, ctx,
 		       &conn->dns_lookup) != 0) {
 		*error_r = t_strdup(ctx->error);
@@ -794,6 +779,8 @@ int doveadm_client_create(const struct doveadm_client_settings *set,
 	conn = p_new(pool, struct doveadm_client, 1);
 	conn->pool = pool;
 	conn->refcount = 1;
+	/* DNS lookup needs the event before connection is initialized. */
+	conn->conn.event = event_create(NULL);
 	doveadm_client_settings_dup(set, &conn->set, pool);
 
 	if (set->socket_path != NULL) {
@@ -805,6 +792,7 @@ int doveadm_client_create(const struct doveadm_client_settings *set,
 
 	} else if (doveadm_client_resolve_hostname(conn, &error) != 0) {
 		*error_r = t_strdup(error);
+		event_unref(&conn->conn.event);
 		pool_unref(&pool);
 		return -1;
 	}
@@ -865,7 +853,6 @@ static void doveadm_client_destroy_int(struct doveadm_client *conn)
 	timeout_remove(&conn->to_destroy);
 
 	connection_deinit(&conn->conn);
-	ssl_iostream_context_unref(&conn->set.ssl_ctx);
 }
 
 static void doveadm_client_destroy(struct doveadm_client **_conn)

@@ -12,13 +12,11 @@
 #include "process-title.h"
 #include "restrict-access.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "login-server.h"
 #include "master-interface.h"
 #include "master-admin-client.h"
-#include "var-expand.h"
 #include "mail-error.h"
 #include "mail-user.h"
 #include "mail-namespace.h"
@@ -188,9 +186,20 @@ static int lock_session(struct client *client)
 static int init_namespaces(struct client *client, bool already_logged_in)
 {
 	const char *error;
+	int ret;
 
 	/* finish initializing the user (see comment in main()) */
-	if (mail_namespaces_init(client->user, &error) < 0) {
+	ret = mail_namespaces_init(client->user, &error);
+	if (ret == 0) {
+		i_assert(client->inbox_ns == NULL);
+		client->inbox_ns = mail_namespace_find_inbox(client->user->namespaces);
+		i_assert(client->inbox_ns != NULL);
+
+		client->mail_set = mailbox_list_get_mail_set(client->inbox_ns->list);
+		pool_ref(client->mail_set->pool);
+	}
+
+	if (ret < 0) {
 		if (!already_logged_in)
 			client_send_line(client, MSG_BYE_INTERNAL_ERROR);
 
@@ -198,11 +207,6 @@ static int init_namespaces(struct client *client, bool already_logged_in)
 		client_destroy(client, error);
 		return -1;
 	}
-
-	i_assert(client->inbox_ns == NULL);
-	client->inbox_ns = mail_namespace_find_inbox(client->user->namespaces);
-	i_assert(client->inbox_ns != NULL);
-
 	return 0;
 }
 

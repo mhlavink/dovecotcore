@@ -30,6 +30,7 @@ struct anvil_client {
 	struct connection conn;
 	struct timeout *to_cancel;
 
+	char *last_connect_error;
 	struct timeout *to_reconnect;
 	time_t last_reconnect;
 
@@ -106,6 +107,7 @@ void anvil_client_deinit(struct anvil_client **_client)
 	aqueue_deinit(&client->queries);
 	i_assert(client->to_reconnect == NULL);
 	connection_deinit(&client->conn);
+	i_free(client->last_connect_error);
 	i_free(client);
 
 	if (anvil_connections->connections == NULL)
@@ -231,7 +233,8 @@ static int anvil_client_input_line(struct connection *conn, const char *line)
 	queries = array_get(&client->queries_arr, &count);
 	query = queries[aqueue_idx(client->queries, 0)];
 	if (query->callback != NULL) T_BEGIN {
-		query->callback(line, query->context);
+		struct anvil_reply reply = { .reply = line };
+		query->callback(&reply, query->context);
 	} T_END;
 	anvil_query_free(&query);
 	aqueue_delete_tail(client->queries);
@@ -247,11 +250,14 @@ int anvil_client_connect(struct anvil_client *client, bool retry)
 	ret = retry ? connection_client_connect_with_retries(&client->conn, 5000) :
 		connection_client_connect(&client->conn);
 	if (ret < 0) {
+		i_free(client->last_connect_error);
+		client->last_connect_error = i_strdup_printf(
+			"net_connect_unix(%s) failed: %m",
+			client->conn.base_name);
 		if (errno != ENOENT ||
 		    (client->flags & ANVIL_CLIENT_FLAG_HIDE_ENOENT) == 0) {
-			e_error(client->conn.event,
-				"net_connect_unix(%s) failed: %m",
-				client->conn.base_name);
+			e_error(client->conn.event, "%s",
+				client->last_connect_error);
 		}
 		return -1;
 	}
@@ -267,7 +273,8 @@ int anvil_client_connect(struct anvil_client *client, bool retry)
 	return 0;
 }
 
-static void anvil_client_cancel_queries(struct anvil_client *client)
+static void
+anvil_client_cancel_queries(struct anvil_client *client, const char *reason)
 {
 	struct anvil_query *const *queries, *query;
 	unsigned int count;
@@ -275,8 +282,10 @@ static void anvil_client_cancel_queries(struct anvil_client *client)
 	queries = array_get(&client->queries_arr, &count);
 	while (aqueue_count(client->queries) > 0) {
 		query = queries[aqueue_idx(client->queries, 0)];
-		if (query->callback != NULL)
-			query->callback(NULL, query->context);
+		if (query->callback != NULL) {
+			struct anvil_reply reply = { .error = reason };
+			query->callback(&reply, query->context);
+		}
 		anvil_query_free(&query);
 		aqueue_delete_tail(client->queries);
 	}
@@ -292,11 +301,19 @@ static void anvil_client_destroy(struct connection *conn)
 	i_stream_destroy(&client->cmd_input);
 	o_stream_destroy(&client->cmd_output);
 	connection_disconnect(&client->conn);
-	anvil_client_cancel_queries(client);
+	anvil_client_cancel_queries(client, connection_disconnect_reason(conn));
 	timeout_remove(&client->to_reconnect);
 
 	if (!client->deinitializing)
 		anvil_client_reconnect(client);
+}
+
+static void anvil_client_connect_failed(struct anvil_client *client)
+{
+	i_assert(client->last_connect_error != NULL);
+
+	anvil_client_cancel_queries(client, client->last_connect_error);
+	i_free(client->last_connect_error);
 }
 
 static void anvil_client_timeout(struct anvil_query *anvil_query)
@@ -305,10 +322,10 @@ static void anvil_client_timeout(struct anvil_query *anvil_query)
 
 	i_assert(aqueue_count(client->queries) > 0);
 
-	e_error(client->conn.event,
+	anvil_client_cancel_queries(client, t_strdup_printf(
 		"Anvil queries timed out after %u.%03u secs - aborting queries",
 		anvil_query->timeout_msecs / 1000,
-		anvil_query->timeout_msecs % 1000);
+		anvil_query->timeout_msecs % 1000));
 	/* perhaps reconnect helps */
 	anvil_client_destroy(&client->conn);
 }
@@ -353,7 +370,7 @@ anvil_client_query(struct anvil_client *client, const char *query,
 		if (client->to_cancel == NULL) {
 			client->to_cancel =
 				timeout_add_short(0,
-					anvil_client_cancel_queries, client);
+					anvil_client_connect_failed, client);
 		}
 	} else {
 		anvil_query->to = timeout_add(timeout_msecs,

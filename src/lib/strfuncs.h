@@ -34,6 +34,7 @@ char *t_strdup_noconst(const char *str) ATTR_MALLOC;
 /* return NULL if str = "" */
 const char *t_strdup_empty(const char *str) ATTR_MALLOC;
 /* *end isn't included */
+const void *t_memdup(const void *data, size_t size) ATTR_MALLOC;
 const char *t_strdup_until(const void *start, const void *end)
 	ATTR_MALLOC ATTR_RETURNS_NONNULL;
 const char *t_strndup(const void *str, size_t max_chars) ATTR_MALLOC;
@@ -129,6 +130,26 @@ str_begins_builtin_success(const char *haystack, size_t needle_len,
 	 (strncasecmp((h), (n), strlen(n)) != 0 ? FALSE : \
 	  str_begins_builtin_success((h), strlen(n), suffix_r)))
 #endif
+
+static inline ATTR_PURE bool
+str_ends_with(const char *haystack, const char *suffix)
+{
+	size_t haystack_len = strlen(haystack);
+	size_t suffix_len = strlen(suffix);
+	if (haystack_len < suffix_len)
+		return FALSE;
+	return strcmp(haystack + haystack_len - suffix_len, suffix) == 0;
+}
+
+static inline ATTR_PURE bool
+str_ends_icase_with(const char *haystack, const char *suffix)
+{
+	size_t haystack_len = strlen(haystack);
+	size_t suffix_len = strlen(suffix);
+	if (haystack_len < suffix_len)
+		return FALSE;
+	return strcasecmp(haystack + haystack_len - suffix_len, suffix) == 0;
+}
 
 /* Get length of a prefix segment.
 

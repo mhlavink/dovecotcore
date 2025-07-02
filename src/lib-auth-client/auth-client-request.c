@@ -4,6 +4,7 @@
 #include "array.h"
 #include "str.h"
 #include "strescape.h"
+#include "base64.h"
 #include "ostream.h"
 #include "auth-client-private.h"
 #include "strfuncs.h"
@@ -26,11 +27,11 @@ auth_server_send_new_request(struct auth_client_connection *conn,
 	str = t_str_new(512);
 	str_printfa(str, "AUTH\t%u\t", request->id);
 	str_append_tabescaped(str, info->mech);
-	str_append(str, "\tservice=");
-	str_append_tabescaped(str, info->service);
+	str_append(str, "\tprotocol=");
+	str_append_tabescaped(str, info->protocol);
 
 	event_add_str(request->event, "mechanism", info->mech);
-	event_add_str(request->event, "service", info->service);
+	event_add_str(request->event, "protocol", info->protocol);
 
 	str_append(str, "\tfinal-resp-ok");
 	if ((info->flags & AUTH_REQUEST_FLAG_CONN_SECURED) != 0) {
@@ -63,6 +64,18 @@ auth_server_send_new_request(struct auth_client_connection *conn,
 		event_add_str(request->event, "certificate_user",
 			      info->cert_username);
 	}
+	if (info->ssl_client_cert_fp != NULL) {
+		str_append(str, "\tssl_client_cert_fp=");
+		str_append_tabescaped(str, info->ssl_client_cert_fp);
+		event_add_str(request->event, "ssl_client_cert_fp",
+			      info->ssl_client_cert_fp);
+	}
+	if (info->ssl_client_cert_pubkey_fp != NULL) {
+		str_append(str, "\tssl_client_cert_pubkey_fp=");
+		str_append_tabescaped(str, info->ssl_client_cert_pubkey_fp);
+		event_add_str(request->event, "ssl_client_cert_pubkey_fp",
+			      info->ssl_client_cert_pubkey_fp);
+	}
 	if (info->local_ip.family != 0) {
 		str_printfa(str, "\tlip=%s", net_ip2addr(&info->local_ip));
 		event_add_ip(request->event, "local_ip", &info->local_ip);
@@ -79,7 +92,7 @@ auth_server_send_new_request(struct auth_client_connection *conn,
 		str_printfa(str, "\trport=%u", info->remote_port);
 		event_add_int(request->event, "remote_port", info->remote_port);
 	}
-	if (info->ssl_ja3_hash != 0) {
+	if (info->ssl_ja3_hash != NULL) {
 		str_append(str, "\tssl_ja3_hash=");
 		str_append_tabescaped(str,info->ssl_ja3_hash);
 		event_add_str(request->event, "ssl_ja3_hash", info->ssl_ja3_hash);
@@ -218,7 +231,15 @@ auth_client_request_new(struct auth_client *client,
 	return request;
 }
 
-static void ATTR_NULL(3, 4)
+void auth_client_request_enable_channel_binding(
+	struct auth_client_request *request,
+	auth_channel_binding_callback_t *callback, void *context)
+{
+	request->cbinding_callback = callback;
+	request->cbinding_context = context;
+}
+
+static void
 call_callback(struct auth_client_request *request,
 	      enum auth_request_status status,
 	      const char *data_base64,
@@ -280,6 +301,33 @@ void auth_client_request_abort(struct auth_client_request **_request,
 	auth_client_request_free(&request);
 }
 
+static void
+auth_client_request_fail(struct auth_client_request **_request,
+			 enum auth_request_status status,
+			 const char *reason) ATTR_NULL(3)
+{
+	struct auth_client_request *request = *_request;
+	const char *args[2] = { NULL, NULL };
+
+	*_request = NULL;
+
+	i_assert(status == AUTH_REQUEST_STATUS_FAIL ||
+		 status == AUTH_REQUEST_STATUS_INTERNAL_FAIL);
+
+	struct event_passthrough *e =
+		event_create_passthrough(request->event)->
+		set_name("auth_client_request_finished");
+	e->add_str("error", reason);
+	e_debug(e->event(), "Failed: %s", reason);
+
+	if (reason != NULL)
+		args[0] = t_strconcat("reason=", reason, NULL);
+
+	auth_client_send_cancel(request->conn->client, request->id);
+	call_callback(request, status, NULL, args);
+	auth_client_request_free(&request);
+}
+
 unsigned int auth_client_request_get_id(struct auth_client_request *request)
 {
 	return request->id;
@@ -329,8 +377,8 @@ static void auth_client_request_final(struct auth_client_request *request)
 void auth_client_request_continue(struct auth_client_request *request,
                                   const char *data_base64)
 {
-	struct const_iovec iov[3];
-	const char *prefix;
+	struct const_iovec iov[4];
+	const char *prefix, *cbinding = "";
 
 	if (request->final_status != AUTH_REQUEST_STATUS_CONTINUE) {
 		request->to_final = timeout_add_short(
@@ -346,23 +394,42 @@ void auth_client_request_continue(struct auth_client_request *request,
 	}
 
 	prefix = t_strdup_printf("CONT\t%u\t", request->id);
+	if (request->cbinding_data != NULL) {
+		const buffer_t *cbdata = request->cbinding_data;
+		string_t *cbdata_b64 =
+			t_base64_encode(0, 0, cbdata->data, cbdata->used);
+
+		cbinding = t_strconcat("\tchannel_binding=",
+				       str_c(cbdata_b64), NULL);
+	}
 
 	iov[0].iov_base = prefix;
 	iov[0].iov_len = strlen(prefix);
-	iov[1].iov_base = data_base64;
-	iov[1].iov_len = strlen(data_base64);
-	iov[2].iov_base = "\n";
-	iov[2].iov_len = 1;
+	if (data_base64 == NULL) {
+		/* Send out-of-band response */
+		iov[1].iov_base = "#";
+		iov[1].iov_len = 1;
+	} else {
+		/* Send normal SASL response */
+		iov[1].iov_base = data_base64;
+		iov[1].iov_len = strlen(data_base64);
+	}
+	iov[2].iov_base = cbinding;
+	iov[2].iov_len = strlen(cbinding);
+	iov[3].iov_base = "\n";
+	iov[3].iov_len = 1;
 
 	struct event_passthrough *e =
 		event_create_passthrough(request->event)->
 		set_name("auth_client_request_continued");
 	e_debug(e->event(), "Continue request");
 
-	if (o_stream_sendv(request->conn->conn.output, iov, 3) < 0) {
+	if (o_stream_sendv(request->conn->conn.output, iov, 4) < 0) {
 		e_error(request->event,
 			"Error sending continue request to auth server: %m");
 	}
+
+	request->cbinding_data = NULL;
 }
 
 static void
@@ -373,6 +440,7 @@ auth_client_request_handle_input(struct auth_client_request **_request,
 {
 	struct auth_client_request *request = *_request;
 	const char *const *tmp;
+	const char *cbinding_type = NULL;
 	struct event_passthrough *e;
 
 	if (auth_client_request_is_aborted(request)) {
@@ -385,21 +453,53 @@ auth_client_request_handle_input(struct auth_client_request **_request,
 	case AUTH_REQUEST_STATUS_CONTINUE:
 		e = event_create_passthrough(request->event)->
 			set_name("auth_client_request_challenged");
+
+		for (tmp = args; tmp != NULL && *tmp != NULL; tmp++) {
+			if (str_begins(*tmp, "channel_binding=",
+				       &cbinding_type))
+				break;
+		}
+		args = NULL;
 		break;
 	default:
 		e = event_create_passthrough(request->event)->
 			set_name("auth_client_request_finished");
+
+		for (tmp = args; tmp != NULL && *tmp != NULL; tmp++) {
+			const char *key;
+			const char *value;
+			t_split_key_value_eq(*tmp, &key, &value);
+			if (str_begins(key, "event_", &key))
+				event_add_str(request->event, key, value);
+			else
+				args_parse_user(request, key, value);
+		}
 		break;
 	}
 
-	for (tmp = args; tmp != NULL && *tmp != NULL; tmp++) {
-		const char *key;
-		const char *value;
-		t_split_key_value_eq(*tmp, &key, &value);
-		if (str_begins(key, "event_", &key))
-			event_add_str(request->event, key, value);
-		else
-			args_parse_user(request, key, value);
+	if (cbinding_type != NULL) {
+		const buffer_t *data;
+		const char *error;
+
+		if (request->cbinding_callback == NULL) {
+			auth_client_request_fail(
+				&request, AUTH_REQUEST_STATUS_INTERNAL_FAIL,
+				NULL);
+			return;
+		}
+		if (request->cbinding_callback(cbinding_type,
+					       request->cbinding_context,
+					       &data, &error) < 0) {
+			auth_client_request_fail(
+				&request, AUTH_REQUEST_STATUS_FAIL,
+				t_strdup_printf("Channel binding failed: %s",
+						error));
+			return;
+		}
+
+		request->cbinding_data = buffer_create_dynamic(request->pool,
+							       data->used);
+		buffer_append_buf(request->cbinding_data, data, 0, SIZE_MAX);
 	}
 
 	switch (status) {
@@ -407,6 +507,23 @@ auth_client_request_handle_input(struct auth_client_request **_request,
 		e_debug(e->event(), "Finished");
 		break;
 	case AUTH_REQUEST_STATUS_CONTINUE:
+		if (base64_data == NULL) {
+			/* Received a challenge outside the normal SASL
+			   interaction. This is used to obtain out-of-band data
+			   such as the channel binding when the auth service
+			   messages exchanged as part of the normal SASL
+			   interaction don't provide a means to piggy-back the
+			   data, such as when channel binding data is needed for
+			   composing the first server SASL challenge. Therefore,
+			   we reply to the challenge immediately without doing
+			   the SASL callback. The SASL response is empty, but
+			   any requested fields are included.
+			 */
+			e_debug(e->event(), "Got out-of-band challenge");
+			i_assert(!final);
+			auth_client_request_continue(request, NULL);
+			return;
+		}
 		if (!final)
 			e_debug(e->event(), "Got challenge");
 		else
@@ -467,7 +584,11 @@ void auth_client_request_server_input(struct auth_client_request **_request,
 		break;
 	case AUTH_REQUEST_STATUS_CONTINUE:
 		base64_data = args[0];
-		args = NULL;
+		if (strcmp(base64_data, "#") == 0) {
+			/* Out-of-band challenge */
+			base64_data = NULL;
+		}
+		args++;
 		break;
 	case AUTH_REQUEST_STATUS_ABORT:
 		i_unreached();

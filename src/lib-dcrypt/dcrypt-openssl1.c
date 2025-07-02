@@ -349,9 +349,11 @@ dcrypt_openssl_ctx_sym_set_iv(struct dcrypt_context_symmetric *ctx,
 	if(ctx->iv != NULL)
 		p_free(ctx->pool, ctx->iv);
 
-	ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
-	memcpy(ctx->iv, iv, I_MIN(iv_len,
-	       (size_t)EVP_CIPHER_iv_length(ctx->cipher)));
+	if (EVP_CIPHER_iv_length(ctx->cipher) > 0) {
+		ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
+		memcpy(ctx->iv, iv, I_MIN(iv_len,
+		       (size_t)EVP_CIPHER_iv_length(ctx->cipher)));
+	}
 }
 
 static void
@@ -364,8 +366,10 @@ dcrypt_openssl_ctx_sym_set_key_iv_random(struct dcrypt_context_symmetric *ctx)
 
 	ctx->key = p_malloc(ctx->pool, EVP_CIPHER_key_length(ctx->cipher));
 	random_fill(ctx->key, EVP_CIPHER_key_length(ctx->cipher));
-	ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
-	random_fill(ctx->iv, EVP_CIPHER_iv_length(ctx->cipher));
+	if (EVP_CIPHER_iv_length(ctx->cipher) > 0) {
+		ctx->iv = p_malloc(ctx->pool, EVP_CIPHER_iv_length(ctx->cipher));
+		random_fill(ctx->iv, EVP_CIPHER_iv_length(ctx->cipher));
+	}
 }
 
 static void
@@ -471,10 +475,9 @@ dcrypt_openssl_ctx_sym_init(struct dcrypt_context_symmetric *ctx,
 	int len;
 
 	i_assert(ctx->key != NULL);
-	i_assert(ctx->iv != NULL);
 	i_assert(ctx->ctx == NULL);
 
-	if((ctx->ctx = EVP_CIPHER_CTX_new()) == NULL)
+	if ((ctx->ctx = EVP_CIPHER_CTX_new()) == NULL)
 		return dcrypt_openssl_error(error_r);
 
 	ec = EVP_CipherInit_ex(ctx->ctx, ctx->cipher, NULL,
@@ -2660,7 +2663,7 @@ dcrypt_openssl_encrypt_private_key_dovecot(buffer_t *key, int enctype,
 	bool res;
 	unsigned char *ptr;
 
-	unsigned char salt[8];
+	unsigned char salt[DCRYPT_DOVECOT_SALT_LEN];
 	buffer_t *peer_key = t_buffer_create(128);
 	buffer_t *secret = t_buffer_create(128);
 	cipher = t_str_lcase(cipher);

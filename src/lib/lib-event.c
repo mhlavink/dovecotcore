@@ -51,7 +51,7 @@ enum event_code {
 struct event_internal_category {
 	/* More than one category can be represented by the internal state.
 	   To give consumers a unique but consistent category pointer, we
-	   return a pointer to this 'represetative' category structure.
+	   return a pointer to this 'representative' category structure.
 	   Because we allocated it, we know that it will live exactly as
 	   long as we need it to. */
 	struct event_category representative;
@@ -107,6 +107,7 @@ static void event_copy_parent_defaults(struct event *event,
 	event->passthrough = parent->passthrough;
 	event->min_log_level = parent->min_log_level;
 	event->forced_debug = parent->forced_debug;
+	event->forced_never_debug = parent->forced_never_debug;
 	event->disable_callbacks = parent->disable_callbacks;
 }
 
@@ -339,7 +340,7 @@ static inline void replace_parent_ref(struct event *event, struct event *new)
  *	G -> E -> F
  *
  * where G contains the fields and categories of A, B, and C (and trivially
- * D beacuse D was empty).
+ * D because D was empty).
  *
  * Note that even though F has not yet been sent out, we send it now because
  * it is part of the "rest" range.
@@ -907,16 +908,11 @@ event_find_category(const struct event *event,
 		    const struct event_category *category)
 {
 	struct event_internal_category *internal = category->internal;
-	struct event_category *cat;
 
 	/* make sure we're always looking for a representative */
 	i_assert(category == &internal->representative);
 
-	array_foreach_elem(&event->categories, cat) {
-		if (cat == category)
-			return TRUE;
-	}
-	return FALSE;
+	return array_lsearch_ptr(&event->categories, category) != NULL;
 }
 
 struct event *
@@ -1691,17 +1687,11 @@ void event_register_callback(event_callback_t *callback)
 
 void event_unregister_callback(event_callback_t *callback)
 {
-	event_callback_t *const *callbackp;
+	unsigned int idx;
 
-	array_foreach(&event_handlers, callbackp) {
-		if (*callbackp == callback) {
-			unsigned int idx =
-				array_foreach_idx(&event_handlers, callbackp);
-			array_delete(&event_handlers, idx, 1);
-			return;
-		}
-	}
-	i_unreached();
+	if (!array_lsearch_ptr_idx(&event_handlers, callback, &idx))
+		i_unreached();
+	array_delete(&event_handlers, idx, 1);
 }
 
 void event_category_register_callback(event_category_callback_t *callback)
@@ -1711,18 +1701,11 @@ void event_category_register_callback(event_category_callback_t *callback)
 
 void event_category_unregister_callback(event_category_callback_t *callback)
 {
-	event_category_callback_t *const *callbackp;
+	unsigned int idx;
 
-	array_foreach(&event_category_callbacks, callbackp) {
-		if (*callbackp == callback) {
-			unsigned int idx =
-				array_foreach_idx(&event_category_callbacks,
-						  callbackp);
-			array_delete(&event_category_callbacks, idx, 1);
-			return;
-		}
-	}
-	i_unreached();
+	if (!array_lsearch_ptr_idx(&event_category_callbacks, callback, &idx))
+		i_unreached();
+	array_delete(&event_category_callbacks, idx, 1);
 }
 
 static struct event_passthrough *

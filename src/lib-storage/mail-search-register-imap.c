@@ -14,7 +14,8 @@
 #include "mail-search-build.h"
 #include "mail-search-mime-build.h"
 
-struct mail_search_register *mail_search_register_imap;
+struct mail_search_register *mail_search_register_imap4rev2;
+struct mail_search_register *mail_search_register_imap4rev1;
 
 static struct mail_search_arg *
 imap_search_fallback(struct mail_search_build_context *ctx,
@@ -536,102 +537,123 @@ imap_search_x_real_uid(struct mail_search_build_context *ctx)
 
 static const struct mail_search_register_arg imap_register_args[] = {
 	/* argument set operations */
-	{ "NOT", imap_search_not },
-	{ "OR", imap_search_or },
+	{ "NOT", imap_search_not, 0 },
+	{ "OR", imap_search_or, 0 },
 
 	/* message sets */
-	{ "ALL", imap_search_all },
-	{ "UID", imap_search_uid },
+	{ "ALL", imap_search_all, 0 },
+	{ "UID", imap_search_uid, 0 },
 
 	/* flags */
-	{ "ANSWERED", imap_search_answered },
-	{ "UNANSWERED", imap_search_unanswered },
-	{ "DELETED", imap_search_deleted },
-	{ "UNDELETED", imap_search_undeleted },
-	{ "DRAFT", imap_search_draft },
-	{ "UNDRAFT", imap_search_undraft },
-	{ "FLAGGED", imap_search_flagged },
-	{ "UNFLAGGED", imap_search_unflagged },
-	{ "SEEN", imap_search_seen },
-	{ "UNSEEN", imap_search_unseen },
-	{ "RECENT", imap_search_recent },
-	{ "OLD", imap_search_old },
-	{ "NEW", imap_search_new },
+	{ "ANSWERED", imap_search_answered, 0 },
+	{ "UNANSWERED", imap_search_unanswered, 0 },
+	{ "DELETED", imap_search_deleted, 0 },
+	{ "UNDELETED", imap_search_undeleted, 0 },
+	{ "DRAFT", imap_search_draft, 0 },
+	{ "UNDRAFT", imap_search_undraft, 0 },
+	{ "FLAGGED", imap_search_flagged, 0 },
+	{ "UNFLAGGED", imap_search_unflagged, 0 },
+	{ "SEEN", imap_search_seen, 0 },
+	{ "UNSEEN", imap_search_unseen, 0 },
+	{ "RECENT", imap_search_recent, MAIL_SEARCH_REGISTER_IMAP4REV1 },
+	{ "OLD", imap_search_old, 0 },
+	{ "NEW", imap_search_new, MAIL_SEARCH_REGISTER_IMAP4REV1 },
 
 	/* keywords */
-	{ "KEYWORD", imap_search_keyword },
-	{ "UNKEYWORD", imap_search_unkeyword },
+	{ "KEYWORD", imap_search_keyword, 0 },
+	{ "UNKEYWORD", imap_search_unkeyword, 0 },
 
 	/* dates */
-	{ "BEFORE", imap_search_before },
-	{ "ON", imap_search_on },
-	{ "SINCE", imap_search_since },
-	{ "SENTBEFORE", imap_search_sentbefore },
-	{ "SENTON", imap_search_senton },
-	{ "SENTSINCE", imap_search_sentsince },
-	{ "SAVEDBEFORE", imap_search_savedbefore },
-	{ "SAVEDON", imap_search_savedon },
-	{ "SAVEDSINCE", imap_search_savedsince },
-	{ "SAVEDATESUPPORTED", imap_search_savedatesupported },
+	{ "BEFORE", imap_search_before, 0 },
+	{ "ON", imap_search_on, 0 },
+	{ "SINCE", imap_search_since, 0 },
+	{ "SENTBEFORE", imap_search_sentbefore, 0 },
+	{ "SENTON", imap_search_senton, 0 },
+	{ "SENTSINCE", imap_search_sentsince, 0 },
+	{ "SAVEDBEFORE", imap_search_savedbefore, 0 },
+	{ "SAVEDON", imap_search_savedon, 0 },
+	{ "SAVEDSINCE", imap_search_savedsince, 0 },
+	{ "SAVEDATESUPPORTED", imap_search_savedatesupported, 0 },
 	/* FIXME: remove these in v2.4: */
-	{ "X-SAVEDBEFORE", imap_search_x_savedbefore },
-	{ "X-SAVEDON", imap_search_x_savedon },
-	{ "X-SAVEDSINCE", imap_search_x_savedsince },
+	{ "X-SAVEDBEFORE", imap_search_x_savedbefore, 0 },
+	{ "X-SAVEDON", imap_search_x_savedon, 0 },
+	{ "X-SAVEDSINCE", imap_search_x_savedsince, 0 },
 
 	/* sizes */
-	{ "LARGER", imap_search_larger },
-	{ "SMALLER", imap_search_smaller },
+	{ "LARGER", imap_search_larger, 0 },
+	{ "SMALLER", imap_search_smaller, 0 },
 
 	/* headers */
-	{ "BCC", imap_search_bcc },
-	{ "CC", imap_search_cc },
-	{ "FROM", imap_search_from },
-	{ "TO", imap_search_to },
-	{ "SUBJECT", imap_search_subject },
-	{ "HEADER", imap_search_header },
+	{ "BCC", imap_search_bcc, 0 },
+	{ "CC", imap_search_cc, 0 },
+	{ "FROM", imap_search_from, 0 },
+	{ "TO", imap_search_to, 0 },
+	{ "SUBJECT", imap_search_subject, 0 },
+	{ "HEADER", imap_search_header, 0 },
 
 	/* body */
-	{ "BODY", imap_search_body },
-	{ "TEXT", imap_search_text },
+	{ "BODY", imap_search_body, 0 },
+	{ "TEXT", imap_search_text, 0 },
 
 	/* WITHIN extension: */
-	{ "OLDER", imap_search_older },
-	{ "YOUNGER", imap_search_younger },
+	{ "OLDER", imap_search_older, 0 },
+	{ "YOUNGER", imap_search_younger, 0 },
 
 	/* CONDSTORE extension: */
-	{ "MODSEQ", imap_search_modseq },
+	{ "MODSEQ", imap_search_modseq, 0 },
 
 	/* SEARCHRES extension: */
-	{ "$", imap_search_last_result },
+	{ "$", imap_search_last_result, 0 },
 
 	/* FUZZY extension: */
-	{ "FUZZY", imap_search_fuzzy },
+	{ "FUZZY", imap_search_fuzzy, 0 },
 
 	/* SEARCH=MIMEPART extension: */
-	{ "MIMEPART", imap_search_mimepart },
+	{ "MIMEPART", imap_search_mimepart, 0 },
 
 	/* Other Dovecot extensions: */
-	{ "INTHREAD", imap_search_inthread },
-	{ "X-GUID", imap_search_x_guid },
-	{ "X-MAILBOX", imap_search_x_mailbox },
-	{ "X-REAL-UID", imap_search_x_real_uid }
+	{ "INTHREAD", imap_search_inthread, 0 },
+	{ "X-GUID", imap_search_x_guid, 0 },
+	{ "X-MAILBOX", imap_search_x_mailbox, 0 },
+	{ "X-REAL-UID", imap_search_x_real_uid, 0 }
 };
 
-static struct mail_search_register *mail_search_register_init_imap(void)
+static struct mail_search_register
+*mail_search_register_init_imap(enum mail_search_register_arg_flags flags)
 {
 	struct mail_search_register *reg;
 
 	reg = mail_search_register_init();
-	mail_search_register_add(reg, imap_register_args,
-				 N_ELEMENTS(imap_register_args));
+	for (unsigned int i = 0; i < N_ELEMENTS(imap_register_args); i++) {
+		if (HAS_ALL_BITS(flags, imap_register_args[i].flags))
+			mail_search_register_add(reg, &imap_register_args[i], 1);
+	}
 	mail_search_register_fallback(reg, imap_search_fallback);
 	return reg;
 }
 
-struct mail_search_register *
-mail_search_register_get_imap(void)
+static struct mail_search_register *mail_search_register_init_imap4rev2(void)
 {
-	if (mail_search_register_imap == NULL)
-		mail_search_register_imap = mail_search_register_init_imap();
-	return mail_search_register_imap;
+	return mail_search_register_init_imap(0);
+}
+
+static struct mail_search_register *mail_search_register_init_imap4rev1(void)
+{
+	return mail_search_register_init_imap(MAIL_SEARCH_REGISTER_IMAP4REV1);
+}
+
+struct mail_search_register *
+mail_search_register_get_imap4rev2(void)
+{
+	if (mail_search_register_imap4rev2 == NULL)
+		mail_search_register_imap4rev2 = mail_search_register_init_imap4rev2();
+	return mail_search_register_imap4rev2;
+}
+
+struct mail_search_register *
+mail_search_register_get_imap4rev1(void)
+{
+	if (mail_search_register_imap4rev1 == NULL)
+		mail_search_register_imap4rev1 = mail_search_register_init_imap4rev1();
+	return mail_search_register_imap4rev1;
 }

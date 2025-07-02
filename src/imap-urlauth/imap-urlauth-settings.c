@@ -3,6 +3,7 @@
 #include "lib.h"
 #include "buffer.h"
 #include "settings-parser.h"
+#include "master-service-settings.h"
 #include "service-settings.h"
 #include "imap-urlauth-settings.h"
 
@@ -13,20 +14,17 @@ struct service_settings imap_urlauth_service_settings = {
 	.protocol = "imap",
 	.type = "",
 	.executable = "imap-urlauth",
-	.user = "$default_internal_user",
+	.user = "$SET:default_internal_user",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "",
+	.extra_groups = ARRAY_INIT,
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
 	.process_limit = 1024,
 	.client_limit = 1,
-	.service_count = 1,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+	.restart_request_count = 1,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -53,7 +51,7 @@ static const struct setting_define imap_urlauth_setting_defines[] = {
 
 	DEF(BOOL, verbose_proctitle),
 
-	DEF(STR, imap_urlauth_logout_format),
+	DEF(STR_NOVARS, imap_urlauth_logout_format),
 	DEF(STR, imap_urlauth_submit_user),
 	DEF(STR, imap_urlauth_stream_user),
 
@@ -64,11 +62,11 @@ const struct imap_urlauth_settings imap_urlauth_default_settings = {
 	.base_dir = PKG_RUNDIR,
   .mail_debug = FALSE,
 
-	.verbose_proctitle = FALSE,
+	.verbose_proctitle = VERBOSE_PROCTITLE_DEFAULT,
 
-	.imap_urlauth_logout_format = "in=%i out=%o",
-	.imap_urlauth_submit_user = NULL,
-	.imap_urlauth_stream_user = NULL
+	.imap_urlauth_logout_format = "in=%{input} out=%{output}",
+	.imap_urlauth_submit_user = "",
+	.imap_urlauth_stream_user = "",
 };
 
 const struct setting_parser_info imap_urlauth_setting_parser_info = {

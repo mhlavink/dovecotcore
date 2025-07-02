@@ -34,7 +34,7 @@ static void test_auth_master(void)
 	pool_t pool = pool_alloconly_create("test pool", 128);
 	struct auth_user_info info = {
 		.session_id = "1",
-		.service = "default",
+		.protocol = "default",
 	};
 	const char *const *fields;
 	const char *username;
@@ -63,7 +63,7 @@ int main(int argc, char *argv[])
 		NULL
 	};
 	const enum master_service_flags service_flags =
-		MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+		MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 		MASTER_SERVICE_FLAG_STANDALONE |
 		MASTER_SERVICE_FLAG_STD_CLIENT |
 		MASTER_SERVICE_FLAG_DONT_SEND_STATS;

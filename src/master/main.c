@@ -522,7 +522,7 @@ static const struct master_settings *master_settings_read(void)
 				     &master_setting_parser_info);
 }
 
-static void main_log_startup(char **protocols)
+static void main_log_startup(const char *const *protocols)
 {
 #define STARTUP_STRING PACKAGE_NAME" v"DOVECOT_VERSION_FULL" starting up"
 	string_t *str = t_str_new(128);
@@ -534,7 +534,7 @@ static void main_log_startup(char **protocols)
 		str_append(str, " without any protocols");
 	else {
 		str_printfa(str, " for %s",
-			    t_strarray_join((const char **)protocols, ", "));
+			    t_strarray_join(protocols, ", "));
 	}
 
 	core_dumps_disabled = restrict_get_core_limit(&core_limit) == 0 &&
@@ -577,7 +577,7 @@ static void main_init(const struct master_settings *set)
 	/* deny file access from everyone else except owner */
         (void)umask(0077);
 
-	main_log_startup(set->protocols_split);
+	main_log_startup(settings_boollist_get(&set->protocols));
 
 	lib_signals_init();
         lib_signals_ignore(SIGPIPE, TRUE);
@@ -724,6 +724,9 @@ static void print_build_options(void)
 #ifdef DOVECOT_PRO_EDITION
 	        " pro"
 #endif
+#ifdef EXPERIMENTAL_IMAP4REV2
+		" experimental-imap4rev2"
+#endif
 		" openssl"
 	        " io_block_size=%u"
 #ifdef SQL_DRIVER_PLUGINS
@@ -747,7 +750,7 @@ static void print_build_options(void)
 #ifdef PASSDB_BSDAUTH
 		" bsdauth"
 #endif
-#ifdef PASSDB_LDAP
+#ifdef HAVE_LDAP
 		" ldap"
 #endif
 #ifdef PASSDB_PAM
@@ -763,14 +766,11 @@ static void print_build_options(void)
 		" sql"
 #endif
 	"\nUserdb:"
-#ifdef USERDB_LDAP
+#ifdef HAVE_LDAP
 		" ldap"
 #ifndef BUILTIN_LDAP
 		"(plugin)"
 #endif
-#endif
-#ifdef USERDB_NSS
-		" nss"
 #endif
 #ifdef USERDB_PASSWD
 		" passwd"
@@ -933,9 +933,9 @@ int main(int argc, char *argv[])
 	master_settings_do_fixes(set);
 	fatal_log_check(set);
 
-	const struct master_service_settings *service_set =
-		master_service_get_service_settings(master_service);
-	master_service_import_environment(service_set->import_environment);
+	const char *import_environment =
+		master_service_get_import_environment_keyvals(master_service);
+	master_service_import_environment(import_environment);
 	master_service_env_clean();
 
 	/* create service structures from settings. if there are any errors in

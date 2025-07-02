@@ -16,12 +16,19 @@ struct message_size;
 /* If some operation is taking long, call notify_ok every n seconds. */
 #define MAIL_STORAGE_NOTIFY_INTERVAL_SECS 10
 
-/* Expunge transactions are to be commited after
+/* Expunge transactions are to be committed after
    every MAIL_EXPUNGE_BATCH_SIZE mails */
 #define MAIL_EXPUNGE_BATCH_SIZE 1000
 
 #define MAIL_KEYWORD_HAS_ATTACHMENT "$HasAttachment"
 #define MAIL_KEYWORD_HAS_NO_ATTACHMENT "$HasNoAttachment"
+
+/* <settings checks> */
+/* The "namespace" event field contains the namespace containing mailbox.
+   For dynamic namespaces, the name is the one specified in configuration
+   for the template namespace. */
+#define SETTINGS_EVENT_NAMESPACE_NAME "namespace"
+/* </settings checks> */
 
 enum mail_storage_flags {
 	/* Remember message headers' MD5 sum */
@@ -34,7 +41,10 @@ enum mail_storage_flags {
 	MAIL_STORAGE_FLAG_NO_AUTOCREATE		= 0x04,
 	/* Don't verify existence or accessibility of any directories.
 	   Create the storage in any case. */
-	MAIL_STORAGE_FLAG_NO_AUTOVERIFY		= 0x08
+	MAIL_STORAGE_FLAG_NO_AUTOVERIFY		= 0x08,
+	/* Shared namespace root, under which new user-specific namespaces are
+	   created. */
+	MAIL_STORAGE_FLAG_SHARED_DYNAMIC	= 0x10,
 };
 
 enum mailbox_flags {
@@ -85,6 +95,7 @@ enum mailbox_feature {
 	/* Enable tracking modsequences */
 	MAILBOX_FEATURE_CONDSTORE	= 0x01,
 	MAILBOX_FEATURE_UTF8ACCEPT	= 0x02,
+	MAILBOX_FEATURE_IMAP4REV2	= 0x04,
 };
 
 enum mailbox_existence {
@@ -455,6 +466,9 @@ struct mail_storage_callbacks {
 	/* "* NO <text>" */
 	void (*notify_no)(struct mailbox *mailbox, const char *text,
 			  void *context);
+	/* "* BAD <text>" */
+	void (*notify_bad)(struct mailbox *mailbox, const char *text,
+			   void *context);
 	/* "* OK [INPROGRESS (...)] <text>" */
 	void (*notify_progress)(struct mailbox *mailbox,
 				const struct mail_storage_progress_details *dtl,
@@ -486,17 +500,10 @@ void mail_storage_class_unregister(struct mail_storage *storage_class);
 /* Find mail storage class by name */
 struct mail_storage *mail_storage_find_class(const char *name);
 
-/* Create a new instance of registered mail storage class with given
-   storage-specific data. If driver is NULL, it's tried to be autodetected
-   from ns location. If ns location is NULL, it uses the first storage that
-   exists. The storage is put into ns->storage. */
-int mail_storage_create(struct mail_namespace *ns, const char *driver,
-			enum mail_storage_flags flags, const char **error_r)
-	ATTR_NULL(2);
-int mail_storage_create_full(struct mail_namespace *ns, const char *driver,
-			     const char *data, enum mail_storage_flags flags,
-			     struct mail_storage **storage_r,
-			     const char **error_r) ATTR_NULL(2);
+/* Create a storage for the namespace. */
+int mail_storage_create(struct mail_namespace *ns, struct event *event,
+			enum mail_storage_flags flags,
+			struct mail_storage **storage_r, const char **error_r);
 void mail_storage_unref(struct mail_storage **storage);
 
 /* Returns the mail storage settings. */
@@ -872,6 +879,13 @@ struct mail *mailbox_save_get_dest_mail(struct mail_save_context *ctx);
    i_stream_read() and calling mailbox_save_continue() as long as there's
    more input. */
 int mailbox_save_begin(struct mail_save_context **ctx, struct istream *input);
+/* Begin saving the message that replaces the provided mail (which may reside
+   in another mailbox altogether). The replaced mail is expunged implicitly
+   when saving the message succeeds at mailbox_save_finish(). In all other
+   respects this function behaves the same as mailbox_save_begin(). */
+int mailbox_save_begin_replace(struct mail_save_context **ctx,
+			       struct istream *input,
+			       struct mail *replaced);
 int mailbox_save_continue(struct mail_save_context *ctx);
 int mailbox_save_finish(struct mail_save_context **ctx);
 void mailbox_save_cancel(struct mail_save_context **ctx);

@@ -159,15 +159,15 @@ dir_entry_get(struct fs_list_iterate_context *ctx, const char *dir_path,
 	     (d->d_name[1] == '.' && d->d_name[2] == '\0')))
 		return 0;
 
-	if (strcmp(d->d_name, ctx->ctx.list->set.maildir_name) == 0) {
+	if (strcmp(d->d_name, ctx->ctx.list->mail_set->mailbox_directory_name) == 0) {
 		/* mail storage's internal directory (e.g. dbox-Mails).
 		   this also means that the parent is selectable */
 		dir->info_flags &= ENUM_NEGATE(MAILBOX_NOSELECT);
 		dir->info_flags |= MAILBOX_SELECT;
 		return 0;
 	}
-	if (ctx->ctx.list->set.subscription_fname != NULL &&
-	    strcmp(d->d_name, ctx->ctx.list->set.subscription_fname) == 0) {
+	if (ctx->ctx.list->mail_set->mailbox_subscriptions_filename[0] != '\0' &&
+	    strcmp(d->d_name, ctx->ctx.list->mail_set->mailbox_subscriptions_filename) == 0) {
 		/* if this is the subscriptions file, skip it */
 		root_dir = mailbox_list_get_root_forced(ctx->ctx.list,
 							MAILBOX_LIST_PATH_TYPE_DIR);
@@ -244,7 +244,8 @@ dir_entry_get(struct fs_list_iterate_context *ctx, const char *dir_path,
 
 static bool
 fs_list_get_storage_path(struct fs_list_iterate_context *ctx,
-			 const char *storage_name, const char **path_r)
+			 const char *storage_name, bool iter_from_index_dir,
+			 const char **path_r)
 {
 	const char *root, *path = storage_name;
 
@@ -259,17 +260,19 @@ fs_list_get_storage_path(struct fs_list_iterate_context *ctx,
 	}
 	if (*path != '/') {
 		/* non-absolute path. add the mailbox root dir as prefix. */
+		const struct mail_storage_settings *set =
+			ctx->ctx.list->mail_set;
 		enum mailbox_list_path_type type =
-			ctx->ctx.iter_from_index_dir ?
+			iter_from_index_dir ?
 			MAILBOX_LIST_PATH_TYPE_INDEX :
 			MAILBOX_LIST_PATH_TYPE_MAILBOX;
 		if (!mailbox_list_get_root_path(ctx->ctx.list, type, &root))
 			return FALSE;
-		if (ctx->ctx.iter_from_index_dir &&
-		    ctx->ctx.list->set.mailbox_dir_name[0] != '\0') {
+		if (iter_from_index_dir &&
+		    set->parsed_mailbox_root_directory_prefix[0] != '\0') {
 			/* append "mailboxes/" to the index root */
 			root = t_strconcat(root, "/",
-				ctx->ctx.list->set.mailbox_dir_name, NULL);
+				set->parsed_mailbox_root_directory_prefix, NULL);
 		}
 		path = *path == '\0' ? root :
 			t_strconcat(root, "/", path, NULL);
@@ -287,7 +290,8 @@ fs_list_dir_read(struct fs_list_iterate_context *ctx,
 	const char *path;
 	int ret = 0;
 
-	if (!fs_list_get_storage_path(ctx, dir->storage_name, &path))
+	if (!fs_list_get_storage_path(ctx, dir->storage_name,
+				      ctx->ctx.iter_from_index_dir, &path))
 		return 0;
 	if (path == NULL) {
 		/* no mailbox root dir */
@@ -532,7 +536,8 @@ fs_list_iter_init(struct mailbox_list *_list, const char *const *patterns,
 	ctx->info_pool = pool_alloconly_create("fs list", 1024);
 	ctx->sep = mail_namespace_get_sep(_list->ns);
 	ctx->info.ns = _list->ns;
-	ctx->ctx.iter_from_index_dir = ctx->ctx.list->set.iter_from_index_dir;
+	ctx->ctx.iter_from_index_dir =
+		ctx->ctx.list->mail_set->mailbox_list_iter_from_index_dir;
 
 	if ((flags & MAILBOX_LIST_ITER_FORCE_RESYNC) != 0) {
 		i_assert(!hash_table_is_created(ctx->ctx.found_mailboxes));
@@ -627,7 +632,7 @@ list_file_is_any_inbox(struct fs_list_iterate_context *ctx,
 {
 	const char *path, *inbox_path;
 
-	if (!fs_list_get_storage_path(ctx, storage_name, &path))
+	if (!fs_list_get_storage_path(ctx, storage_name, FALSE, &path))
 		return FALSE;
 
 	if (mailbox_list_get_path(ctx->ctx.list, "INBOX",

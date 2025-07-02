@@ -5,10 +5,11 @@ noinst_LTLIBRARIES = libmaster.la
 AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib \
 	-I$(top_srcdir)/src/lib-auth \
-	-I$(top_srcdir)/src/lib-dns \
+	-I$(top_srcdir)/src/lib-dns-client \
 	-I$(top_srcdir)/src/lib-test \
 	-I$(top_srcdir)/src/lib-settings \
 	-I$(top_srcdir)/src/lib-ssl-iostream \
+	-I$(top_srcdir)/src/lib-var-expand \
 	-DPKG_RUNDIR=\""$(rundir)"\" \
 	-DPKG_STATEDIR=\""$(statedir)"\" \
 	-DSYSCONFDIR=\""$(pkgsysconfdir)"\" \
@@ -23,7 +24,6 @@ libmaster_la_SOURCES = \
 	master-service-haproxy.c \
 	master-service-settings.c \
 	master-service-ssl.c \
-	master-service-ssl-settings.c \
 	stats-client.c \
 	syslog-util.c
 
@@ -37,7 +37,6 @@ headers = \
 	master-service-private.h \
 	master-service-settings.h \
 	master-service-ssl.h \
-	master-service-ssl-settings.h \
 	service-settings.h \
 	stats-client.h \
 	syslog-util.h
@@ -56,7 +55,10 @@ test_deps = \
 	libmaster.la \
 	../lib-ssl-iostream/libssl_iostream.la \
 	../lib-settings/libsettings.la \
+	../lib-dns/libdns.la \
+	../lib-var-expand/libvar_expand.la \
 	../lib-test/libtest.la \
+	../lib-dns-client/libdns-client.la  \
 	../lib-dns/libdns.la \
 	../lib/liblib.la
 

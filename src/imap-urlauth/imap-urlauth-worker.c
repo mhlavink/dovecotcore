@@ -13,12 +13,10 @@
 #include "strescape.h"
 #include "llist.h"
 #include "hostpid.h"
-#include "var-expand.h"
 #include "process-title.h"
 #include "randgen.h"
 #include "restrict-access.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "connection.h"
 #include "master-service.h"
 #include "master-service-settings.h"
@@ -542,6 +540,7 @@ client_handle_user_command(struct client *client, const char *cmd,
 	/* lookup user */
 	i_zero(&input);
 	input.service = "imap-urlauth-worker";
+	input.protocol = "imap";
 	input.username = args[0];
 	input.event_parent = client->event;
 

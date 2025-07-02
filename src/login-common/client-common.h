@@ -123,6 +123,7 @@ struct client_vfuncs {
 	struct client *(*alloc)(pool_t pool);
 	int (*create)(struct client *client);
 	void (*destroy)(struct client *client);
+	int (*reload_config)(struct client *client, const char **error_r);
 	void (*notify_auth_ready)(struct client *client);
 	void (*notify_disconnect)(struct client *client,
 				  enum client_disconnect_reason reason,
@@ -188,8 +189,8 @@ struct client {
 	in_port_t real_local_port, real_remote_port;
 	struct ssl_iostream *ssl_iostream;
 	const struct login_settings *set;
-	const struct master_service_ssl_settings *ssl_set;
-	const struct master_service_ssl_server_settings *ssl_server_set;
+	const struct ssl_settings *ssl_set;
+	const struct ssl_server_settings *ssl_server_set;
 	const char *session_id, *listener_name, *postlogin_socket_path;
 	const char *local_name;
 	const char *client_cert_common_name;
@@ -208,6 +209,7 @@ struct client {
 	struct io *io;
 	struct iostream_proxy *iostream_fd_proxy;
 	struct timeout *to_auth_waiting;
+	struct timeout *to_notify_auth_ready;
 	struct timeout *to_disconnect;
 
 	unsigned char *master_data_prefix;
@@ -316,6 +318,9 @@ struct client {
 	bool fd_proxying:1;
 	bool shutting_down:1;
 	bool resource_constraint:1;
+	/* Defer calling auth ready callback until TLS handshake has been
+	   finished. */
+	bool defer_auth_ready:1;
 	/* ... */
 };
 
@@ -413,6 +418,8 @@ int client_auth_begin_implicit(struct client *client, const char *mech_name,
 			       const char *init_resp);
 bool client_check_plaintext_auth(struct client *client, bool pass_sent);
 int client_auth_read_line(struct client *client);
+int client_sni_callback(const char *name, const char **error_r,
+			void *context);
 
 void client_proxy_finish_destroy_client(struct client *client);
 void client_proxy_log_failure(struct client *client, const char *line);

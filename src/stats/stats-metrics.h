@@ -9,7 +9,7 @@
 struct metric;
 struct stats_metrics;
 
-struct exporter {
+struct event_exporter {
 	const char *name;
 
 	/*
@@ -28,21 +28,11 @@ struct exporter {
 	/* mime type for the format */
 	const char *format_mime_type;
 
-	/*
-	 * transport options
-	 *
-	 * the "how do we get the event to the external location" knobs
-	 */
-	const char *transport_args;
-	unsigned int transport_timeout;
-	void *transport_context;
-
-	/* function to send the event */
-	void (*transport)(const struct exporter *, const buffer_t *);
+	const struct event_exporter_transport *transport;
 };
 
 struct metric_export_info {
-	const struct exporter *exporter;
+	struct event_exporter *exporter;
 
 	enum event_exporter_includes {
 		EVENT_EXPORTER_INCL_NONE       = 0,
@@ -109,7 +99,8 @@ struct metric {
 };
 
 bool stats_metrics_add_dynamic(struct stats_metrics *metrics,
-			       struct stats_metric_settings *set,
+			       const struct stats_metric_settings *set,
+			       ARRAY_TYPE(stats_metric_settings_group_by) *group_by,
 			       const char **error_r);
 
 bool stats_metrics_remove_dynamic(struct stats_metrics *metrics,

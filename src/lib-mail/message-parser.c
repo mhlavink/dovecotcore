@@ -37,7 +37,7 @@ boundary_find(struct message_boundary *boundaries,
 			   is a boundary named "foo" that ends now or there's
 			   a boundary "foo--" which continues. */
 			if (best->len == len ||
-			    (best->len == len-2 && trailing_dashes)) {
+			    (trailing_dashes && best->len + 2 == len)) {
 				/* This is exactly the wanted boundary. There
 				   can't be a better one. */
 				break;
@@ -811,7 +811,7 @@ int message_parser_deinit_from_parts(struct message_parser_ctx **_ctx,
 				     struct message_part **parts_r,
 				     const char **error_r)
 {
-        struct message_parser_ctx *ctx = *_ctx;
+	struct message_parser_ctx *ctx = *_ctx;
 	int ret = ctx->broken_reason != NULL ? -1 : 0;
 
 	*_ctx = NULL;
@@ -904,7 +904,7 @@ void message_parser_parse_header(struct message_parser_ctx *ctx,
 		callback(ctx->part, NULL, context);
 	} T_END;
 
-        *hdr_size = ctx->part->header_size;
+	*hdr_size = ctx->part->header_size;
 }
 
 #undef message_parser_parse_body

@@ -4,7 +4,6 @@
 #include "ioloop.h"
 #include "str.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "mail-copy.h"
 #include "mail-user.h"
 #include "mailbox-list-private.h"
@@ -94,10 +93,8 @@ pop3c_client_create_from_set(struct mail_storage *storage,
 	client_set.rawlog_dir =
 		mail_user_home_expand(storage->user, set->pop3c_rawlog_dir);
 
-	client_set.ssl_set = *storage->user->ssl_set;
-
 	if (!set->pop3c_ssl_verify)
-		client_set.ssl_set.allow_invalid_cert = TRUE;
+		client_set.ssl_allow_invalid_cert = TRUE;
 
 	if (strcmp(set->pop3c_ssl, "pop3s") == 0)
 		client_set.ssl_mode = POP3C_CLIENT_SSL_MODE_IMMEDIATE;
@@ -106,19 +103,6 @@ pop3c_client_create_from_set(struct mail_storage *storage,
 	else
 		client_set.ssl_mode = POP3C_CLIENT_SSL_MODE_NONE;
 	return pop3c_client_init(&client_set, storage->event);
-}
-
-static void
-pop3c_storage_get_list_settings(const struct mail_namespace *ns ATTR_UNUSED,
-				struct mailbox_list_settings *set)
-{
-	set->layout = MAILBOX_LIST_NAME_FS;
-	if (set->root_dir != NULL && *set->root_dir != '\0' &&
-	    set->index_dir == NULL) {
-	       /* we don't really care about root_dir, but we
-		  just need to get index_dir autocreated. */
-		set->index_dir = set->root_dir;
-	}
 }
 
 static struct mailbox *
@@ -319,13 +303,13 @@ struct mail_storage pop3c_storage = {
 	.class_flags = MAIL_STORAGE_CLASS_FLAG_NO_ROOT |
 		MAIL_STORAGE_CLASS_FLAG_HAVE_MAIL_GUIDS,
 	.event_category = &event_category_pop3c,
+	.set_info = &pop3c_setting_parser_info,
 
 	.v = {
 		pop3c_storage_alloc,
 		pop3c_storage_create,
 		pop3c_storage_destroy,
 		NULL,
-		pop3c_storage_get_list_settings,
 		NULL,
 		pop3c_mailbox_alloc,
 		NULL,

@@ -12,18 +12,16 @@
 #include "settings.h"
 #include "stats-settings.h"
 #include "stats-metrics.h"
-#include "settings-parser.h"
 
 #include <ctype.h>
 
-#define LOG_EXPORTER_LONG_FIELD_TRUNCATE_LEN 1000
 #define STATS_SUB_METRIC_MAX_LENGTH 256
 
 struct stats_metrics {
 	pool_t pool;
 	struct event *event;
 	struct event_filter *filter; /* stats & export */
-	ARRAY(struct exporter *) exporters;
+	ARRAY(struct event_exporter *) exporters;
 	ARRAY(struct metric *) metrics;
 };
 
@@ -33,15 +31,20 @@ static struct metric *
 stats_metric_sub_metric_alloc(struct metric *metric, const char *name, pool_t pool);
 static void stats_metric_free(struct metric *metric);
 
-static void stats_exporters_add_set(struct stats_metrics *metrics,
-				    const struct stats_exporter_settings *set)
+static int stats_exporters_add_set(struct stats_metrics *metrics,
+				   struct event *event,
+				   const struct stats_exporter_settings *set,
+				   const char **error_r)
 {
-	struct exporter *exporter;
+	struct event_exporter *exporter;
+	const struct event_exporter_transport *transport =
+		event_exporter_transport_find(set->driver);
+	i_assert(transport != NULL);
 
-	exporter = p_new(metrics->pool, struct exporter, 1);
+	if (event_exporter_init(transport, metrics->pool, event,
+				&exporter, error_r) < 0)
+		return -1;
 	exporter->name = p_strdup(metrics->pool, set->name);
-	exporter->transport_args = p_strdup(metrics->pool, set->transport_args);
-	exporter->transport_timeout = set->transport_timeout;
 	exporter->time_format = set->parsed_time_format;
 
 	/* TODO: The following should be plugable.
@@ -62,37 +65,10 @@ static void stats_exporters_add_set(struct stats_metrics *metrics,
 		i_unreached();
 	}
 
-	/* TODO: The following should be plugable.
-	 *
-	 * Note: Make sure to mirror any changes to the below code in
-	 * stats_exporter_settings_check().
-	 */
-	if (strcmp(set->transport, "drop") == 0) {
-		exporter->transport = event_export_transport_drop;
-	} else if (strcmp(set->transport, "http-post") == 0) {
-		exporter->transport = event_export_transport_http_post;
-	} else if (strcmp(set->transport, "log") == 0) {
-		exporter->transport = event_export_transport_log;
-		exporter->format_max_field_len =
-			LOG_EXPORTER_LONG_FIELD_TRUNCATE_LEN;
-	} else if (strcmp(set->transport, "file") == 0) {
-		exporter->transport = event_export_transport_file;
-	} else if (strcmp(set->transport, "unix") == 0) {
-		exporter->transport = event_export_transport_unix;
-	} else {
-		i_unreached();
-	}
-
-	exporter->transport_args = set->transport_args;
+	exporter->transport = transport;
 
 	array_push_back(&metrics->exporters, &exporter);
-}
-
-void event_export_transport_assign_context(const struct exporter *exporter,
-					   void *context)
-{
-	struct exporter *ptr = (struct exporter *)exporter;
-	ptr->transport_context = context;
+	return 0;
 }
 
 static int stats_exporters_add_filter(struct stats_metrics *metrics,
@@ -111,7 +87,11 @@ static int stats_exporters_add_filter(struct stats_metrics *metrics,
 		*error_r = "Exporter name can't be empty";
 		ret = -1;
 	} else {
-		stats_exporters_add_set(metrics, set);
+		struct event *event = event_create(metrics->event);
+		settings_event_add_list_filter_name(event, "event_exporter",
+						    filter_name);
+		ret = stats_exporters_add_set(metrics, event, set, error_r);
+		event_unref(&event);
 	}
 	settings_free(set);
 	return ret;
@@ -125,6 +105,7 @@ stats_metric_alloc(pool_t pool, const char *name,
 	struct metric *metric = p_new(pool, struct metric, 1);
 	metric->name = p_strdup(pool, name);
 	metric->set = set;
+	pool_ref(set->pool);
 	metric->duration_stats = stats_dist_init();
 	metric->fields_count = str_array_length(fields);
 	if (metric->fields_count > 0) {
@@ -138,11 +119,11 @@ stats_metric_alloc(pool_t pool, const char *name,
 	return metric;
 }
 
-static struct exporter *
+static struct event_exporter *
 stats_metrics_exporter_find(struct stats_metrics *metrics,
 			    const char *name)
 {
-	struct exporter *exporter;
+	struct event_exporter *exporter;
 
 	array_foreach_elem(&metrics->exporters, exporter) {
 		if (strcmp(name, exporter->name) == 0)
@@ -153,9 +134,10 @@ stats_metrics_exporter_find(struct stats_metrics *metrics,
 
 static int stats_metrics_add_set(struct stats_metrics *metrics,
 				 const struct stats_metric_settings *set,
+				 ARRAY_TYPE(stats_metric_settings_group_by) *group_by,
 				 const char **error_r)
 {
-	struct exporter *exporter = NULL;
+	struct event_exporter *exporter = NULL;
 	struct metric *metric;
 	const char *const *fields;
 	const char *const *tmp;
@@ -171,16 +153,16 @@ static int stats_metrics_add_set(struct stats_metrics *metrics,
 		}
 	}
 
-	fields = t_strsplit_spaces(set->fields, " ");
+	fields = settings_boollist_get(&set->fields);
 	metric = stats_metric_alloc(metrics->pool, set->name, set, fields);
 
-	if (array_is_created(&set->parsed_group_by))
-		metric->group_by = array_get(&set->parsed_group_by,
-					     &metric->group_by_count);
+	if (array_is_created(group_by))
+		metric->group_by = array_get(group_by, &metric->group_by_count);
 
 	array_push_back(&metrics->metrics, &metric);
 
-	event_filter_merge_with_context(metrics->filter, set->parsed_filter, metric);
+	event_filter_merge_with_context(metrics->filter, set->parsed_filter,
+					EVENT_FILTER_MERGE_OP_OR, metric);
 
 	/*
 	 * Metrics may also be exported - make sure exporter info is set
@@ -194,7 +176,7 @@ static int stats_metrics_add_set(struct stats_metrics *metrics,
 	/* Defaults */
 	metric->export_info.include = EVENT_EXPORTER_INCL_NONE;
 
-	tmp = t_strsplit_spaces(set->exporter_include, " ");
+	tmp = settings_boollist_get(&set->exporter_include);
 	for (; *tmp != NULL; tmp++) {
 		if (strcmp(*tmp, "name") == 0)
 			metric->export_info.include |= EVENT_EXPORTER_INCL_NAME;
@@ -212,11 +194,138 @@ static int stats_metrics_add_set(struct stats_metrics *metrics,
 	return 0;
 }
 
+static bool
+stats_metrics_group_by_exponential_check(const struct stats_metric_group_by_method_settings *set,
+					 const char **error_r)
+{
+	if (set->exponential_base != 2 && set->exponential_base != 10) {
+		*error_r = "metric_group_by_method_exponential_base must be 2 or 10";
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static bool
+stats_metrics_group_by_linear_check(const struct stats_metric_group_by_method_settings *set,
+				    const char **error_r)
+{
+	if (set->linear_step == 0) {
+		*error_r = "metric_group_by_method_linear_step must not be 0";
+		return FALSE;
+	}
+	if (set->linear_min >= set->linear_max) {
+		*error_r = t_strdup_printf(
+			"metric_group_by_method_linear_min (%ju) must be smaller than "
+			"metric_group_by_method_linear_max (%ju)",
+			set->linear_min, set->linear_max);
+		return FALSE;
+	}
+	if ((set->linear_min + set->linear_step) > set->linear_max) {
+		*error_r = t_strdup_printf(
+			"metric_group_by_method_linear_min (%ju) + "
+			"metric_group_by_method_linear_step (%ju) must be <= "
+			"metric_group_by_method_linear_max (%ju)",
+			set->linear_min, set->linear_step, set->linear_max);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static int
+stats_metrics_get_group_by_method(struct event *event, pool_t pool,
+				  struct stats_metric_settings_group_by *group_by,
+				  const char **error_r)
+{
+	const struct stats_metric_group_by_method_settings *set;
+
+	if (settings_get(event, &stats_metric_group_by_method_setting_parser_info,
+			 0, &set, error_r) < 0)
+		return -1;
+
+	if (strcmp(set->method, "discrete") == 0) {
+		group_by->func = STATS_METRIC_GROUPBY_DISCRETE;
+		group_by->discrete_modifier =
+			p_strdup_empty(pool, set->discrete_modifier);
+	} else if (strcmp(set->method, "exponential") == 0) {
+		if (!stats_metrics_group_by_exponential_check(set, error_r))
+			return -1;
+		metrics_group_by_exponential_init(group_by, pool,
+			set->exponential_base,
+			set->exponential_min_magnitude,
+			set->exponential_max_magnitude);
+	} else if (strcmp(set->method, "linear") == 0) {
+		if (!stats_metrics_group_by_linear_check(set, error_r))
+			return -1;
+		metrics_group_by_linear_init(group_by, pool,
+			set->linear_min, set->linear_max, set->linear_step);
+	} else {
+		i_unreached();
+	}
+
+	settings_free(set);
+	return 0;
+}
+
+static int
+stats_metrics_get_group_by(struct event *event,
+			   const struct stats_metric_settings *set,
+			   ARRAY_TYPE(stats_metric_settings_group_by) *group_by_r,
+			   const char **error_r)
+{
+	const struct stats_metric_group_by_settings *group_by_set;
+	const char *group_by_name;
+
+	if (array_is_empty(&set->group_by)) {
+		i_zero(group_by_r);
+		return 0;
+	}
+	p_array_init(group_by_r, set->pool, array_count(&set->group_by));
+	array_foreach_elem(&set->group_by, group_by_name) {
+		if (settings_get_filter(event,
+				"metric_group_by", group_by_name,
+				&stats_metric_group_by_setting_parser_info,
+				0, &group_by_set, error_r) < 0)
+			return -1;
+
+		struct stats_metric_settings_group_by *group_by =
+			array_append_space(group_by_r);
+		group_by->field = p_strdup(set->pool, group_by_set->field);
+
+		int ret = 0;
+		if (array_is_empty(&group_by_set->method)) {
+			/* default to discrete */
+			group_by->func = STATS_METRIC_GROUPBY_DISCRETE;
+		} else if (array_count(&group_by_set->method) > 1) {
+			*error_r = "Only one metric_group_by_method named filter is allowed";
+			ret = -1;
+		} else {
+			struct event *group_event = event_create(event);
+			settings_event_add_list_filter_name(group_event,
+				"metric_group_by", group_by_name);
+			struct event *method_event = event_create(group_event);
+			settings_event_add_list_filter_name(method_event,
+				"metric_group_by_method",
+				array_idx_elem(&group_by_set->method, 0));
+			ret = stats_metrics_get_group_by_method(method_event, set->pool,
+								group_by, error_r);
+			event_unref(&method_event);
+			event_unref(&group_event);
+		}
+		settings_free(group_by_set);
+		if (ret < 0) {
+			*error_r = t_strdup_printf("metric_group_by %s: %s",
+						   group_by_name, *error_r);
+			return -1;
+		}
+	}
+	return 0;
+}
+
 static int stats_metrics_add_filter(struct stats_metrics *metrics,
 				    const char *filter_name,
 				    const char **error_r)
 {
-	struct stats_metric_settings *set;
+	const struct stats_metric_settings *set;
 	int ret = 0;
 
 	if (settings_get_filter(metrics->event, "metric", filter_name,
@@ -228,27 +337,17 @@ static int stats_metrics_add_filter(struct stats_metrics *metrics,
 		*error_r = "Metric name can't be empty";
 		ret = -1;
 	} else {
-		ret = stats_metrics_add_set(metrics, set, error_r);
+		ARRAY_TYPE(stats_metric_settings_group_by) group_by;
+		struct event *event = event_create(metrics->event);
+		settings_event_add_list_filter_name(event, "metric",
+						    filter_name);
+		ret = stats_metrics_get_group_by(event, set, &group_by, error_r);
+		if (ret == 0)
+			ret = stats_metrics_add_set(metrics, set, &group_by, error_r);
+		event_unref(&event);
 	}
+	settings_free(set);
 	return ret;
-}
-
-static struct stats_metric_settings *
-stats_metric_settings_dup(pool_t pool, const struct stats_metric_settings *src)
-{
-	struct stats_metric_settings *set = p_new(pool, struct stats_metric_settings, 1);
-
-	set->pool = pool;
-	pool_ref(pool);
-	set->name = p_strdup(pool, src->name);
-	set->description = p_strdup(pool, src->description);
-	set->fields = p_strdup(pool, src->fields);
-	set->group_by = p_strdup(pool, src->group_by);
-	set->filter = p_strdup(pool, src->filter);
-	set->exporter = p_strdup(pool, src->exporter);
-	set->exporter_include = p_strdup(pool, src->exporter_include);
-
-	return set;
 }
 
 static struct metric *
@@ -268,7 +367,7 @@ stats_metrics_find(struct stats_metrics *metrics,
 static bool
 stats_metrics_check_for_exporter(struct stats_metrics *metrics, const char *name)
 {
-	struct exporter *exporter;
+	struct event_exporter *exporter;
 
 	/* Allow registering metrics with empty/missing exporters. */
 	if (name[0] == '\0')
@@ -289,7 +388,8 @@ stats_metrics_check_for_exporter(struct stats_metrics *metrics, const char *name
 }
 
 bool stats_metrics_add_dynamic(struct stats_metrics *metrics,
-			       struct stats_metric_settings *set,
+			       const struct stats_metric_settings *set,
+			       ARRAY_TYPE(stats_metric_settings_group_by) *group_by,
 			       const char **error_r)
 {
 	unsigned int existing_idx ATTR_UNUSED;
@@ -298,18 +398,13 @@ bool stats_metrics_add_dynamic(struct stats_metrics *metrics,
 		return FALSE;
 	}
 
-	struct stats_metric_settings *_set =
-		stats_metric_settings_dup(metrics->pool, set);
-	if (!stats_metric_setting_parser_info.check_func(_set, metrics->pool, error_r))
-		return FALSE;
-
 	if (!stats_metrics_check_for_exporter(metrics, set->exporter)) {
 		*error_r = t_strdup_printf("Exporter '%s' does not exist.",
 					   set->exporter);
 		return FALSE;
 	}
 
-	if (stats_metrics_add_set(metrics, _set, error_r) < 0)
+	if (stats_metrics_add_set(metrics, set, group_by, error_r) < 0)
 		return FALSE;
 	return TRUE;
 }
@@ -401,14 +496,6 @@ static void stats_metric_free(struct metric *metric)
 		stats_metric_free(sub_metric);
 }
 
-static void stats_export_deinit(void)
-{
-	/* no need for event_export_transport_drop_deinit() - no-op */
-	event_export_transport_http_post_deinit();
-	/* no need for event_export_transport_log_deinit() - no-op */
-	event_export_transport_file_deinit();
-}
-
 void stats_metrics_deinit(struct stats_metrics **_metrics)
 {
 	struct stats_metrics *metrics = *_metrics;
@@ -416,7 +503,7 @@ void stats_metrics_deinit(struct stats_metrics **_metrics)
 
 	*_metrics = NULL;
 
-	stats_export_deinit();
+	event_exporters_deinit();
 
 	array_foreach_elem(&metrics->metrics, metric)
 		stats_metric_free(metric);
@@ -494,7 +581,6 @@ stats_metric_sub_metric_alloc(struct metric *metric, const char *name, pool_t po
 	array_append_zero(&fields);
 	sub_metric = stats_metric_alloc(pool, metric->name, metric->set,
 					array_idx(&fields, 0));
-	pool_ref(sub_metric->set->pool);
 	size_t max_len = STATS_SUB_METRIC_MAX_LENGTH - metric->sub_name_used_size;
 	sub_metric->sub_name = p_strdup(pool, str_sanitize_utf8(name, max_len));
 	sub_metric->sub_name_used_size =
@@ -513,13 +599,15 @@ label_by_mod_str(const struct stats_metric_settings_group_by *group_by,
 	if (group_by->discrete_modifier == NULL)
 		return value;
 
-	const struct var_expand_table table[] = {
-		{ 'v', value, "value" },
-		{ 'd', i_strchr_to_next(value, '@'), "domain" },
-		{ '\0', NULL, NULL }
+	const struct var_expand_params params = {
+		.table = (const struct var_expand_table[]) {
+			{ .key = "value", .value = value },
+			VAR_EXPAND_TABLE_END
+		},
+		.event = NULL,
 	};
 	string_t *str = t_str_new(128);
-	if (var_expand(str, group_by->discrete_modifier, table, &error) < 0) {
+	if (var_expand(str, group_by->discrete_modifier, &params, &error) < 0) {
 		i_error("Failed to expand discrete modifier for %s: %s",
 			group_by->field, error);
 	}
@@ -839,7 +927,7 @@ static void
 stats_export_event(struct metric *metric, struct event *oldevent)
 {
 	const struct metric_export_info *info = &metric->export_info;
-	const struct exporter *exporter = info->exporter;
+	struct event_exporter *exporter = info->exporter;
 	struct event *event;
 
 	i_assert(exporter != NULL);
@@ -852,7 +940,7 @@ stats_export_event(struct metric *metric, struct event *oldevent)
 		buf = t_buffer_create(128);
 
 		exporter->format(metric, event, buf);
-		exporter->transport(exporter, buf);
+		exporter->transport->send(exporter, buf);
 	} T_END;
 
 	event_unref(&event);

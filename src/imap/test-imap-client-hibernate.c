@@ -9,6 +9,7 @@
 #include "path-util.h"
 #include "unlink-directory.h"
 #include "settings-parser.h"
+#include "settings.h"
 #include "master-service.h"
 #include "smtp-submit.h"
 #include "mail-storage-service.h"
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 
 #define TEMP_DIRNAME ".test-ich"
+#define SERVER_KILL_TIMEOUT_SECS 10
 
 #define EVILSTR "\t\r\n\001"
 
@@ -39,6 +41,7 @@ static struct mail_storage_service_ctx *storage_service;
 void imap_refresh_proctitle(void) { }
 void imap_refresh_proctitle_delayed(void) { }
 int client_create_from_input(const struct mail_storage_service_input *input ATTR_UNUSED,
+			     const struct imap_logout_stats *stats ATTR_UNUSED,
 			     int fd_in ATTR_UNUSED, int fd_out ATTR_UNUSED,
 			     enum client_create_flags flags ATTR_UNUSED,
 			     struct client **client_r ATTR_UNUSED,
@@ -115,7 +118,24 @@ static int imap_hibernate_server(struct test_imap_client_hibernate *ctx)
 	test_assert_strcmp(args[i++], "idle-cmd");
 	if (ctx->has_mailbox)
 		test_assert_strcmp(args[i++], "notify_fd");
-	test_assert(str_begins_with(args[i++], "state="));
+
+	const char *const stats_prefixes[] = {
+		"state=",
+		"fetch_hdr_count=",
+		"fetch_hdr_bytes=",
+		"fetch_body_count=",
+		"fetch_body_bytes=",
+		"deleted_count=",
+		"expunged_count=",
+		"trashed_count=",
+		"autoexpunged_count=",
+		"append_count=",
+		"input_bytes_extra=",
+		"output_bytes_extra=",
+	};
+	for (size_t p = 0; p < N_ELEMENTS(stats_prefixes); p++)
+		test_assert(str_begins_with(args[i++], stats_prefixes[p]));
+
 	test_assert(args[i] == NULL);
 
 	i_stream_unref(&input);
@@ -127,7 +147,7 @@ static int imap_hibernate_server(struct test_imap_client_hibernate *ctx)
 
 	mail_storage_service_deinit(&storage_service);
 	master_service_deinit_forked(&master_service);
-	return 0;
+	return test_has_failed() ? 1 : 0;
 }
 
 static void
@@ -152,7 +172,8 @@ static void test_imap_client_hibernate(void)
 
 	const char *const input_userdb[] = {
 		"mailbox_list_index=no",
-		t_strdup_printf("mail=mbox:%s/mbox", tmpdir),
+		"mail_driver=mbox",
+		t_strdup_printf("mail_path=%s/mbox", tmpdir),
 		t_strdup_printf("base_dir=%s", tmpdir),
 		"mail_log_prefix="EVILSTR"%u",
 		NULL
@@ -234,6 +255,8 @@ static void test_imap_client_hibernate(void)
 	   deinitializing cleanly */
 	mailbox_notify_changes(client->mailbox, mailbox_notify_callback, client);
 	test_assert(imap_client_hibernate(&client, &error));
+	test_subprocess_kill_all(SERVER_KILL_TIMEOUT_SECS);
+
 	test_end();
 
 	i_close_fd(&ctx.fd_listen);
@@ -262,10 +285,30 @@ static void test_init(void)
 	test_subprocesses_init(FALSE);
 }
 
+struct test_service_settings {
+	pool_t pool;
+	ARRAY_TYPE(const_string) services;
+};
+
+static const struct setting_define test_service_setting_defines[] = {
+	{ .type = SET_FILTER_ARRAY, .key = "service",
+	  .offset = offsetof(struct test_service_settings, services) },
+	SETTING_DEFINE_LIST_END
+};
+
+static const struct setting_parser_info test_service_setting_parser_info = {
+	.name = "test_service",
+
+	.defines = test_service_setting_defines,
+
+	.struct_size = sizeof(struct test_service_settings),
+	.pool_offset1 = 1 + offsetof(struct test_service_settings, pool),
+};
+
 int main(int argc, char *argv[])
 {
 	const enum master_service_flags service_flags =
-		MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+		MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 		MASTER_SERVICE_FLAG_STANDALONE |
 		MASTER_SERVICE_FLAG_STD_CLIENT |
 		MASTER_SERVICE_FLAG_DONT_SEND_STATS;
@@ -273,6 +316,10 @@ int main(int argc, char *argv[])
 
 	master_service = master_service_init("test-imap-client-hibernate",
 					     service_flags, &argc, &argv, "D");
+
+	/* imap default settings use service/imap/imap_capability, so we need
+	   to register "service" named list filter. */
+	settings_info_register(&test_service_setting_parser_info);
 
 	master_service_init_finish(master_service);
 	test_init();

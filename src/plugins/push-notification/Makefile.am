@@ -7,6 +7,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib-mail \
 	-I$(top_srcdir)/src/lib-storage \
 	-I$(top_srcdir)/src/lib-ssl-iostream \
+	-I$(top_srcdir)/src/lib-var-expand \
 	-I$(top_srcdir)/src/plugins/notify
 
 NOPLUGIN_LDFLAGS =
@@ -41,6 +42,7 @@ lib20_push_notification_plugin_la_SOURCES = \
 	push-notification-events.c \
 	push-notification-events-rfc5423.c \
 	push-notification-plugin.c \
+	push-notification-settings.c \
 	push-notification-triggers.c \
 	push-notification-txn-mbox.c \
 	push-notification-txn-msg.c
@@ -63,6 +65,7 @@ headers = \
 	push-notification-events.h \
 	push-notification-events-rfc5423.h \
 	push-notification-plugin.h \
+	push-notification-settings.h \
 	push-notification-triggers.h \
 	push-notification-txn-mbox.h \
 	push-notification-txn-msg.h
@@ -71,7 +74,7 @@ pkginc_libdir = $(pkgincludedir)
 pkginc_lib_HEADERS = $(headers)
 
 if HAVE_LUA
-lib22_push_notification_lua_plugin_la_CFLAGS = $(AM_CPPFLAGS) \
+lib22_push_notification_lua_plugin_la_CFLAGS = $(AM_CFLAGS) \
 	-I$(top_srcdir)/src/lib-lua \
 	-I$(top_srcdir)/src/plugins/mail-lua \
 	$(LUA_CFLAGS)

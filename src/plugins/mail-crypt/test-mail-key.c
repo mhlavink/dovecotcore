@@ -3,7 +3,9 @@
 #include "lib.h"
 #include "test-common.h"
 #include "hex-binary.h"
+#include "settings.h"
 #include "master-service.h"
+#include "dict.h"
 #include "test-mail-storage-common.h"
 #include "dcrypt.h"
 
@@ -21,6 +23,10 @@ static const char *test_user_key_id;
 static const char *test_box_key_id;
 
 static struct mail_crypt_user mail_crypt_user;
+static struct crypt_settings mail_crypt_settings = {
+	.crypt_user_key_curve = "prime256v1",
+	.crypt_user_key_password = "",
+};
 
 struct mail_crypt_user *mail_crypt_get_mail_crypt_user(struct mail_user *user ATTR_UNUSED)
 {
@@ -371,8 +377,9 @@ static void test_setup(void)
 	test_ctx = test_mail_storage_init();
 	const char *username = "mcp_test@example.com";
 	const char *const extra_input[] = {
-		t_strdup_printf("mail_crypt_curve=prime256v1"),
-		t_strdup_printf("mail_attribute_dict=file:%s/%s/dovecot-attributes",
+		"mail_attribute/dict=file",
+		"mail_attribute/dict/file/driver=file",
+		t_strdup_printf("dict_file_path=%s/%s/dovecot-attributes",
 				test_ctx->home_root, username),
 		NULL
 	};
@@ -383,6 +390,7 @@ static void test_setup(void)
 		.extra_input = extra_input,
 	};
 	test_mail_storage_init_user(test_ctx, &storage_set);
+	mail_crypt_user.set = &mail_crypt_settings;
 
 	mail_crypt_key_register_mailbox_internal_attributes();
 }
@@ -415,10 +423,12 @@ int main(int argc, char **argv)
 	master_service = master_service_init("test-mail-key",
 					     MASTER_SERVICE_FLAG_STANDALONE |
 					     MASTER_SERVICE_FLAG_DONT_SEND_STATS |
-					     MASTER_SERVICE_FLAG_NO_CONFIG_SETTINGS |
+					     MASTER_SERVICE_FLAG_CONFIG_BUILTIN |
 					     MASTER_SERVICE_FLAG_NO_SSL_INIT |
 					     MASTER_SERVICE_FLAG_NO_INIT_DATASTACK_FRAME,
 					     &argc, &argv, "");
+	settings_info_register(&dict_setting_parser_info);
+	settings_info_register(&dict_file_setting_parser_info);
 	int ret = test_run(tests);
 	master_service_deinit(&master_service);
 	return ret;

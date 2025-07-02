@@ -13,17 +13,12 @@ struct service_settings indexer_worker_service_settings = {
 	.user = "",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "$default_internal_group",
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
 	.process_limit = 10,
 	.client_limit = 1,
-	.service_count = 0,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -35,11 +30,13 @@ const struct setting_keyvalue indexer_worker_service_settings_defaults[] = {
 
 	{ "unix_listener/indexer-worker/path", "indexer-worker" },
 	{ "unix_listener/indexer-worker/mode", "0600" },
-	{ "unix_listener/indexer-worker/user", "$default_internal_user" },
+	{ "unix_listener/indexer-worker/user", "$SET:default_internal_user" },
 
 	{ "unix_listener/srv.indexer-worker\\s%{pid}/path", "srv.indexer-worker/%{pid}" },
 	{ "unix_listener/srv.indexer-worker\\s%{pid}/type", "admin" },
 	{ "unix_listener/srv.indexer-worker\\s%{pid}/mode", "0600" },
+
+	{ "service_extra_groups", "$SET:default_internal_group" },
 
 	{ NULL, NULL }
 };

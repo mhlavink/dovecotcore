@@ -5,10 +5,11 @@
 #include "str.h"
 #include "ioloop.h"
 #include "safe-mkstemp.h"
-#include "iostream-ssl.h"
+#include "settings.h"
 #include "imapc-msgmap.h"
 #include "imapc-connection.h"
 #include "imapc-client-private.h"
+#include "imapc-settings.h"
 
 #include <unistd.h>
 
@@ -36,6 +37,7 @@ const struct imapc_capability_name imapc_capability_names[] = {
 	{ "METADATA", IMAPC_CAPABILITY_METADATA },
 
 	{ "IMAP4REV1", IMAPC_CAPABILITY_IMAP4REV1 },
+	{ "IMAP4REV2", IMAPC_CAPABILITY_IMAP4REV2 },
 	{ NULL, 0 }
 };
 
@@ -48,70 +50,44 @@ default_untagged_callback(const struct imapc_untagged_reply *reply ATTR_UNUSED,
 }
 
 struct imapc_client *
-imapc_client_init(const struct imapc_client_settings *set,
+imapc_client_init(const struct imapc_parameters *params,
 		  struct event *event_parent)
 {
 	struct imapc_client *client;
-	const char *error;
 	pool_t pool;
-
-	i_assert(set->connect_retry_count == 0 ||
-		 set->connect_retry_interval_msecs > 0);
 
 	pool = pool_alloconly_create("imapc client", 1024);
 	client = p_new(pool, struct imapc_client, 1);
 	client->pool = pool;
 	client->refcount = 1;
 	client->event = event_create(event_parent);
-	event_set_forced_debug(client->event, set->debug);
-	event_set_append_log_prefix(client->event, t_strdup_printf(
-		"imapc(%s:%u): ", set->host, set->port));
-
-	client->set.debug = set->debug;
-	client->set.host = p_strdup(pool, set->host);
-	client->set.port = set->port;
-	client->set.master_user = p_strdup_empty(pool, set->master_user);
-	client->set.username = p_strdup(pool, set->username);
-	client->set.password = p_strdup(pool, set->password);
-	client->set.sasl_mechanisms = p_strdup(pool, set->sasl_mechanisms);
-	client->set.session_id_prefix = p_strdup(pool, set->session_id_prefix);
-	client->set.use_proxyauth = set->use_proxyauth;
-	client->set.no_qresync = set->no_qresync;
-	client->set.dns_client_socket_path =
-		p_strdup(pool, set->dns_client_socket_path);
-	client->set.temp_path_prefix =
-		p_strdup(pool, set->temp_path_prefix);
-	client->set.rawlog_dir = p_strdup(pool, set->rawlog_dir);
-	client->set.max_idle_time = set->max_idle_time;
-	client->set.connect_timeout_msecs = set->connect_timeout_msecs != 0 ?
-		set->connect_timeout_msecs :
-		IMAPC_DEFAULT_CONNECT_TIMEOUT_MSECS;
-	client->set.connect_retry_count = set->connect_retry_count;
-	client->set.connect_retry_interval_msecs = set->connect_retry_interval_msecs;
-	client->set.cmd_timeout_msecs = set->cmd_timeout_msecs != 0 ?
-		set->cmd_timeout_msecs : IMAPC_DEFAULT_COMMAND_TIMEOUT_MSECS;
-	client->set.max_line_length = set->max_line_length != 0 ?
-		set->max_line_length : IMAPC_DEFAULT_MAX_LINE_LENGTH;
-	client->set.throttle_set = set->throttle_set;
-
-	if (client->set.throttle_set.init_msecs == 0)
-		client->set.throttle_set.init_msecs = IMAPC_THROTTLE_DEFAULT_INIT_MSECS;
-	if (client->set.throttle_set.max_msecs == 0)
-		client->set.throttle_set.max_msecs = IMAPC_THROTTLE_DEFAULT_MAX_MSECS;
-	if (client->set.throttle_set.shrink_min_msecs == 0)
-		client->set.throttle_set.shrink_min_msecs = IMAPC_THROTTLE_DEFAULT_SHRINK_MIN_MSECS;
-
-	if (set->ssl_mode != IMAPC_CLIENT_SSL_MODE_NONE) {
-		client->set.ssl_mode = set->ssl_mode;
-		ssl_iostream_settings_init_from(pool, &client->set.ssl_set, &set->ssl_set);
-		client->set.ssl_set.verbose_invalid_cert = !client->set.ssl_set.allow_invalid_cert;
-		if (ssl_iostream_client_context_cache_get(&client->set.ssl_set,
-							  &client->ssl_ctx,
-							  &error) < 0) {
-			e_error(client->event, "Couldn't initialize SSL context: %s", error);
-		}
-	}
 	client->untagged_callback = default_untagged_callback;
+
+	client->set = settings_get_or_fatal(client->event, &imapc_setting_parser_info);
+	client->params.session_id_prefix =
+		p_strdup(pool, params->session_id_prefix);
+	client->params.temp_path_prefix =
+		p_strdup(pool, params->temp_path_prefix);
+	client->params.flags = params->flags;
+
+	client->imapc_rawlog_dir =
+		(params->override_rawlog_dir != NULL) ?
+			p_strdup(pool, params->override_rawlog_dir) :
+			p_strdup(pool, client->set->imapc_rawlog_dir);
+	client->password =
+		(params->override_password != NULL) ?
+			p_strdup(pool, params->override_password) :
+			p_strdup(pool, client->set->imapc_password);
+
+	event_set_append_log_prefix(client->event, t_strdup_printf(
+		"imapc(%s:%u): ", client->set->imapc_host, client->set->imapc_port));
+
+	client->ssl_mode = IMAPC_CLIENT_SSL_MODE_NONE;
+	if (strcmp(client->set->imapc_ssl, "imaps") == 0) {
+		client->ssl_mode = IMAPC_CLIENT_SSL_MODE_IMMEDIATE;
+	} else if (strcmp(client->set->imapc_ssl, "starttls") == 0) {
+		client->ssl_mode = IMAPC_CLIENT_SSL_MODE_STARTTLS;
+	}
 
 	p_array_init(&client->conns, pool, 8);
 	return client;
@@ -134,8 +110,8 @@ void imapc_client_unref(struct imapc_client **_client)
 	if (--client->refcount > 0)
 		return;
 
-	if (client->ssl_ctx != NULL)
-		ssl_iostream_context_unref(&client->ssl_ctx);
+	settings_free(client->set);
+
 	event_unref(&client->event);
 	pool_unref(&client->pool);
 }
@@ -548,14 +524,14 @@ int imapc_client_create_temp_fd(struct imapc_client *client,
 	string_t *path;
 	int fd;
 
-	if (client->set.temp_path_prefix == NULL) {
+	if (client->params.temp_path_prefix == NULL) {
 		e_error(client->event,
 			"temp_path_prefix not set, can't create temp file");
 		return -1;
 	}
 
 	path = t_str_new(128);
-	str_append(path, client->set.temp_path_prefix);
+	str_append(path, client->params.temp_path_prefix);
 	fd = safe_mkstemp(path, 0600, (uid_t)-1, (gid_t)-1);
 	if (fd == -1) {
 		e_error(client->event,
@@ -592,3 +568,7 @@ imapc_client_set_login_callback(struct imapc_client *client,
 	client->login_context  = context;
 }
 
+bool imapc_client_is_ssl(struct imapc_client *client)
+{
+	return client->ssl_mode != IMAPC_CLIENT_SSL_MODE_NONE;
+}

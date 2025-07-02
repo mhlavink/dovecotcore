@@ -2,14 +2,11 @@
 
 #include "lib.h"
 #include "array.h"
-#include "var-expand.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "service-settings.h"
 #include "mail-storage-settings.h"
 #include "master-service.h"
 #include "master-service-settings.h"
-#include "master-service-ssl-settings.h"
 #include "iostream-ssl.h"
 #include "doveadm-settings.h"
 
@@ -27,17 +24,12 @@ struct service_settings doveadm_service_settings = {
 	.user = "",
 	.group = "",
 	.privileged_group = "",
-	.extra_groups = "$default_internal_group",
 	.chroot = "",
 
 	.drop_priv_before_exec = FALSE,
 
-	.process_min_avail = 0,
-	.process_limit = 0,
 	.client_limit = 1,
-	.service_count = 1,
-	.idle_kill = 0,
-	.vsz_limit = UOFF_T_MAX,
+	.restart_request_count = 1,
 
 	.unix_listeners = ARRAY_INIT,
 	.fifo_listeners = ARRAY_INIT,
@@ -51,6 +43,8 @@ const struct setting_keyvalue doveadm_service_settings_defaults[] = {
 	{ "unix_listener/doveadm-server/type", "tcp" },
 	{ "unix_listener/doveadm-server/mode", "0600" },
 
+	{ "service_extra_groups", "$SET:default_internal_group" },
+
 	{ NULL, NULL }
 };
 
@@ -61,9 +55,9 @@ const struct setting_keyvalue doveadm_service_settings_defaults[] = {
 static const struct setting_define doveadm_setting_defines[] = {
 	DEF(STR_HIDDEN, base_dir),
 	DEF(STR_HIDDEN, libexec_dir),
-	DEF(STR, mail_plugins),
+	DEF(BOOLLIST, mail_plugins),
 	DEF(STR, mail_plugin_dir),
-	DEF(STR_VARS, mail_temp_dir),
+	DEF(STR, mail_temp_dir),
 	DEF(BOOL, auth_debug),
 	DEF(STR, auth_socket_path),
 	DEF(STR, doveadm_socket_path),
@@ -73,17 +67,15 @@ static const struct setting_define doveadm_setting_defines[] = {
 	DEF(ENUM, doveadm_ssl),
 	DEF(STR, doveadm_username),
 	DEF(STR, doveadm_password),
-	DEF(STR, doveadm_allowed_commands),
+	DEF(BOOLLIST, doveadm_allowed_commands),
 	DEF(STR, dsync_alt_char),
-	DEF(STR, dsync_remote_cmd),
+	DEF(STR_NOVARS, dsync_remote_cmd),
 	DEF(STR, doveadm_api_key),
 	DEF(STR, dsync_features),
 	DEF(UINT, dsync_commit_msgs_interval),
-	DEF(STR, doveadm_http_rawlog_dir),
 	DEF(STR_HIDDEN, dsync_hashed_headers),
 
-	{ .type = SET_STRLIST, .key = "plugin",
-	  .offset = offsetof(struct doveadm_settings, plugin_envs) },
+	{ .type = SET_FILTER_NAME, .key = DOVEADM_SERVER_FILTER },
 
 	SETTING_DEFINE_LIST_END
 };
@@ -91,9 +83,13 @@ static const struct setting_define doveadm_setting_defines[] = {
 const struct doveadm_settings doveadm_default_settings = {
 	.base_dir = PKG_RUNDIR,
 	.libexec_dir = PKG_LIBEXECDIR,
-	.mail_plugins = "",
+	.mail_plugins = ARRAY_INIT,
 	.mail_plugin_dir = MODULEDIR,
+#ifdef DOVECOT_PRO_EDITION
+	.mail_temp_dir = "/dev/shm/dovecot",
+#else
 	.mail_temp_dir = "/tmp",
+#endif
 	.auth_debug = FALSE,
 	.auth_socket_path = "auth-userdb",
 	.doveadm_socket_path = "doveadm-server",
@@ -102,16 +98,13 @@ const struct doveadm_settings doveadm_default_settings = {
 	.doveadm_ssl = "no:ssl:starttls",
 	.doveadm_username = "doveadm",
 	.doveadm_password = "",
-	.doveadm_allowed_commands = "",
+	.doveadm_allowed_commands = ARRAY_INIT,
 	.dsync_alt_char = "_",
-	.dsync_remote_cmd = "ssh -l%{login} %{host} doveadm dsync-server -u%u -U",
+	.dsync_remote_cmd = "ssh -l%{login} %{host} doveadm dsync-server -u%{user} -U",
 	.dsync_features = "",
 	.dsync_hashed_headers = "Date Message-ID",
 	.dsync_commit_msgs_interval = 100,
 	.doveadm_api_key = "",
-	.doveadm_http_rawlog_dir = "",
-
-	.plugin_envs = ARRAY_INIT
 };
 
 const struct setting_parser_info doveadm_setting_parser_info = {
@@ -196,14 +189,6 @@ static bool doveadm_settings_check(void *_set, pool_t pool ATTR_UNUSED,
 }
 /* </settings checks> */
 
-const struct master_service_ssl_settings *doveadm_ssl_set = NULL;
-
-void doveadm_get_ssl_settings(struct ssl_iostream_settings *set_r, pool_t pool)
-{
-	master_service_ssl_client_settings_to_iostream_set(doveadm_ssl_set,
-							   pool, set_r);
-}
-
 void doveadm_read_settings(void)
 {
 	struct master_service_settings_input input;
@@ -227,9 +212,6 @@ void doveadm_read_settings(void)
 	doveadm_settings =
 		settings_get_or_fatal(master_service_get_event(master_service),
 				      &doveadm_setting_parser_info);
-	doveadm_ssl_set =
-		settings_get_or_fatal(master_service_get_event(master_service),
-				      &master_service_ssl_setting_parser_info);
 }
 
 int doveadm_settings_get_config_fd(void)
@@ -240,5 +222,4 @@ int doveadm_settings_get_config_fd(void)
 void doveadm_settings_deinit(void)
 {
 	settings_free(doveadm_settings);
-	settings_free(doveadm_ssl_set);
 }

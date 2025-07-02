@@ -13,14 +13,10 @@
 #include "str.h"
 #include "strescape.h"
 #include "strfuncs.h"
-#include "var-expand.h"
 #include "settings.h"
-#include "settings-parser.h"
-#include "iostream-ssl.h"
 #include "fs-api.h"
 #include "auth-master.h"
 #include "master-service.h"
-#include "master-service-ssl-settings.h"
 #include "dict.h"
 #include "mail-storage-settings.h"
 #include "mail-storage-private.h"
@@ -63,16 +59,11 @@ void mail_user_add_event_fields(struct mail_user *user)
 }
 
 static void
-mail_user_var_expand_callback(struct event *event,
-			      const struct var_expand_table **tab_r,
-			      const struct var_expand_func_table **func_tab_r)
+mail_user_var_expand_callback(void *context, struct var_expand_params *params_r)
 {
-	struct mail_user *user =
-		event_get_ptr(event, SETTINGS_EVENT_VAR_EXPAND_FUNC_CONTEXT);
-	i_assert(user != NULL);
-
-	*tab_r = mail_user_var_expand_table(user);
-	*func_tab_r = mail_user_var_expand_func_table;
+	struct mail_user *user = context;
+	const struct var_expand_params *params = mail_user_var_expand_params(user);
+	*params_r = *params;
 }
 
 struct mail_user *
@@ -98,13 +89,15 @@ mail_user_alloc(struct mail_storage_service_user *service_user)
 	user->session_create_time = ioloop_time;
 	user->event = event_create(parent_event);
 	event_add_category(user->event, &event_category_storage);
+	event_set_ptr(user->event, SETTINGS_EVENT_MAIL_USER, user);
 	event_add_str(user->event, "user", username);
 
 	/* Register %variable expansion callback function for settings
 	   lookups. */
 	event_set_ptr(user->event, SETTINGS_EVENT_VAR_EXPAND_CALLBACK,
 		      mail_user_var_expand_callback);
-	event_set_ptr(user->event, SETTINGS_EVENT_VAR_EXPAND_FUNC_CONTEXT, user);
+	event_set_ptr(user->event,
+		      SETTINGS_EVENT_VAR_EXPAND_CALLBACK_CONTEXT, user);
 
 	user->v.deinit = mail_user_deinit_base;
 	user->v.deinit_pre = mail_user_deinit_pre_base;
@@ -112,57 +105,11 @@ mail_user_alloc(struct mail_storage_service_user *service_user)
 	return user;
 }
 
-static void
-mail_user_expand_plugins_envs(struct mail_user *user,
-			      struct mail_storage_settings *set)
-{
-	const char **envs, *error;
-	string_t *str;
-	unsigned int i, count;
-
-	if (!array_is_created(&set->plugin_envs))
-		return;
-
-	str = t_str_new(256);
-	envs = array_get_modifiable(&set->plugin_envs, &count);
-	i_assert((count % 2) == 0);
-	for (i = 0; i < count; i += 2) {
-		str_truncate(str, 0);
-		if (var_expand_with_funcs(str, envs[i+1],
-					  mail_user_var_expand_table(user),
-					  mail_user_var_expand_func_table, user,
-					  &error) <= 0) {
-			user->error = p_strdup_printf(user->pool,
-				"Failed to expand plugin setting %s = '%s': %s",
-				envs[i], envs[i+1], error);
-			return;
-		}
-		envs[i+1] = p_strdup(user->pool, str_c(str));
-	}
-}
-
 int mail_user_init(struct mail_user *user, const char **error_r)
 {
-	const char *error;
-
 	i_assert(!user->initialized);
 
-	if (settings_get(user->event, &mail_storage_setting_parser_info, 0,
-			 &user->_mail_set, &error) < 0)
-		user->error = p_strdup(user->pool, error);
-	else
-		mail_user_expand_plugins_envs(user, user->_mail_set);
-
-	user->ssl_set = p_new(user->pool, struct ssl_iostream_settings, 1);
-	if (user->error == NULL &&
-	    mail_storage_service_user_init_ssl_client_settings(
-			user->service_user, user->pool,
-			user->ssl_set, &error) < 0)
-		user->error = p_strdup(user->pool, error);
-
-	/* autocreated users for shared mailboxes need to be fully initialized
-	   if they don't exist, since they're going to be used anyway */
-	if (user->error == NULL || user->nonexistent) {
+	if (user->error == NULL) {
 		user->initialized = TRUE;
 		hook_mail_user_created(user);
 	}
@@ -228,7 +175,6 @@ void mail_user_unref(struct mail_user **_user)
 		user->v.deinit_pre(user);
 		user->v.deinit(user);
 	} T_END;
-	settings_free(user->_mail_set);
 	event_unref(&user->event);
 	i_assert(user->refcount == 1);
 	pool_unref(&user->pool);
@@ -277,65 +223,9 @@ void mail_user_set_vars(struct mail_user *user, const char *service,
 	mail_user_connection_init_from(&user->conn, user->pool, conn);
 }
 
-const struct var_expand_table *
-mail_user_var_expand_table(struct mail_user *user)
-{
-	/* use a cached table if possible */
-	if (user->var_expand_table != NULL)
-		return user->var_expand_table;
-
-	const char *username =
-		p_strdup(user->pool, t_strcut(user->username, '@'));
-	const char *domain = i_strchr_to_next(user->username, '@');
-	const char *local_ip = user->conn.local_ip == NULL ? NULL :
-		p_strdup(user->pool, net_ip2addr(user->conn.local_ip));
-	const char *remote_ip = user->conn.remote_ip == NULL ? NULL :
-		p_strdup(user->pool, net_ip2addr(user->conn.remote_ip));
-
-	const char *auth_user, *auth_username, *auth_domain;
-	if (user->auth_user == NULL) {
-		auth_user = user->username;
-		auth_username = username;
-		auth_domain = domain;
-	} else {
-		auth_user = user->auth_user;
-		auth_username =
-			p_strdup(user->pool, t_strcut(user->auth_user, '@'));
-		auth_domain = i_strchr_to_next(user->auth_user, '@');
-	}
-
-	const struct var_expand_table stack_tab[] = {
-		{ 'u', user->username, "user" },
-		{ 'n', username, "username" },
-		{ 'd', domain, "domain" },
-		{ 's', user->service, "service" },
-		{ 'l', local_ip, "lip" },
-		{ 'r', remote_ip, "rip" },
-		{ '\0', user->session_id, "session" },
-		{ '\0', auth_user, "auth_user" },
-		{ '\0', auth_username, "auth_username" },
-		{ '\0', auth_domain, "auth_domain" },
-		{ '\0', user->set->hostname, "hostname" },
-		{ '\0', user->conn.local_name, "local_name" },
-		/* aliases: */
-		{ '\0', local_ip, "local_ip" },
-		{ '\0', remote_ip, "remote_ip" },
-		/* NOTE: keep this synced with imap-hibernate's
-		   imap_client_var_expand_table() */
-		{ '\0', NULL, NULL }
-	};
-	struct var_expand_table *tab;
-
-	tab = p_malloc(user->pool, sizeof(stack_tab));
-	memcpy(tab, stack_tab, sizeof(stack_tab));
-
-	user->var_expand_table = tab;
-	return user->var_expand_table;
-}
-
 static int
-mail_user_var_expand_func_home(const char *data ATTR_UNUSED, void *context,
-			       const char **value_r, const char **error_r)
+mail_user_var_expand_func_home(const char *data ATTR_UNUSED, const char **value_r,
+			       void *context, const char **error_r)
 {
 	struct mail_user *user = context;
 
@@ -344,18 +234,78 @@ mail_user_var_expand_func_home(const char *data ATTR_UNUSED, void *context,
 			"mail_home and userdb didn't return it";
 		return -1;
 	}
-	return 1;
+	return 0;
+}
+
+const struct var_expand_params *
+mail_user_var_expand_params(struct mail_user *user)
+{
+	/* use a cached table if possible */
+	if (user->var_expand_params != NULL)
+		return user->var_expand_params;
+
+	const char *local_ip = user->conn.local_ip == NULL ? NULL :
+		p_strdup(user->pool, net_ip2addr(user->conn.local_ip));
+	const char *remote_ip = user->conn.remote_ip == NULL ? NULL :
+		p_strdup(user->pool, net_ip2addr(user->conn.remote_ip));
+	const char *local_port = "";
+	const char *remote_port = "";
+
+	if (user->conn.local_port != 0) {
+		local_port = p_strdup_printf(user->pool, "%u",
+					     user->conn.local_port);
+	}
+	if (user->conn.remote_port != 0) {
+		remote_port = p_strdup_printf(user->pool, "%u",
+					      user->conn.remote_port);
+	}
+
+	const struct var_expand_table stack_tab[] = {
+		{ .key = "user", .value = user->username },
+		{ .key = "service", .value = user->service },
+		{ .key = "local_ip", .value = local_ip },
+		{ .key = "remote_ip", .value = remote_ip },
+		{ .key = "local_port", .value = local_port },
+		{ .key = "remote_port", .value = remote_port },
+		{ .key = "session", .value = user->session_id },
+		{
+			.key = "auth_user",
+			.value = user->auth_user != NULL ? user->auth_user :
+							   user->username
+		},
+		{ .key = "hostname", .value = user->set->hostname },
+		{ .key = "local_name", .value = user->conn.local_name },
+		{ .key = "protocol", .value = user->protocol },
+		/* default to owner being the same as user - these are
+		   overridden by shared storage */
+		{ .key = "owner_user", .value = user->username },
+		{ .key = "master_user", .value = user->master_user },
+		{ .key = "home", .func = mail_user_var_expand_func_home },
+		{ .key = "owner_home", .func = mail_user_var_expand_func_home },
+		/* NOTE: keep this synced with imap-hibernate's
+		   imap_client_var_expand_table() */
+		VAR_EXPAND_TABLE_END
+	};
+
+	struct var_expand_params *params =
+		p_new(user->pool, struct var_expand_params, 1);
+	params->table = p_memdup(user->pool, stack_tab, sizeof(stack_tab));
+	params->providers = mail_user_var_expand_providers;
+	params->context = user;
+	params->event = user->event;
+
+	user->var_expand_params = params;
+	return user->var_expand_params;
 }
 
 static int
-mail_user_var_expand_func_userdb(const char *data, void *context,
-				 const char **value_r,
-				 const char **error_r ATTR_UNUSED)
+mail_user_var_expand_func_userdb(const char *data, const char **value_r,
+				 void *context, const char **error_r ATTR_UNUSED)
 {
 	struct mail_user *user = context;
 
 	*value_r = mail_storage_service_fields_var_expand(data, user->userdb_fields);
-	return 1;
+	return 0;
 }
 
 void mail_user_set_home(struct mail_user *user, const char *home)
@@ -420,7 +370,7 @@ static int mail_user_userdb_lookup_home(struct mail_user *user)
 	i_assert(!user->home_looked_up);
 
 	i_zero(&info);
-	info.service = user->service;
+	info.protocol = user->protocol;
 	if (user->conn.local_ip != NULL)
 		info.local_ip = *user->conn.local_ip;
 	if (user->conn.remote_ip != NULL)
@@ -478,72 +428,23 @@ int mail_user_get_home(struct mail_user *user, const char **home_r)
 
 bool mail_user_is_plugin_loaded(struct mail_user *user, struct module *module)
 {
-	const char *const *plugins;
 	bool ret;
 
-	T_BEGIN {
-		plugins = t_strsplit_spaces(user->set->mail_plugins, ", ");
-		ret = str_array_find(plugins, module_get_plugin_name(module));
+	if (!array_is_created(&user->set->mail_plugins))
+		ret = FALSE;
+	else T_BEGIN {
+		const char *name = module_get_plugin_name(module);
+		ret = array_lsearch(&user->set->mail_plugins, &name,
+				    i_strcmp_p) != NULL;
 	} T_END;
 	return ret;
-}
-
-bool mail_user_plugin_getenv_bool(struct mail_user *user, const char *name)
-{
-	const struct mail_storage_settings *mail_set =
-		mail_user_set_get_storage_set(user);
-	return mail_user_set_plugin_getenv_bool(mail_set, name);
-}
-
-bool mail_user_set_plugin_getenv_bool(const struct mail_storage_settings *set,
-				      const char *name)
-{
-	const char *env = mail_user_set_plugin_getenv(set, name);
-
-	if (env == NULL)
-		return FALSE;
-	switch (env[0]) {
-		case 'n':
-		case 'N':
-		case '0':
-		case 'f':
-		case 'F':
-		return FALSE;
-	}
-
-	//any other value including empty string will be treated as TRUE.
-	return TRUE;
-}
-
-const char *mail_user_plugin_getenv(struct mail_user *user, const char *name)
-{
-	const struct mail_storage_settings *mail_set =
-		mail_user_set_get_storage_set(user);
-	return mail_user_set_plugin_getenv(mail_set, name);
-}
-
-const char *mail_user_set_plugin_getenv(const struct mail_storage_settings *set,
-					const char *name)
-{
-	const char *const *envs;
-	unsigned int i, count;
-
-	if (!array_is_created(&set->plugin_envs))
-		return NULL;
-
-	envs = array_get(&set->plugin_envs, &count);
-	for (i = 0; i < count; i += 2) {
-		if (strcmp(envs[i], name) == 0)
-			return envs[i+1];
-	}
-	return NULL;
 }
 
 int mail_user_try_home_expand(struct mail_user *user, const char **pathp)
 {
 	const char *home, *path = *pathp;
 
-	if (*path != '~') {
+	if (!str_begins_with(path, "~/") && strcmp(path, "~") != 0) {
 		/* no need to expand home */
 		return 0;
 	}
@@ -573,7 +474,8 @@ const char *mail_user_get_volatile_dir(struct mail_user *user)
 	struct mailbox_list *inbox_list =
 		mail_namespace_find_inbox(user->namespaces)->list;
 
-	return inbox_list->set.volatile_dir;
+	const char *path = inbox_list->mail_set->mail_volatile_path;
+	return path[0] == '\0' ? NULL : path;
 }
 
 int mail_user_lock_file_create(struct mail_user *user, const char *lock_fname,
@@ -595,24 +497,24 @@ int mail_user_lock_file_create(struct mail_user *user, const char *lock_fname,
 		return -1;
 	}
 
-	const struct mail_storage_settings *mail_set =
-		mail_user_set_get_storage_set(user);
+	struct mailbox_list *inbox_list =
+		mail_namespace_find_inbox(user->namespaces)->list;
 	struct file_create_settings lock_set = {
 		.lock_timeout_secs = lock_secs,
 		.lock_settings = {
-			.lock_method = mail_set->parsed_lock_method,
+			.lock_method = inbox_list->mail_set->parsed_lock_method,
 		},
 	};
-	struct mailbox_list *inbox_list =
-		mail_namespace_find_inbox(user->namespaces)->list;
-	if (inbox_list->set.volatile_dir == NULL)
+	if (inbox_list->mail_set->mail_volatile_path[0] == '\0')
 		path = t_strdup_printf("%s/%s", home, lock_fname);
 	else {
-		path = t_strdup_printf("%s/%s", inbox_list->set.volatile_dir,
-				       lock_fname);
+		path = t_strdup_printf("%s/%s",
+				inbox_list->mail_set->mail_volatile_path,
+				lock_fname);
 		lock_set.mkdir_mode = 0700;
 	}
-	return mail_storage_lock_create(path, &lock_set, mail_set, lock_r, error_r);
+	return mail_storage_lock_create(path, &lock_set, inbox_list->mail_set,
+					lock_r, error_r);
 }
 
 void mail_user_get_anvil_session(struct mail_user *user,
@@ -668,10 +570,11 @@ mail_user_try_load_class_plugin(struct mail_user *user, const char *name)
 	mod_set.require_init_funcs = TRUE;
 	mod_set.debug = event_want_debug(user->event);
 
+	const char *module_names[] = { name, NULL };
 	mail_storage_service_modules =
 		module_dir_load_missing(mail_storage_service_modules,
 					user->set->mail_plugin_dir,
-					name, &mod_set);
+					module_names, &mod_set);
 	/* initialize the module (and only this module!) immediately so that
 	   the class gets registered */
 	for (module = mail_storage_service_modules; module != NULL; module = module->next) {
@@ -719,6 +622,7 @@ struct mail_user *mail_user_dup(struct mail_user *user)
 	user2->gid = user->gid;
 	user2->anonymous = user->anonymous;
 	user2->admin = user->admin;
+	user2->protocol = p_strdup(user2->pool, user->protocol);
 	user2->auth_mech = p_strdup(user2->pool, user->auth_mech);
 	user2->auth_token = p_strdup(user2->pool, user->auth_token);
 	user2->auth_user = p_strdup(user2->pool, user->auth_user);
@@ -729,20 +633,14 @@ struct mail_user *mail_user_dup(struct mail_user *user)
 	return user2;
 }
 
-void mail_user_init_fs_settings(struct mail_user *user,
-				struct fs_settings *fs_set,
-				struct ssl_iostream_settings *ssl_set_r)
+void mail_user_init_fs_parameters(struct mail_user *user,
+				struct fs_parameters *fs_params)
 {
-	fs_set->event_parent = user->event;
-	fs_set->username = user->username;
-	fs_set->session_id = user->session_id;
-	fs_set->base_dir = user->set->base_dir;
-	fs_set->temp_dir = user->set->mail_temp_dir;
-	fs_set->debug = event_want_debug(user->event);
-	fs_set->enable_timing = user->stats_enabled;
-
-	fs_set->ssl_client_set = ssl_set_r;
-	*ssl_set_r = *user->ssl_set;
+	fs_params->username = user->username;
+	fs_params->session_id = user->session_id;
+	fs_params->base_dir = user->set->base_dir;
+	fs_params->temp_dir = user->set->mail_temp_dir;
+	fs_params->enable_timing = user->stats_enabled;
 }
 
 static int
@@ -819,11 +717,11 @@ mail_user_get_dict_op_settings(struct mail_user *user)
 	return user->dict_op_set;
 }
 
-static const struct var_expand_func_table mail_user_var_expand_func_table_arr[] = {
-	{ "h", mail_user_var_expand_func_home },
-	{ "home", mail_user_var_expand_func_home },
+static const struct var_expand_provider mail_user_var_expand_providers_arr[] = {
+	/* default to owner_home being the same as user's home - this is
+	   overridden by shared storage */
 	{ "userdb", mail_user_var_expand_func_userdb },
 	{ NULL, NULL }
 };
-const struct var_expand_func_table *mail_user_var_expand_func_table =
-	mail_user_var_expand_func_table_arr;
+const struct var_expand_provider *mail_user_var_expand_providers =
+	mail_user_var_expand_providers_arr;

@@ -9,7 +9,6 @@
 #include "ostream.h"
 #include "hostpid.h"
 #include "process-title.h"
-#include "var-expand.h"
 #include "module-dir.h"
 #include "settings.h"
 #include "master-service-ssl.h"
@@ -84,6 +83,9 @@ static void client_load_modules(struct client *client)
 {
         struct module_dir_load_settings mod_set;
 
+	if (!array_is_created(&client->lmtp_set->mail_plugins) ||
+	    array_is_empty(&client->lmtp_set->mail_plugins))
+		return;
         i_zero(&mod_set);
         mod_set.abi_version = DOVECOT_ABI_VERSION;
         mod_set.require_init_funcs = TRUE;
@@ -93,7 +95,7 @@ static void client_load_modules(struct client *client)
         mail_storage_service_modules =
                 module_dir_load_missing(mail_storage_service_modules,
                                         client->lmtp_set->mail_plugin_dir,
-                                        client->lmtp_set->mail_plugins,
+                                        settings_boollist_get(&client->lmtp_set->mail_plugins),
                                         &mod_set);
 	module_dir_init(mail_storage_service_modules);
 }
@@ -119,11 +121,11 @@ static void client_read_settings(struct client *client, bool ssl)
 	client->raw_mail_user =
 		raw_storage_create_from_set(storage_service, client->set_instance);
 
-	const struct var_expand_table *tab =
-		mail_storage_service_get_var_expand_table(storage_service, &input);
+	const struct var_expand_params *params =
+		mail_storage_service_get_var_expand_params(storage_service, &input);
 
 	struct event *event = event_create(client->event);
-	event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_TABLE, (void *)tab);
+	event_set_ptr(event, SETTINGS_EVENT_VAR_EXPAND_PARAMS, (void *)params);
 	if (settings_get(event, &lda_setting_parser_info, 0,
 			 &client->lda_set, &error) < 0 ||
 	    settings_get(event, &lmtp_setting_parser_info, 0,
@@ -181,10 +183,12 @@ struct client *client_create(int fd_in, int fd_out,
 		SMTP_CAPABILITY_8BITMIME |
 		SMTP_CAPABILITY_CHUNKING |
 		SMTP_CAPABILITY_XCLIENT |
-#ifdef EXPERIMENTAL_MAIL_UTF8
-		SMTP_CAPABILITY_SMTPUTF8 |
-#endif
 		SMTP_CAPABILITY__ORCPT;
+
+#ifdef EXPERIMENTAL_MAIL_UTF8
+	if (client->lmtp_set->mail_utf8_extensions)
+		lmtp_set.capabilities |= SMTP_CAPABILITY_SMTPUTF8;
+#endif
 	if (!conn_tls && master_service_ssl_is_enabled(master_service))
 		lmtp_set.capabilities |= SMTP_CAPABILITY_STARTTLS;
 	lmtp_set.hostname = client->lda_set->hostname;
@@ -392,6 +396,35 @@ client_connection_proxy_data_updated(void *context,
 		refresh_proctitle();
 }
 
+static int
+client_connection_tls_sni_callback(void *context, const char *name,
+				   const char **error_r)
+{
+	struct client *client = context;
+
+	const struct lda_settings *old_lda_set = client->lda_set;
+	const struct lmtp_settings *old_lmtp_set = client->lmtp_set;
+	client->lda_set = NULL;
+	client->lmtp_set = NULL;
+	event_add_str(client->event, "local_name", name);
+	if (settings_get(client->event, &lda_setting_parser_info, 0,
+			 &client->lda_set, error_r) < 0 ||
+	    settings_get(client->event, &lmtp_setting_parser_info, 0,
+			 &client->lmtp_set, error_r) < 0) {
+		settings_free(client->lda_set);
+		settings_free(client->lmtp_set);
+		client->lda_set = old_lda_set;
+		client->lmtp_set = old_lmtp_set;
+		return -1;
+	}
+	settings_free(old_lda_set);
+	settings_free(old_lmtp_set);
+	smtp_server_connection_set_greeting(client->conn,
+					    client->lmtp_set->login_greeting);
+
+	return 0;
+}
+
 static void client_connection_disconnect(void *context, const char *reason)
 {
 	struct client *client = context;
@@ -420,10 +453,7 @@ static bool client_connection_is_trusted(void *context)
 	struct ip_addr net_ip;
 	unsigned int bits;
 
-	if (client->lmtp_set->login_trusted_networks == NULL)
-		return FALSE;
-
-	net = t_strsplit_spaces(client->lmtp_set->login_trusted_networks, ", ");
+	net = settings_boollist_get(&client->lmtp_set->login_trusted_networks);
 	for (; *net != NULL; net++) {
 		if (net_parse_range(*net, &net_ip, &bits) < 0) {
 			e_error(client->event, "login_trusted_networks: "
@@ -457,6 +487,8 @@ static const struct smtp_server_callbacks lmtp_callbacks = {
 	.conn_state_changed = client_connection_state_changed,
 
 	.conn_proxy_data_updated = client_connection_proxy_data_updated,
+
+	.conn_tls_sni_callback = client_connection_tls_sni_callback,
 
 	.conn_disconnect = client_connection_disconnect,
 	.conn_free = client_connection_free,

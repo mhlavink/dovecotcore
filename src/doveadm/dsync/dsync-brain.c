@@ -345,7 +345,7 @@ static void dsync_brain_purge(struct dsync_brain *brain)
 		storage = mail_namespace_get_default_storage(ns);
 		if (mail_storage_purge(storage) < 0) {
 			e_error(brain->event,
-				"Purging namespace '%s' failed: %s", ns->prefix,
+				"Purging namespace %s failed: %s", ns->set->name,
 				mail_storage_get_last_internal_error(storage, NULL));
 		}
 	}
@@ -884,13 +884,8 @@ bool dsync_brain_want_namespace(struct dsync_brain *brain,
 			return TRUE;
 		return FALSE;
 	} else {
-		/* By default sync only namespaces that have empty location.
-		   The unexpanded_location can be already expanded if it
-		   came from userdb or -o parameter. */
-		return strcmp(ns->set->unexpanded_location,
-			      SETTING_STRVAR_UNEXPANDED) == 0 ||
-			strcmp(ns->set->unexpanded_location,
-			       SETTING_STRVAR_EXPANDED) == 0;
+		/* By default sync only the INBOX namespace. */
+		return (ns->flags & NAMESPACE_FLAG_INBOX_USER) != 0;
 	}
 }
 

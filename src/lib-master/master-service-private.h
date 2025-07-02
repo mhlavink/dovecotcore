@@ -47,11 +47,11 @@ struct master_service {
 	unsigned int socket_count;
 
 	struct io *io_status_write, *io_status_error;
-	unsigned int service_count_left;
+	unsigned int restart_request_count_left;
 	unsigned int total_available_count;
 	unsigned int process_limit;
 	unsigned int process_min_avail;
-	unsigned int idle_kill_secs;
+	unsigned int idle_kill_interval_secs;
 
 	struct master_status master_status;
 	unsigned int last_sent_status_avail_count;
@@ -99,7 +99,6 @@ struct master_service {
 	bool config_path_changed_with_param:1;
 	bool have_admin_sockets:1;
 	bool want_ssl_server:1;
-	bool ssl_ctx_initialized:1;
 	bool config_path_from_master:1;
 	bool log_initialized:1;
 	bool init_finished:1;

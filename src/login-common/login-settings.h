@@ -1,19 +1,16 @@
 #ifndef LOGIN_SETTINGS_H
 #define LOGIN_SETTINGS_H
 
-struct master_service_ssl_settings;
-struct master_service_ssl_server_settings;
-
 struct login_settings {
 	pool_t pool;
-	const char *login_trusted_networks;
-	const char *login_source_ips;
+	ARRAY_TYPE(const_string) login_trusted_networks;
+	ARRAY_TYPE(const_string) login_source_ips;
 	const char *login_greeting;
 	const char *login_log_format_elements, *login_log_format;
 	const char *login_access_sockets;
 	const char *login_proxy_notify_path;
 	const char *login_plugin_dir;
-	const char *login_plugins;
+	ARRAY_TYPE(const_string) login_plugins;
 	unsigned int login_proxy_timeout;
 	unsigned int login_proxy_max_reconnects;
 	unsigned int login_proxy_max_disconnect_delay;

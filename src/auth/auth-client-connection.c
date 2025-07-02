@@ -67,7 +67,7 @@ static void auth_client_send(struct auth_client_connection *conn,
 	o_stream_nsendv(conn->conn.output, iov, N_ELEMENTS(iov));
 
 	e_debug(conn->conn.event, "client passdb out: %s",
-		conn->auth->set->debug_passwords ?
+		conn->auth->protocol_set->debug_passwords ?
 		cmd : reply_line_hide_pass(cmd));
 }
 
@@ -140,7 +140,7 @@ auth_line_hide_pass(struct auth_client_connection *conn, const char *const *args
 		if (arg != args)
 			str_append_c(newline, '\t');
 		if (str_begins_with(*arg, "resp=")) {
-			if (conn->auth->set->debug_passwords) {
+			if (conn->auth->protocol_set->debug_passwords) {
 				str_append_tabescaped(newline, *arg);
 				str_append(newline, AUTH_DEBUG_SENSITIVE_SUFFIX);
 				break;
@@ -161,7 +161,7 @@ cont_line_hide_pass(struct auth_client_connection *conn, const char *const *args
 	if (args[1] == NULL)
 		return args[0];
 
-	if (conn->auth->set->debug_passwords) {
+	if (conn->auth->protocol_set->debug_passwords) {
 		return t_strconcat(t_strarray_join(args, "\t"),
 				   AUTH_DEBUG_SENSITIVE_SUFFIX, NULL);
 	}
@@ -181,6 +181,35 @@ auth_client_cancel(struct auth_client_connection *conn, const char *const *args)
 
 	auth_request_handler_cancel_request(conn->request_handler, client_id);
 	return 1;
+}
+
+static void auth_client_finish_handshake(struct auth_client_connection *conn)
+{
+	const char *mechanisms, *mechanisms_cbind = "";
+	string_t *str;
+
+	if (conn->handshake_finished)
+		return;
+
+	if (conn->token_auth) {
+		mechanisms = t_strconcat("MECH\t",
+			mech_dovecot_token.mech_name, "\tprivate\n", NULL);
+	} else {
+		mechanisms = str_c(conn->auth->reg->handshake);
+		if (conn->conn.minor_version >= AUTH_CLIENT_MINOR_VERSION_CHANNEL_BINDING) {
+			mechanisms_cbind =
+				str_c(conn->auth->reg->handshake_cbind);
+		}
+	}
+
+	str = t_str_new(128);
+	str_printfa(str, "%s%sSPID\t%s\nCUID\t%u\nCOOKIE\t",
+		    mechanisms, mechanisms_cbind, my_pid, conn->connect_uid);
+	binary_to_hex_append(str, conn->cookie, sizeof(conn->cookie));
+	str_append(str, "\nDONE\n");
+
+	o_stream_nsend(conn->conn.output, str_data(str), str_len(str));
+	conn->handshake_finished = TRUE;
 }
 
 static int auth_client_handshake_args(struct connection *conn, const char *const *args)
@@ -209,6 +238,7 @@ static int auth_client_handshake_args(struct connection *conn, const char *const
 		}
 		conn->minor_version = minor_version;
 		conn->version_received = TRUE;
+		auth_client_finish_handshake(aconn);
 		return 0;
 	} else if (conn->version_received && strcmp(args[0], "CPID") == 0) {
 		if (auth_client_input_cpid(aconn, args + 1) < 0)
@@ -271,7 +301,7 @@ static void auth_client_connection_destroy(struct connection *conn)
 			  connection_disconnect_reason(conn));
 	}
 
-	connection_disconnect(conn);
+	connection_deinit(conn);
 	master_service_client_connection_destroyed(master_service);
 	auth_client_connection_unref(&aconn);
 }
@@ -295,11 +325,10 @@ static const struct connection_settings auth_client_connection_set = {
 };
 
 void auth_client_connection_create(struct auth *auth, int fd, const char *name,
-				   bool login_requests, bool token_auth)
+				   enum auth_client_connection_flags flags)
 {
 	static unsigned int connect_uid_counter = 0;
 	struct auth_client_connection *conn;
-	const char *mechanisms;
 	string_t *str;
 
 	if (auth_client_connections == NULL) {
@@ -312,29 +341,24 @@ void auth_client_connection_create(struct auth *auth, int fd, const char *name,
 	conn->auth = auth;
 	conn->refcount = 1;
 	conn->connect_uid = ++connect_uid_counter;
-	conn->login_requests = login_requests;
-	conn->token_auth = token_auth;
+	conn->login_requests =
+		(flags & AUTH_CLIENT_CONNECTION_FLAG_LOGIN_REQUESTS) != 0;
+	conn->token_auth =
+		(flags & AUTH_CLIENT_CONNECTION_FLAG_TOKEN_AUTH) != 0;
 	conn->conn.event_parent = auth_event;
 	random_fill(conn->cookie, sizeof(conn->cookie));
 
 	connection_init_server(auth_client_connections, &conn->conn, name, fd, fd);
 
-	if (conn->token_auth) {
-		mechanisms = t_strconcat("MECH\t",
-			mech_dovecot_token.mech_name, "\tprivate\n", NULL);
-	} else {
-		mechanisms = str_c(auth->reg->handshake);
-	}
-
 	/* send fields */
-	str = t_str_new(128);
-	str_printfa(str, "VERSION\t%u\t%u\n%sSPID\t%s\nCUID\t%u\nCOOKIE\t",
+	str = t_str_new(32);
+	str_printfa(str, "VERSION\t%u\t%u\n",
 		    conn->conn.list->set.major_version,
-		    conn->conn.list->set.minor_version,
-		    mechanisms, my_pid, conn->connect_uid);
-	binary_to_hex_append(str, conn->cookie, sizeof(conn->cookie));
-	str_append(str, "\nDONE\n");
+		    conn->conn.list->set.minor_version);
 	o_stream_nsend(conn->conn.output, str_data(str), str_len(str));
+
+	if ((flags & AUTH_CLIENT_CONNECTION_FLAG_LEGACY) != 0)
+		auth_client_finish_handshake(conn);
 }
 
 static void auth_client_connection_unref(struct auth_client_connection **_conn)
@@ -346,7 +370,6 @@ static void auth_client_connection_unref(struct auth_client_connection **_conn)
 		return;
 
 	auth_client_connection_destroy(&conn->conn);
-	connection_deinit(&conn->conn);
 	i_free(conn);
 }
 

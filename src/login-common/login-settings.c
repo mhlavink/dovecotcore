@@ -2,7 +2,9 @@
 
 #include "login-common.h"
 #include "settings-parser.h"
+#include "master-service-settings.h"
 #include "login-settings.h"
+#include "settings-parser.h"
 
 #include <unistd.h>
 
@@ -13,14 +15,14 @@ static bool login_settings_check(void *_set, pool_t pool, const char **error_r);
 	SETTING_DEFINE_STRUCT_##type(#name, name, struct login_settings)
 
 static const struct setting_define login_setting_defines[] = {
-	DEF(STR, login_trusted_networks),
-	DEF(STR, login_source_ips),
-	DEF(STR_VARS_HIDDEN, login_greeting),
-	DEF(STR, login_log_format_elements),
-	DEF(STR, login_log_format),
-	DEF(STR_VARS, login_proxy_notify_path),
+	DEF(BOOLLIST, login_trusted_networks),
+	DEF(BOOLLIST, login_source_ips),
+	DEF(STR_HIDDEN, login_greeting),
+	DEF(STR_NOVARS, login_log_format_elements),
+	DEF(STR_NOVARS, login_log_format),
+	DEF(STR, login_proxy_notify_path),
 	DEF(STR, login_plugin_dir),
-	DEF(STR, login_plugins),
+	DEF(BOOLLIST, login_plugins),
 	DEF(TIME_MSECS, login_proxy_timeout),
 	DEF(UINT, login_proxy_max_reconnects),
 	DEF(TIME, login_proxy_max_disconnect_delay),
@@ -43,17 +45,21 @@ static const struct setting_define login_setting_defines[] = {
 };
 
 static const struct login_settings login_default_settings = {
-	.login_trusted_networks = "",
-	.login_source_ips = "",
+	.login_trusted_networks = ARRAY_INIT,
+	.login_source_ips = ARRAY_INIT,
 	.login_greeting = PACKAGE_NAME" ready.",
-	.login_log_format_elements = "user=<%u> method=%m rip=%r lip=%l mpid=%e %c session=<%{session}>",
-	.login_log_format = "%$: %s",
+	.login_log_format_elements = "user=<%{user}> method=%{mechanism} rip=%{remote_ip} lip=%{local_ip} mpid=%{mail_pid} %{secured} session=<%{session}>",
+	.login_log_format = "%{message}: %{elements}",
 	.login_proxy_notify_path = "proxy-notify",
 	.login_plugin_dir = MODULEDIR"/login",
-	.login_plugins = "",
+	.login_plugins = ARRAY_INIT,
 	.login_proxy_timeout = 30*1000,
 	.login_proxy_max_reconnects = 3,
+#ifdef DOVECOT_PRO_EDITION
+	.login_proxy_max_disconnect_delay = 30,
+#else
 	.login_proxy_max_disconnect_delay = 0,
+#endif
 	.login_proxy_rawlog_dir = "",
 	.login_socket_path = "",
 
@@ -63,7 +69,7 @@ static const struct login_settings login_default_settings = {
 	.auth_allow_cleartext = FALSE,
 	.auth_verbose = FALSE,
 	.auth_debug = FALSE,
-	.verbose_proctitle = FALSE,
+	.verbose_proctitle = VERBOSE_PROCTITLE_DEFAULT,
 
 	.ssl = "yes:no:required",
 

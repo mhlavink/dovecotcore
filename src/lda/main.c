@@ -18,7 +18,6 @@
 #include "message-address.h"
 #include "smtp-address.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "mail-storage-service.h"
@@ -356,24 +355,6 @@ int main(int argc, char *argv[])
 	bool stderr_rejection = FALSE;
 	int ret, c;
 
-	if (getuid() != geteuid() && geteuid() == 0) {
-		/* running setuid - don't allow this if the binary is
-		   executable by anyone */
-		struct stat st;
-
-		if (stat(argv[0], &st) < 0) {
-			fprintf(stderr, "stat(%s) failed: %s\n",
-				argv[0], strerror(errno));
-			return EX_TEMPFAIL;
-		} else if ((st.st_mode & 1) != 0 && (st.st_mode & 04000) != 0) {
-			fprintf(stderr, "%s must not be both world-executable "
-				"and setuid-root. This allows root exploits. "
-				"See https://doc.dovecot.org/configuration_manual/protocols/lda/#multiple-uids\n",
-				argv[0]);
-			return EX_TEMPFAIL;
-		}
-	}
-
 	i_set_failure_exit_callback(failure_exit_callback);
 
 	master_service = master_service_init("lda",
@@ -472,9 +453,6 @@ int main(int argc, char *argv[])
 		i_fatal_status(EX_USAGE, "Unknown argument: %s", argv[optind]);
 	}
 
-	if (master_service_settings_read_simple(master_service, &error) < 0)
-		i_fatal("%s", error);
-
 	process_euid = geteuid();
 	if ((service_flags & MAIL_STORAGE_SERVICE_FLAG_USERDB_LOOKUP) != 0)
 		;
@@ -500,10 +478,22 @@ int main(int argc, char *argv[])
 				       "Couldn't lookup our username (uid=%s)",
 				       dec2str(process_euid));
 		}
+		struct settings_root *set_root =
+			master_service_get_settings_root(master_service);
+		settings_root_override(set_root, "mail_home", home,
+				       SETTINGS_OVERRIDE_TYPE_DEFAULT);
 	} else {
 		i_fatal_status(EX_USAGE,
 			"destination user parameter (-d user) not given");
 	}
+	struct master_service_settings_input set_input = {
+		.preserve_user = TRUE,
+		.preserve_home = TRUE,
+	};
+	struct master_service_settings_output set_output;
+	if (master_service_settings_read(master_service, &set_input,
+					 &set_output, &error) < 0)
+		i_fatal("%s", error);
 	master_service_init_finish(master_service);
 
 	dinput.mail_from = mail_from;
@@ -519,7 +509,6 @@ int main(int argc, char *argv[])
 		event_add_str(event, "rcpt_to",
 			      smtp_address_encode(final_rcpt_to));
 	}
-	dinput.event_parent = event;
 
 	i_zero(&service_input);
 	service_input.service = "lda";
@@ -544,6 +533,7 @@ int main(int argc, char *argv[])
 #ifdef SIGXFSZ
 		lib_signals_ignore(SIGXFSZ, TRUE);
 #endif
+		dinput.event_parent = dinput.rcpt_user->event;
 		if (*user_source != '\0') {
 			e_debug(dinput.rcpt_user->event,
 				"userdb lookup skipped, username taken from %s",

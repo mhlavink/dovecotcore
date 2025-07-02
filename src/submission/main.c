@@ -13,16 +13,15 @@
 #include "restrict-access.h"
 #include "fd-util.h"
 #include "settings.h"
-#include "settings-parser.h"
 #include "master-service.h"
 #include "master-service-settings.h"
 #include "login-server.h"
 #include "master-service-settings.h"
 #include "master-interface.h"
 #include "master-admin-client.h"
-#include "var-expand.h"
 #include "mail-error.h"
 #include "mail-user.h"
+#include "mailbox-attribute.h"
 #include "mail-storage-service.h"
 #include "smtp-server.h"
 #include "smtp-client.h"
@@ -31,8 +30,6 @@
 
 #include <stdio.h>
 #include <unistd.h>
-
-#define DNS_CLIENT_SOCKET_PATH "dns-client"
 
 #define LMTP_MASTER_FIRST_LISTEN_FD 3
 
@@ -162,7 +159,7 @@ client_create_from_input(const struct mail_storage_service_input *input,
 	const unsigned char *data;
 	size_t data_len;
 
-	event = event_create(NULL);
+	event = event_create(input->event_parent);
 	event_add_category(event, &event_category_submission);
 	event_add_fields(event, (const struct event_add_field []){
 		{ .key = "user", .value = input->username },
@@ -213,6 +210,15 @@ client_create_from_input(const struct mail_storage_service_input *input,
 		event_unref(&event);
 		return -1;
 	}
+	int ret = mailbox_attribute_dict_is_enabled(mail_user, error_r);
+	if (ret < 0) {
+		send_error(fd_out, event, my_hostname,
+			"4.7.0", MAIL_ERRSTR_CRITICAL_MSG);
+		mail_user_deinit(&mail_user);
+		event_unref(&event);
+		return -1;
+	}
+	bool have_mailbox_attribute_dict = ret > 0;
 
 	/* parse input data */
 	data = NULL;
@@ -228,14 +234,14 @@ client_create_from_input(const struct mail_storage_service_input *input,
 			/* nothing to do */
 		}
 
-		/* NOTE: actually, pipelining the AUTH command is stricly
+		/* NOTE: actually, pipelining the AUTH command is strictly
 		         speaking not allowed, but we support it anyway.
 		 */
 	}
 
 	(void)client_create(fd_in, fd_out, event, mail_user,
 			    set, helo, &proxy_data, data, data_len,
-			    no_greeting);
+			    no_greeting, have_mailbox_attribute_dict);
 	event_unref(&event);
 	return 0;
 }
@@ -285,6 +291,7 @@ login_request_finished(const struct login_server_request *request,
 	input.username = username;
 	input.userdb_fields = extra_fields;
 	input.session_id = request->session_id;
+	input.event_parent = master_service_get_event(master_service);
 	if ((flags & LOGIN_REQUEST_FLAG_END_CLIENT_SECURED_TLS) != 0)
 		input.end_client_tls_secured = TRUE;
 
@@ -349,7 +356,6 @@ int main(int argc, char *argv[])
 	struct smtp_server_settings smtp_server_set;
 	struct smtp_client_settings smtp_client_set;
 	const char *username = NULL, *auth_socket_path = "auth-master";
-	const char *tmp_socket_path;
 	const char *error;
 	int c;
 
@@ -434,14 +440,10 @@ int main(int argc, char *argv[])
 	smtp_server = smtp_server_init(&smtp_server_set);
 	smtp_server_command_register(smtp_server, "BURL", cmd_burl, 0);
 
-	if (t_abspath(DNS_CLIENT_SOCKET_PATH, &tmp_socket_path, &error) < 0)
-		i_fatal("t_abspath(%s) failed: %s", DNS_CLIENT_SOCKET_PATH, error);
-
 	/* initialize SMTP client */
 	i_zero(&smtp_client_set);
 	smtp_client_set.my_hostname = my_hostdomain();
 	smtp_client_set.debug = submission_debug;
-	smtp_client_set.dns_client_socket_path = tmp_socket_path;
 	smtp_client = smtp_client_init(&smtp_client_set);
 
 	if (!IS_STANDALONE())

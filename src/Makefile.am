@@ -11,11 +11,13 @@ endif
 LIBDOVECOT_SUBDIRS = \
 	lib-test \
 	lib \
+	lib-var-expand \
+	lib-dns \
 	lib-settings \
 	lib-otp \
 	lib-auth \
 	lib-auth-client \
-	lib-dns \
+	lib-dns-client \
 	lib-ssl-iostream \
 	lib-master \
 	lib-login \
@@ -33,7 +35,8 @@ LIBDOVECOT_SUBDIRS = \
 	lib-imap \
 	lib-imap-storage \
 	lib-oauth2 \
-	lib-doveadm
+	lib-doveadm \
+	lib-var-expand-crypt
 
 SUBDIRS = \
 	$(LIBDOVECOT_SUBDIRS) \
@@ -41,7 +44,7 @@ SUBDIRS = \
 	lib-dovecot \
 	$(LIB_LDAP) \
 	$(LIB_LUA) \
-	lib-fts \
+	lib-language \
 	lib-imap-client \
 	lib-imap-urlauth \
 	lib-compression \

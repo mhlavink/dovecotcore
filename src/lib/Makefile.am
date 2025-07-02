@@ -19,7 +19,7 @@ YACC=/bin/false
 # of lex and yacc (or bison in yacc-compatibility mode).  Both flex and
 # bison can handle properly naming the generated files, and it is simpler
 # and cleaner to make this rule ourselves instead of working around ylwrap
-# and yywrap's antiquated notion of what is hapenning.
+# and yywrap's antiquated notion of what is happening.
 .l.c:
 	$(AM_V_GEN)$(FLEX) -o $@ $<
 
@@ -34,7 +34,7 @@ $(srcdir)/UnicodeData.txt:
 	$(AM_V_at)test -f $@ || $(WGET) -nv -O $@ https://dovecot.org/res/UnicodeData.txt
 
 $(srcdir)/unicodemap.c: $(srcdir)/unicodemap.pl $(srcdir)/UnicodeData.txt
-	$(AM_V_GEN)perl $(srcdir)/unicodemap.pl < $(srcdir)/UnicodeData.txt > $@
+	$(AM_V_GEN)$(PERL) $(srcdir)/unicodemap.pl < $(srcdir)/UnicodeData.txt > $@
 
 liblib_la_LIBADD = $(LIBUNWIND_LIBS)
 liblib_la_SOURCES = \
@@ -134,6 +134,7 @@ liblib_la_SOURCES = \
 	mempool-allocfree.c \
 	mempool-alloconly.c \
 	mempool-datastack.c \
+	mempool-null.c \
 	mempool-system.c \
 	mempool-unsafe-datastack.c \
 	mkdir-parents.c \
@@ -195,8 +196,6 @@ liblib_la_SOURCES = \
 	uri-util.c \
 	utc-offset.c \
 	utc-mktime.c \
-	var-expand.c \
-	var-expand-if.c \
 	wildcard-match.c \
 	write-full.c
 
@@ -219,6 +218,7 @@ headers = \
 	cpu-limit.h \
 	crc32.h \
 	data-stack.h \
+	doc.h \
 	eacces-error.h \
 	env-util.h \
 	event-filter.h \
@@ -356,8 +356,6 @@ headers = \
 	uri-util.h \
 	utc-offset.h \
 	utc-mktime.h \
-	var-expand.h \
-	var-expand-private.h \
 	wildcard-match.h \
 	write-full.h
 
@@ -464,7 +462,6 @@ test_lib_SOURCES = \
 	test-unichar.c \
 	test-utc-mktime.c \
 	test-uri.c \
-	test-var-expand.c \
 	test-wildcard-match.c
 
 test_headers = \

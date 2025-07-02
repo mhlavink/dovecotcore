@@ -22,8 +22,14 @@ struct anvil_client_callbacks {
 	bool (*command)(const char *cmd, const char *const *args);
 };
 
-/* reply=NULL if query failed */
-typedef void anvil_callback_t(const char *reply, void *context);
+struct anvil_reply {
+	/* non-NULL if query failed */
+	const char *error;
+	/* non-NULL if query succeeded */
+	const char *reply;
+};
+
+typedef void anvil_callback_t(const struct anvil_reply *reply, void *context);
 
 /* If reconnect_callback is specified, it's called when connection is lost.
    If the callback returns FALSE, reconnection isn't attempted. */
@@ -38,8 +44,7 @@ int anvil_client_connect(struct anvil_client *client, bool retry);
 
 /* Send a query to anvil, expect a one line reply. The returned pointer can be
    used to abort the query later. It becomes invalid when callback is
-   called (= the callback must not call it). Returns NULL if the query couldn't
-   be sent. */
+   called (= the callback must not call it). */
 struct anvil_query *
 anvil_client_query(struct anvil_client *client, const char *query,
 		   unsigned int timeout_msecs,
@@ -48,7 +53,7 @@ anvil_client_query(struct anvil_client *client, const char *query,
 	anvil_client_query(client, query, timeout_msecs, \
 		(anvil_callback_t *)(callback), 1 ? (context) : \
 		CALLBACK_TYPECHECK(callback, \
-			void (*)(const char *, typeof(context))))
+			void (*)(const struct anvil_reply *, typeof(context))))
 void anvil_client_query_abort(struct anvil_client *client,
 			      struct anvil_query **query);
 /* Send a command to anvil, don't expect any replies. */

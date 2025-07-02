@@ -443,10 +443,10 @@ maildir_list_iter_init(struct mailbox_list *_list, const char *const *patterns,
 	ctx->prefix_char = strcmp(_list->name, MAILBOX_LIST_NAME_IMAPDIR) == 0 ?
 		'\0' : list->sep;
 
-	if (_list->set.iter_from_index_dir)
-		ctx->dir = _list->set.index_dir;
+	if (_list->mail_set->mailbox_list_iter_from_index_dir)
+		ctx->dir = _list->mail_set->mail_index_path;
 	else
-		ctx->dir = _list->set.root_dir;
+		ctx->dir = _list->mail_set->mail_path;
 
 	if ((flags & MAILBOX_LIST_ITER_SELECT_SUBSCRIBED) != 0) {
 		/* Listing only subscribed mailboxes.

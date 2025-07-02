@@ -9,9 +9,7 @@
 #include "ostream.h"
 #include "randgen.h"
 #include "hostpid.h"
-#include "safe-memset.h"
 #include "str.h"
-#include "strescape.h"
 #include "master-service.h"
 #include "pop3-protocol.h"
 #include "client.h"
@@ -259,6 +257,7 @@ static void pop3_client_notify_auth_ready(struct client *client)
 	struct pop3_client *pop3_client = (struct pop3_client *)client;
 	string_t *str;
 
+	i_assert(client->io == NULL);
 	client->io = io_add_istream(client->input, client_input, client);
 
 	str = t_str_new(128);
@@ -391,6 +390,10 @@ static struct login_binary pop3_login_binary = {
 
 	.sasl_support_final_reply = FALSE,
 	.anonymous_login_acceptable = TRUE,
+
+	.application_protocols = (const char* const[]) {
+		"pop3", NULL
+	},
 };
 
 int main(int argc, char *argv[])

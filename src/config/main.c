@@ -29,8 +29,8 @@ int main(int argc, char *argv[])
 	restrict_access_by_env(RESTRICT_ACCESS_FLAG_ALLOW_ROOT, NULL);
 	restrict_access_allow_coredumps(TRUE);
 
-	set_config_binary(TRUE);
-	config_parse_load_modules();
+	settings_set_config_binary(SETTINGS_BINARY_CONFIG);
+	config_parse_load_modules(FALSE);
 
 	config_connections_init();
 
@@ -42,7 +42,6 @@ int main(int argc, char *argv[])
 	master_service_run(master_service, client_connected);
 	config_connections_destroy_all();
 
-	old_settings_deinit_global();
 	module_dir_unload(&modules);
 	config_parser_deinit();
 	master_service_deinit(&master_service);

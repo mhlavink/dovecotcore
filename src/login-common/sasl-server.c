@@ -15,7 +15,7 @@
 #include "anvil-client.h"
 #include "auth-client.h"
 #include "iostream-ssl.h"
-#include "master-service-ssl-settings.h"
+#include "master-interface.h"
 #include "login-client.h"
 #include "client-common.h"
 
@@ -32,13 +32,41 @@ struct anvil_request {
 };
 
 static bool
-sasl_server_filter_mech(struct client *client, struct auth_mech_desc *mech)
+sasl_server_filter_mech(struct client *client, struct auth_mech_desc *mech,
+			bool advertize)
 {
+	/* Allow plugins to filter and amend available mechanisms. */
 	if (client->v.sasl_filter_mech != NULL &&
 	    !client->v.sasl_filter_mech(client, mech))
 		return FALSE;
-	return ((mech->flags & MECH_SEC_ANONYMOUS) == 0 ||
-		login_binary->anonymous_login_acceptable);
+	/* Disable anonymous mechanisms unless the protocol explicitly
+	   allows anonymous login when configured. */
+	if ((mech->flags & MECH_SEC_ANONYMOUS) != 0 &&
+	    !login_binary->anonymous_login_acceptable)
+		return FALSE;
+	/* Don't advertize private mechanisms. */
+	if (advertize && (mech->flags & MECH_SEC_PRIVATE) != 0)
+		return FALSE;
+	/* Only advertize this mechanism if either:
+	   a) transport is secured
+	   b) auth mechanism isn't plaintext
+	   c) we allow insecure authentication
+
+	   We don't completely disable mechanisms for which none of these points
+	   apply, because we want to return a specific warning to the client
+	   when such a mechanism is used.
+	*/
+	if (advertize && !client->connection_secured &&
+	    !client->set->auth_allow_cleartext &&
+	    (mech->flags & MECH_SEC_PLAINTEXT) != 0)
+		return FALSE;
+	/* Disable mechanisms that require channel binding when there is no TLS
+	   layer (yet). */
+	if (client->ssl_iostream == NULL &&
+	    (mech->flags & MECH_SEC_CHANNEL_BINDING) != 0)
+		return FALSE;
+
+	return TRUE;
 }
 
 const struct auth_mech_desc *
@@ -50,7 +78,7 @@ sasl_server_get_advertised_mechs(struct client *client, unsigned int *count_r)
 
 	mech = auth_client_get_available_mechs(auth_client, &count);
 	if (count == 0 || (!client->connection_secured &&
-			   strcmp(client->ssl_set->ssl, "required") == 0)) {
+			   strcmp(client->ssl_server_set->ssl, "required") == 0)) {
 		*count_r = 0;
 		return NULL;
 	}
@@ -59,17 +87,10 @@ sasl_server_get_advertised_mechs(struct client *client, unsigned int *count_r)
 	for (i = j = 0; i < count; i++) {
 		struct auth_mech_desc fmech = mech[i];
 
-		if (!sasl_server_filter_mech(client, &fmech))
+		if (!sasl_server_filter_mech(client, &fmech, TRUE))
 			continue;
 
-		/* a) transport is secured
-		   b) auth mechanism isn't plaintext
-		   c) we allow insecure authentication
-		*/
-		if ((fmech.flags & MECH_SEC_PRIVATE) == 0 &&
-		    (client->connection_secured || client->set->auth_allow_cleartext ||
-		     (fmech.flags & MECH_SEC_PLAINTEXT) == 0))
-			ret_mech[j++] = fmech;
+		ret_mech[j++] = fmech;
 	}
 	*count_r = j;
 	return ret_mech;
@@ -86,7 +107,7 @@ sasl_server_find_available_mech(struct client *client, const char *name)
 		return NULL;
 
 	fmech = *mech;
-	if (!sasl_server_filter_mech(client, &fmech))
+	if (!sasl_server_filter_mech(client, &fmech, FALSE))
 		return NULL;
 	if (memcmp(&fmech, mech, sizeof(fmech)) != 0) {
 		struct auth_mech_desc *nmech = t_new(struct auth_mech_desc, 1);
@@ -216,7 +237,8 @@ static int master_send_request(struct anvil_request *anvil_request)
 }
 
 static void ATTR_NULL(1)
-anvil_lookup_callback(const char *reply, struct anvil_request *req)
+anvil_lookup_callback(const struct anvil_reply *reply,
+		      struct anvil_request *req)
 {
 	struct client *client = req->client;
 	const struct login_settings *set = client->set;
@@ -228,12 +250,19 @@ anvil_lookup_callback(const char *reply, struct anvil_request *req)
 	client->anvil_request = NULL;
 
 	conn_count = 0;
-	if (reply != NULL && str_to_uint(reply, &conn_count) < 0)
-		i_fatal("Received invalid reply from anvil: %s", reply);
+	if (reply == NULL)
+		;
+	else if (reply->error != NULL) {
+		e_error(client->event, "mail_max_userip_connections lookup failed - skipping: %s",
+			reply->error);
+	} else if (str_to_uint(reply->reply, &conn_count) < 0)
+		i_fatal("Received invalid reply from anvil: %s", reply->reply);
 
 	/* reply=NULL if we didn't need to do anvil lookup,
-	   or if the anvil lookup failed. allow failed anvil lookups in. */
-	if (reply == NULL || conn_count < set->mail_max_userip_connections) {
+	   reply->error != NULL if the anvil lookup failed.
+	   Allow failed anvil lookups in. */
+	if (reply == NULL || reply->error != NULL ||
+	    conn_count < set->mail_max_userip_connections) {
 		if (master_send_request(req) < 0)
 			sasl_reply = SASL_SERVER_REPLY_MASTER_FAILED;
 		errmsg = NULL; /* client will see internal error */
@@ -317,6 +346,16 @@ args_parse_user(struct client *client, const char *key, const char *value)
 		return FALSE;
 	}
 	return TRUE;
+}
+
+static int
+sasl_server_channel_binding(const char *type, void *context,
+			    const buffer_t **data_r, const char **error_r)
+{
+	struct client *client = context;
+
+	return ssl_iostream_get_channel_binding(client->ssl_iostream,
+						type, data_r, error_r);
 }
 
 static void
@@ -444,7 +483,7 @@ get_cert_username(struct client *client, const char **username_r,
 	}
 
 	/* get peer name */
-	const char *username = ssl_iostream_get_peer_name(client->ssl_iostream);
+	const char *username = ssl_iostream_get_peer_username(client->ssl_iostream);
 
 	/* if we wanted peer name, but it was not there, fail */
 	if (client->set->auth_ssl_username_from_cert &&
@@ -466,7 +505,7 @@ int sasl_server_auth_request_info_fill(struct client *client,
 	const char *error;
 
 	i_zero(info_r);
-	info_r->service = login_binary->protocol;
+	info_r->protocol = login_binary->protocol;
 	info_r->session_id = client_get_session_id(client);
 
 	if (!get_cert_username(client, &info_r->cert_username, &error)) {
@@ -489,6 +528,20 @@ int sasl_server_auth_request_info_fill(struct client *client,
 		if (ja3 != NULL) {
 			md5_get_digest(ja3, strlen(ja3), hash);
 			info_r->ssl_ja3_hash = binary_to_hex(hash, sizeof(hash));
+		}
+
+		if (*client->ssl_set->ssl_peer_certificate_fingerprint_hash != '\0') {
+			int ret = ssl_iostream_get_peer_cert_fingerprint(
+				client->ssl_iostream, &info_r->ssl_client_cert_fp,
+				&info_r->ssl_client_cert_pubkey_fp,
+				&error);
+			if (ret < 0) {
+				e_error(client->event,
+					"Cannot get client certificate fingerprints: %s",
+					error);
+				*client_error_r = "Unable to validate certificate";
+				return -1;
+			}
 		}
 	}
 	info_r->flags = client_get_auth_flags(client);
@@ -569,6 +622,9 @@ void sasl_server_auth_begin(struct client *client, const char *mech_name,
 	client->auth_request =
 		auth_client_request_new(auth_client, &info,
 					authenticate_callback, client);
+	auth_client_request_enable_channel_binding(client->auth_request,
+						   sasl_server_channel_binding,
+						   client);
 }
 
 static void ATTR_NULL(2, 3)
